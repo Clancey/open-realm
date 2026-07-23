@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Open Realm Tabletop Fixture</string>
+	<key>CFBundleExecutable</key>
+	<string>OpenRealmTabletopFixture</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.openrealm.tabletop.fixture</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>OpenRealmTabletopFixture</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>XROS</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>MinimumOSVersion</key>
+	<string>2.0</string>
+	<key>NSHandsTrackingUsageDescription</key>
+	<string>Open Realm uses hand input to select and move tabletop fixture entities.</string>
+	<key>NSWorldSensingUsageDescription</key>
+	<string>Open Realm places its fixture board in the surrounding immersive space.</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+	</dict>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>7</integer>
+	</array>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+</dict>
+</plist>

@@ -1,12 +1,84 @@
-# visionOS tabletop runtime
+# visionOS tabletop runtime and fixture shell
 
 Layer 1 establishes a callable, statically-linked, visionOS-compatible
 Warcraft III engine runtime that a later layer can host from Swift/RealityKit
 without disturbing the desktop `openwarcraft3`/`opensc2` executables. This
-layer does **not** implement the SwiftUI/RealityKit tabletop UI, gameplay
-controls, multiplayer, or a later "snapshot bridge" — those are separate,
-later layers. A parallel data lane supplies the local-only build contract for
-staging legally owned Warcraft III MPQs; no retail data is committed.
+layer does **not** implement asset export/MPQ bundling, gameplay controls,
+multiplayer, or a snapshot bridge. The data layer supplies the local-only build
+contract for staging legally owned Warcraft III MPQs; no retail data is
+committed.
+
+The parallel fixture-shell sublayer under
+`platform/apple/visionos/tabletop/app/` adds a native SwiftUI launcher and
+RealityKit mixed immersive board without importing or guessing the unfinished
+snapshot/command C ABI. It proves app lifecycle, value transport, placement,
+generation deduplication, RealityKit reconciliation, and gesture scaffolding
+with bounded procedural fixtures only. It is not live-engine support.
+
+## Fixture-only Swift seam
+
+```
+TabletopSnapshotTransport (pure Swift protocol)
+        |
+FixtureSnapshotTransport (deterministic actor, temporary)
+        |
+TabletopGenerationDeduplicator (~30 Hz poll)
+        |
+TabletopSnapshotConverter (value copy + placement)
+        |
+TabletopSceneState (pure reconciliation plan)
+        |
+RealityTabletopReconciler (RealityKit ownership)
+```
+
+- Snapshot/model/reducer/placement/reconciliation/gesture files do not import
+  SwiftUI or RealityKit.
+- `TabletopSnapshotTransport.poll()` is the replacement seam for the later
+  layer-2 transport. Its returned value is deduplicated by generation and
+  converted into a separate render snapshot before publication on the main
+  actor.
+- `FixtureSnapshotTransport` emits at most 49 terrain tiles and three entities.
+  It advances generation every six polls so both deduplication paths run.
+- The launcher opens the `tabletop` mixed `ImmersiveSpace` automatically. It
+  dismisses its window only after `.opened`; cancellation and failure retain
+  an actionable Retry UI.
+- RealityKit owns the visible surface. SDL is neither a visible surface nor a
+  scene delegate on this lane.
+
+Replace the fixture actor with the layer-2 transport after that ABI lands; do
+not add C declarations to this sublayer in advance. The eventual transport
+must copy its C snapshot into the Swift value types before returning from
+`poll()`. The data lane may provide an executable
+`BZ_TABLETOP_RESOURCE_HOOK`; `build-tabletop.sh` calls it with the bundle's
+`Resources/` directory. The default build copies no MPQs or other private game
+data.
+
+### Fixture-shell build and tests
+
+```sh
+make test-visionos-tabletop-host       # pure Swift executable tests on macOS
+make visionos-tabletop-xrsimulator     # arm64 xrsimulator 2.0 app, ad-hoc signed
+make visionos-tabletop-xros            # arm64 xros 2.0 app, unsigned
+make visionos-tabletop                 # all three gates
+```
+
+The app bundle is
+`build/visionos/tabletop/<platform>/OpenRealmTabletopFixture.app` with bundle
+ID `org.openrealm.tabletop.fixture` and executable
+`OpenRealmTabletopFixture`. `verify-bundle.sh` rejects wrong deployment/device
+metadata, missing indirect-input/multiple-scene/hand/world-sensing declarations,
+SDL scene delegates, private MPQs, embedded or developer-path dynamic
+frameworks, absolute developer paths, desktop identity collisions, wrong Mach-O
+platform or minimum OS, incorrect signing/identifier binding, and non-arm64
+output. No Xcode project is used. There is currently no
+simulator launch harness: choosing or booting a Simulator device from a general
+build target cannot guarantee isolation from the user's active simulator.
+
+The direct linker embeds the generated plist in `__TEXT,__info_plist` before
+signing. The verifier requires that section, an exact signing identifier, and
+`codesign --verify --deep --strict`; modifying the external plist after signing
+then makes strict verification fail even though current `codesign -d` output
+describes this direct-toolchain bundle as `Info.plist=not bound`.
 
 ## Architecture summary
 
@@ -305,25 +377,24 @@ output, or eventually running a built binary):
 
 ## What this layer does not do
 
-- No SwiftUI/RealityKit UI (later layer).
-- No snapshot bridge / entity-state serialization (later layer).
-- No proprietary Warcraft III data in source control. The data helper only
-  stages locally owned MPQs into a caller-owned build directory; this layer
-  still does not create, sign, or launch an app bundle.
-- No gameplay input/controls and no multiplayer/networking beyond what
-  `common/net.c` already provides headlessly.
+- No live-engine SwiftUI/RealityKit integration: the native UI renders only
+  the fixture transport described above.
+- No snapshot bridge, entity-state serialization, or command ABI (parallel
+  transport layer).
+- No proprietary Warcraft III data in source control. The data helper stages
+  exactly the required locally owned MPQs into a caller-owned build directory;
+  the fixture bundle ships no private game data.
+- No gameplay command transport; selection and dragging affect local fixture
+  entities only. No multiplayer/networking beyond what `common/net.c` already
+  provides headlessly.
 - No SDL/OpenGL window, no SDL input polling, no Xcode project.
-- No audio: `sound/s_sound.c` is not linked into the tabletop archive at
-  all (see `platform/apple/visionos/tabletop/null/cl_null.c`'s header
-  comment) — not even a null/dummy backend existed yet in Layer 1. *(Layer 2
-  adds an explicit, named, log-once-only no-op audio backend,
-  `platform/apple/visionos/tabletop/client/s_tabletop_null.c` — see the
-  "Layer 2" section below. This bullet describes the original Layer 1-only
-  state.)*
-- No code signing: the `xros` (device) static targets are deliberately
-  unsigned. Producing a signed, installable device build is an external
-  gate (a valid Apple provisioning profile/signing identity) outside this
-  layer's scope — see the `xros`/`xros-bridge` build notes above.
+- No audio output: Layer 2 supplies the explicit, log-once no-op backend
+  `platform/apple/visionos/tabletop/client/s_tabletop_null.c`.
+- No device code signing: the `xros` static targets and fixture app are
+  deliberately unsigned; the xrsimulator fixture app is ad-hoc signed.
+  Producing an installable device build requires an external provisioning
+  profile/signing identity.
+
 # Layer 2: real headless client + snapshot/command transport
 
 Layer 2 replaces Layer 1's link-smoke-only null client with the **real**
