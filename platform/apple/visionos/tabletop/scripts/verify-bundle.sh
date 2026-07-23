@@ -79,6 +79,13 @@ if /usr/bin/strings "$BIN" | grep -Eq '/Users/|/Volumes/|/Applications/Xcode'; t
     echo "absolute developer path found in tabletop executable" >&2
     exit 1
 fi
+xcrun nm "$BIN" > "$TMP/symbols"
+for SYMBOL in _BZ_TT_Latest _BZ_TT_PostSelect '_OBJC_CLASS_$_BZTabletopBridge'; do
+    if ! grep -Fq "$SYMBOL" "$TMP/symbols"; then
+        echo "live tabletop symbol is not linked: $SYMBOL" >&2
+        exit 1
+    fi
+done
 if /usr/libexec/PlistBuddy -c "Print :UIApplicationSceneManifest:UISceneConfigurations" "$PLIST" \
         > "$TMP/scene-configurations" 2>/dev/null &&
         grep -Eiq 'SDL.*SceneDelegate|SDLUIKitDelegate' "$TMP/scene-configurations"; then

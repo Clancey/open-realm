@@ -1,0 +1,4 @@
+module OpenRealmTabletopBridge {
+    umbrella header "bz_tabletop_swift.h"
+    export *
+}

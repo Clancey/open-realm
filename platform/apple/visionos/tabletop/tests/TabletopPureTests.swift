@@ -2,12 +2,15 @@
 enum TabletopPureTests {
     private static var failures = 0
 
-    static func main() {
+    static func main() async {
         testLauncherReduction()
         testGenerationDeduplication()
         testPlacement()
         testFixtureConversionAndReconciliation()
+        testWorldConversion()
         testGestureTerminalSuppression()
+        await testFixtureCommands()
+        await testUnavailableTransport()
         guard failures == 0 else {
             print("TabletopPureTests: \(failures) failure(s)")
             fatalError("TabletopPureTests failed")
@@ -76,5 +79,68 @@ enum TabletopPureTests {
         expect(!gate.accept(.ended) && !gate.accept(.cancelled) && !gate.accept(.changed),
                "late and duplicate terminal traffic is suppressed")
         expect(gate.accept(.began) && gate.accept(.cancelled), "new gesture resets the terminal gate")
+    }
+
+    private static func testWorldConversion() {
+        let entities = [
+            TabletopEntitySnapshot(id: 1, kind: .unit, position: TabletopVector3(x: 10, y: 2, z: 20),
+                                   heading: 0, selected: false),
+            TabletopEntitySnapshot(id: 2, kind: .unit, position: TabletopVector3(x: 110, y: 2, z: 20),
+                                   heading: 0, selected: false),
+        ]
+        let snapshot = TabletopSnapshot(generation: 1, terrain: [], entities: entities,
+                                        coordinateSpace: .world(nil))
+        let converted = TabletopSnapshotConverter.convert(snapshot)
+        expect(converted.entities[0].position.x == -0.54 && converted.entities[1].position.x == 0.54,
+               "live world positions normalize from copied entity bounds")
+        var state = TabletopSceneState()
+        var duplicate = converted
+        duplicate.entities.append(converted.entities[0])
+        expect(state.reconcile(duplicate).upsertedEntities.count == 2,
+               "duplicate transport IDs reconcile without trapping or inventing IDs")
+    }
+
+    private static func testFixtureCommands() async {
+        let fixture = FixtureSnapshotTransport()
+        do {
+            try await fixture.start()
+            let snapshot = try await fixture.poll()
+            let sessionID = snapshot?.sessionID ?? 0
+            try await fixture.post(.select(entityIDs: [1], observedGeneration: 2, sessionID: sessionID))
+            let count = await fixture.postedCommandCount()
+            expect(count == 1, "fixture mode preserves typed command flow")
+            for _ in 1..<256 { try await fixture.post(.cancel(observedGeneration: 2, sessionID: sessionID)) }
+            do {
+                try await fixture.post(.cancel(observedGeneration: 2, sessionID: sessionID))
+                expect(false, "fixture command queue accepted work beyond its bound")
+            } catch TabletopTransportError.commandQueueFull {
+                expect(true, "fixture command queue reports its bound")
+            } catch {
+                expect(false, "fixture queue returned the wrong error: \(error)")
+            }
+            try await fixture.start()
+            do {
+                try await fixture.post(.cancel(observedGeneration: 0, sessionID: sessionID))
+                expect(false, "fixture accepted a command from the previous session")
+            } catch TabletopTransportError.staleSession {
+                expect(true, "fixture rejects commands from a previous session")
+            } catch {
+                expect(false, "stale fixture command returned the wrong error: \(error)")
+            }
+        } catch {
+            expect(false, "fixture command unexpectedly failed: \(error)")
+        }
+    }
+
+    private static func testUnavailableTransport() async {
+        let unavailable = UnavailableTabletopTransport("bad mode")
+        do {
+            try await unavailable.start()
+            expect(false, "invalid runtime mode started silently")
+        } catch TabletopTransportError.configuration("bad mode") {
+            expect(true, "invalid runtime mode is surfaced")
+        } catch {
+            expect(false, "invalid runtime mode returned the wrong error: \(error)")
+        }
     }
 }

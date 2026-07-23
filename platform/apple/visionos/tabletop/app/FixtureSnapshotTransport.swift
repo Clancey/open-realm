@@ -1,11 +1,29 @@
-actor FixtureSnapshotTransport: TabletopSnapshotTransport {
+actor FixtureSnapshotTransport: TabletopSnapshotTransport, TabletopCommandTransport {
     private var pollCount = 0
+    private var commands: [TabletopCommand] = []
+    private var sessionID: UInt64 = 0
 
-    func poll() async throws -> TabletopSnapshot {
+    func start() async throws {
+        sessionID &+= 1
+        pollCount = 0
+        commands.removeAll(keepingCapacity: true)
+    }
+
+    func poll() async throws -> TabletopSnapshot? {
         let generation = UInt64(pollCount / 6)
         pollCount += 1
-        return FixtureSnapshotSource.snapshot(generation: generation)
+        var snapshot = FixtureSnapshotSource.snapshot(generation: generation)
+        snapshot.sessionID = sessionID
+        return snapshot
     }
+
+    func post(_ command: TabletopCommand) async throws {
+        guard command.sessionID == sessionID else { throw TabletopTransportError.staleSession }
+        guard commands.count < 256 else { throw TabletopTransportError.commandQueueFull }
+        commands.append(command)
+    }
+
+    func postedCommandCount() -> Int { commands.count }
 }
 
 enum FixtureSnapshotSource {

@@ -8,20 +8,20 @@ multiplayer, or a snapshot bridge. The data layer supplies the local-only build
 contract for staging legally owned Warcraft III MPQs; no retail data is
 committed.
 
-The parallel fixture-shell sublayer under
-`platform/apple/visionos/tabletop/app/` adds a native SwiftUI launcher and
-RealityKit mixed immersive board without importing or guessing the unfinished
-snapshot/command C ABI. It proves app lifecycle, value transport, placement,
-generation deduplication, RealityKit reconciliation, and gesture scaffolding
-with bounded procedural fixtures only. It is not live-engine support.
+The native shell under `platform/apple/visionos/tabletop/app/` adds a SwiftUI
+launcher and RealityKit mixed immersive board. Its pure Swift transport seam
+supports deterministic procedural fixtures and a thin live actor over the
+frozen Layer-2 C ABI plus the existing Objective-C++ lifecycle host. Live mode
+copies retained C snapshots into Swift values, releases the C snapshot, then
+publishes to RealityKit; it never exposes engine-owned pointers to the UI.
 
 ## Fixture-only Swift seam
 
 ```
 TabletopSnapshotTransport (pure Swift protocol)
-        |
-FixtureSnapshotTransport (deterministic actor, temporary)
-        |
+        +-- FixtureSnapshotTransport (deterministic actor)
+        +-- LiveTabletopTransport (Layer-2 C ABI + lifecycle host)
+                         |
 TabletopGenerationDeduplicator (~30 Hz poll)
         |
 TabletopSnapshotConverter (value copy + placement)
@@ -33,22 +33,30 @@ RealityTabletopReconciler (RealityKit ownership)
 
 - Snapshot/model/reducer/placement/reconciliation/gesture files do not import
   SwiftUI or RealityKit.
-- `TabletopSnapshotTransport.poll()` is the replacement seam for the later
-  layer-2 transport. Its returned value is deduplicated by generation and
-  converted into a separate render snapshot before publication on the main
-  actor.
+- `TabletopSnapshotTransport.poll()` returns copied Swift values. The session
+  polls at approximately 30 Hz, deduplicates by generation, and converts into
+  a separate render snapshot before publication on the main actor.
 - `FixtureSnapshotTransport` emits at most 49 terrain tiles and three entities.
   It advances generation every six polls so both deduplication paths run.
+- `LiveTabletopTransport` starts/stops `BZTabletopBridge`, retains with
+  `BZ_TT_Latest()`, validates `BZ_TABLETOP_ABI_VERSION`, copies map bounds and
+  every uniquely identified bounded entity, records ABI overflow and duplicate
+  slot IDs, and always releases before returning.
+  Typed `TabletopCommand` values call only the five validated `BZ_TT_Post*`
+  entry points. Tap selection uses the ABI's documented generation-zero bypass
+  because the engine publishes around 60 Hz while rendering polls around 30 Hz;
+  the Swift session ID still rejects commands crossing lifecycle restarts.
 - The launcher opens the `tabletop` mixed `ImmersiveSpace` automatically. It
   dismisses its window only after `.opened`; cancellation and failure retain
   an actionable Retry UI.
 - RealityKit owns the visible surface. SDL is neither a visible surface nor a
   scene delegate on this lane.
 
-Replace the fixture actor with the layer-2 transport after that ABI lands; do
-not add C declarations to this sublayer in advance. The eventual transport
-must copy its C snapshot into the Swift value types before returning from
-`poll()`. The data lane may provide an executable
+Fixture mode is the default. Set `BZ_TABLETOP_MODE=live` to start the engine;
+`BZ_TABLETOP_DATA_PATH` defaults to the app's `Resources/` directory, while
+optional `BZ_TABLETOP_MAP` and `BZ_TABLETOP_CONNECT` values become the normal
+engine startup arguments. An unknown mode is surfaced as an error, never
+silently demoted to fixtures. The data lane may provide an executable
 `BZ_TABLETOP_RESOURCE_HOOK`; `build-tabletop.sh` calls it with the bundle's
 `Resources/` directory. The default build copies no MPQs or other private game
 data.
@@ -70,7 +78,8 @@ metadata, missing indirect-input/multiple-scene/hand/world-sensing declarations,
 SDL scene delegates, private MPQs, embedded or developer-path dynamic
 frameworks, absolute developer paths, desktop identity collisions, wrong Mach-O
 platform or minimum OS, incorrect signing/identifier binding, and non-arm64
-output. No Xcode project is used. There is currently no
+output. It also requires the linked lifecycle class, snapshot getter, and typed
+select-post symbols. No Xcode project is used. There is currently no
 simulator launch harness: choosing or booting a Simulator device from a general
 build target cannot guarantee isolation from the user's active simulator.
 
@@ -377,16 +386,14 @@ output, or eventually running a built binary):
 
 ## What this layer does not do
 
-- No live-engine SwiftUI/RealityKit integration: the native UI renders only
-  the fixture transport described above.
-- No snapshot bridge, entity-state serialization, or command ABI (parallel
-  transport layer).
+- No raw terrain data in the live ABI: fixture mode renders its procedural
+  board, while live mode renders copied entities without inventing terrain.
 - No proprietary Warcraft III data in source control. The data helper stages
   exactly the required locally owned MPQs into a caller-owned build directory;
-  the fixture bundle ships no private game data.
-- No gameplay command transport; selection and dragging affect local fixture
-  entities only. No multiplayer/networking beyond what `common/net.c` already
-  provides headlessly.
+  fixture mode does not silently replace missing production data.
+- Tap selection posts a typed command in both modes. Dragging remains local
+  placement scaffolding until an authoritative world-point interaction design
+  lands; it does not fabricate engine coordinates.
 - No SDL/OpenGL window, no SDL input polling, no Xcode project.
 - No audio output: Layer 2 supplies the explicit, log-once no-op backend
   `platform/apple/visionos/tabletop/client/s_tabletop_null.c`.

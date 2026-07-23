@@ -7,8 +7,10 @@ final class RealityTabletopReconciler {
     private var sceneState = TabletopSceneState()
     private var tiles: [Int: ModelEntity] = [:]
     private var entities: [UInt64: ModelEntity] = [:]
+    private var latestEntities: [UInt64: TabletopRenderEntity] = [:]
     private var positionOverrides: [UInt64: SIMD3<Float>] = [:]
     private var selectionOverrides: [UInt64: Bool] = [:]
+    private var generation: UInt64?
 
     init() {
         root.name = "open-realm-fixture-board"
@@ -16,6 +18,16 @@ final class RealityTabletopReconciler {
     }
 
     func apply(_ snapshot: TabletopRenderSnapshot) {
+        var expiredOverrides = Set<UInt64>()
+        if snapshot.authoritative, generation != nil, generation != snapshot.generation {
+            expiredOverrides.formUnion(positionOverrides.keys)
+            expiredOverrides.formUnion(selectionOverrides.keys)
+            positionOverrides.removeAll()
+            selectionOverrides.removeAll()
+        }
+        generation = snapshot.generation
+        latestEntities.removeAll(keepingCapacity: true)
+        for entity in snapshot.entities { latestEntities[entity.id] = entity }
         let plan = sceneState.reconcile(snapshot)
         for id in plan.removedTileIDs { tiles.removeValue(forKey: id)?.removeFromParent() }
         for id in plan.removedEntityIDs {
@@ -25,6 +37,9 @@ final class RealityTabletopReconciler {
         }
         for tile in plan.upsertedTiles { upsert(tile, cellSize: snapshot.cellSize) }
         for entity in plan.upsertedEntities { upsert(entity, cellSize: snapshot.cellSize) }
+        for id in expiredOverrides {
+            if let entity = latestEntities[id] { upsert(entity, cellSize: snapshot.cellSize) }
+        }
     }
 
     func fixtureID(for entity: Entity) -> UInt64? {
@@ -32,10 +47,11 @@ final class RealityTabletopReconciler {
     }
 
     func setSelected(_ id: UInt64) {
-        guard let entity = entities[id] else { return }
-        let selected = entity.scale.x <= 1
-        selectionOverrides[id] = selected
-        entity.scale = selected ? SIMD3(repeating: 1.18) : .one
+        guard entities[id] != nil else { return }
+        selectionOverrides = Dictionary(uniqueKeysWithValues: entities.keys.map { ($0, $0 == id) })
+        for (entityID, entity) in entities {
+            entity.scale = entityID == id ? SIMD3(repeating: 1.18) : .one
+        }
     }
 
     func drag(_ id: UInt64, to position: SIMD3<Float>) {
@@ -61,6 +77,7 @@ final class RealityTabletopReconciler {
         case .worker: size = [cellSize * 0.30, cellSize * 0.45, cellSize * 0.30]
         case .soldier: size = [cellSize * 0.34, cellSize * 0.55, cellSize * 0.34]
         case .building: size = [cellSize * 0.72, cellSize * 0.62, cellSize * 0.72]
+        case .unit: size = [cellSize * 0.34, cellSize * 0.48, cellSize * 0.34]
         }
         let entity = entities[item.id] ?? ModelEntity()
         entity.name = "fixture-entity-\(item.id)"
@@ -88,6 +105,7 @@ final class RealityTabletopReconciler {
         case .worker: return SimpleMaterial(color: .orange, isMetallic: false)
         case .soldier: return SimpleMaterial(color: .cyan, isMetallic: true)
         case .building: return SimpleMaterial(color: .gray, isMetallic: false)
+        case .unit: return SimpleMaterial(color: .white, isMetallic: false)
         }
     }
 }
@@ -106,7 +124,10 @@ struct TabletopImmersiveView: View {
             reconciler.apply(model.renderSnapshot)
         }
         .simultaneousGesture(SpatialTapGesture().targetedToAnyEntity().onEnded { value in
-            if let id = reconciler.fixtureID(for: value.entity) { reconciler.setSelected(id) }
+            if let id = reconciler.fixtureID(for: value.entity) {
+                reconciler.setSelected(id)
+                model.select(entityID: id)
+            }
         })
         .simultaneousGesture(DragGesture(minimumDistance: 8).targetedToAnyEntity()
             .updating($dragActive) { _, active, _ in active = true }
@@ -124,7 +145,7 @@ struct TabletopImmersiveView: View {
             guard !active, let id = dragState.entityID else { return }
             _ = dragState.end(entityID: id, cancelled: true)
         }
-        .task { model.start() }
+        .task { await model.start() }
         .onDisappear { model.stop() }
         .overlay(alignment: .top) {
             if let error = model.errorMessage {

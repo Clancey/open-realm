@@ -4,6 +4,25 @@ struct TabletopVector3: Equatable, Sendable {
     var z: Float
 }
 
+struct TabletopBounds2: Equatable, Sendable {
+    var minX: Float
+    var minZ: Float
+    var maxX: Float
+    var maxZ: Float
+}
+
+enum TabletopCoordinateSpace: Equatable, Sendable {
+    case fixtureBoard
+    case world(TabletopBounds2?)
+}
+
+enum TabletopConnectionState: UInt8, Equatable, Sendable {
+    case disconnected
+    case connecting
+    case connected
+    case active
+}
+
 enum TabletopTerrainKind: UInt8, Equatable, Sendable {
     case grass
     case dirt
@@ -22,6 +41,7 @@ enum TabletopEntityKind: UInt8, Equatable, Sendable {
     case worker
     case soldier
     case building
+    case unit
 }
 
 struct TabletopEntitySnapshot: Equatable, Sendable {
@@ -36,10 +56,22 @@ struct TabletopSnapshot: Equatable, Sendable {
     var generation: UInt64
     var terrain: [TabletopTerrainTile]
     var entities: [TabletopEntitySnapshot]
+    var sessionID: UInt64 = 0
+    var coordinateSpace = TabletopCoordinateSpace.fixtureBoard
+    var connectionState = TabletopConnectionState.active
+    var entitiesOverflowCount: UInt32 = 0
+    var duplicateEntityCount: UInt32 = 0
 }
 
 protocol TabletopSnapshotTransport: Sendable {
-    func poll() async throws -> TabletopSnapshot
+    func start() async throws
+    func poll() async throws -> TabletopSnapshot?
+    func stop() async
+}
+
+extension TabletopSnapshotTransport {
+    func start() async throws {}
+    func stop() async {}
 }
 
 struct TabletopGenerationDeduplicator {

@@ -26,6 +26,13 @@ BUILD="$ROOT/build/visionos/tabletop/$PLATFORM"
 APP="$BUILD/OpenRealmTabletopFixture.app"
 EXECUTABLE=OpenRealmTabletopFixture
 SDK_PATH=$(xcrun --sdk "$SDK" --show-sdk-path)
+ENGINE="$ROOT/build/lib/visionos/$PLATFORM/libopenwarcraft3-engine.a"
+BRIDGE="$ROOT/build/lib/visionos/$PLATFORM/libopenwarcraft3-bridge.a"
+
+if [ ! -f "$ENGINE" ] || [ ! -f "$BRIDGE" ]; then
+    echo "missing layer-2 engine/bridge archives for $PLATFORM" >&2
+    exit 1
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Resources"
@@ -41,10 +48,12 @@ fi
 # shellcheck disable=SC2086
 xcrun --sdk "$SDK" swiftc -parse-as-library -O -target "$TRIPLE" -sdk "$SDK_PATH" \
     -module-name OpenRealmTabletopFixture \
+    -I "$TABLETOP/bridge" \
     -framework SwiftUI -framework RealityKit \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$APP/Info.plist" \
     $LINK_FLAGS \
     "$TABLETOP"/app/*.swift \
+    "$BRIDGE" "$ENGINE" -framework Foundation -lc++ -lpthread -lz \
     -o "$APP/$EXECUTABLE"
 
 # The data-layer lane may supply a hook later; this fixture lane deliberately copies no game archives itself.
