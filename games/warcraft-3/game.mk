@@ -125,6 +125,10 @@ TEST_SRCS := \
 	$(shell find $(WC3_TEST_DIR) -maxdepth 1 -name 'test_*.c' \
 	! -name 'test_commands.c' \
 	! -name 'test_commands_main.c' \
+	! -name 'test_bz_runtime.c' \
+	! -name 'test_bz_runtime_main.c' \
+	! -name 'test_bz_tabletop_lifecycle.c' \
+	! -name 'test_bz_tabletop_lifecycle_main.c' \
 	! -name 'test_jass_main.c' \
 	! -name 'test_main_ui.c' \
 	! -name 'test_mpq_compat.c' \
@@ -152,6 +156,8 @@ test: test-assets $(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB) | $(BIN_DIR)
 		$(RPATH) $(LDFLAGS) -lsheet -lshared -ljass -lm
 	@$(BIN_DIR)/test_openwarcraft3$(EXE_EXT)
 	@$(MAKE) test-commands
+	@$(MAKE) test-bz-runtime
+	@$(MAKE) test-bz-tabletop-lifecycle
 	@$(MAKE) test-sc2
 	@$(MAKE) test-wow-appearance
 	@$(MAKE) test-wow-combat
@@ -160,6 +166,8 @@ test: test-assets $(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB) | $(BIN_DIR)
 	@$(MAKE) test-ui
 
 $(eval $(call test_schema,test-commands,test-assets $(SHARED_LIB) $(SHEET_LIB),$(TEST_CFLAGS),$(BIN_DIR)/test_commands$(EXE_EXT),$(WC3_TEST_DIR)/test_commands_main.c $(WC3_TEST_DIR)/test_commands.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz,))
+$(eval $(call test_schema,test-bz-runtime,test-assets $(SHARED_LIB) $(SHEET_LIB),$(TEST_CFLAGS),$(BIN_DIR)/test_bz_runtime$(EXE_EXT),$(WC3_TEST_DIR)/test_bz_runtime_main.c $(WC3_TEST_DIR)/test_bz_runtime.c common/bz_runtime.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz,))
+$(eval $(call test_schema,test-bz-tabletop-lifecycle,test-assets $(SHARED_LIB) $(SHEET_LIB),$(TEST_CFLAGS) -Iplatform/apple/visionos/tabletop/bridge,$(BIN_DIR)/test_bz_tabletop_lifecycle$(EXE_EXT),$(WC3_TEST_DIR)/test_bz_tabletop_lifecycle_main.c $(WC3_TEST_DIR)/test_bz_tabletop_lifecycle.c platform/apple/visionos/tabletop/bridge/bz_tabletop_lifecycle.c common/bz_runtime.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz -lpthread,))
 $(eval $(call test_schema,test-jass,$(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB),$(TEST_CFLAGS),$(BIN_DIR)/test_jass$(EXE_EXT),$(WC3_TEST_DIR)/test_jass_main.c $(WC3_TEST_DIR)/test_jass.c $(WC3_TEST_DIR)/test_harness.c $(WC3_TEST_DIR)/test_client_stubs.c $(WC3_DIR)/game/g_metadata.c common/msg.c,-lsheet -lshared -ljass -lm,))
 $(eval $(call test_schema,test-ui,test-assets $(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB),$(TEST_UI_CFLAGS),$(BIN_DIR)/test_openwarcraft3_ui$(EXE_EXT),$(TEST_UI_SRCS) $(TEST_GAME_SRCS) common/mpq.c $(call CSRC,$(WC3_DIR)/ui),-lsheet -lshared -ljass -lm -lz,))
 
@@ -221,4 +229,4 @@ test-assets: blpgen mdxgen mpqtool mdxtool | $(TESTS_DIR)
 $(TESTS_DIR):
 	@mkdir -p $@
 
-WC3_PHONY := wc3-build jass-tool jass sheet renderer game ui openwarcraft3 run run-demo run-map run-ui-text test test-jass test-commands test-ui test-mpq-compat test-assets test-render-golden update-render-golden
+WC3_PHONY := wc3-build jass-tool jass sheet renderer game ui openwarcraft3 run run-demo run-map run-ui-text test test-jass test-commands test-bz-runtime test-bz-tabletop-lifecycle test-ui test-mpq-compat test-assets test-render-golden update-render-golden

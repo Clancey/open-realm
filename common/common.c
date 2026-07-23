@@ -1,5 +1,6 @@
 #include "common.h"
 
+#include "bz_runtime.h"
 #include "mpq.h"
 #include <stdlib.h>
 
@@ -1167,12 +1168,9 @@ void Com_Quit(void) {
          * experiments, debug cvars) clobber hand-edited openwow-config.cfg. */
         /* Cvar_WriteConfig(Cvar_String("config", "")); */
     }
-    if (!Cvar_Integer("dedicated", 0)) {
-        CL_Shutdown();
-    }
-    SV_Shutdown();
-    NET_Shutdown();
-    FS_Shutdown();
+    /* BZ_RuntimeShutdown() is idempotent, so it is safe even though
+     * BZ_RuntimeFrame() may already have called it at the frame limit. */
+    BZ_RuntimeShutdown();
     Sys_Quit();
 }
 

@@ -240,6 +240,7 @@ UI_BASE_DEPS := $(SHARED_LIB) $(CLIENT_HEADERS) $(COMMON_HEADERS)
 $(eval $(call unity_lib_schema,$(SHARED_LIB),$(call CSRC,shared),shared,shared,,$(CFLAGS),,-lm))
 
 include games/warcraft-3/game.mk
+include platform/apple/visionos/build.mk
 
 WOW_TEST_RES_DIR := $(TESTS_DIR)/wow-resources
 WOW_TEST_SRC_DIR := $(WOW_TEST_DIR)/resources-src
