@@ -102,6 +102,18 @@ const char *BZ_TabletopLastError(bzTabletopLifecycle_t const *lc);
 // "silently re-ran and failed again" for the FAILED-terminal case.
 int BZ_TabletopEngineThreadSpawnCount(bzTabletopLifecycle_t const *lc);
 
+// Test/diagnostic accessor: how many times this instance's state has
+// actually been set to RUNNING. Used by test_bz_tabletop_lifecycle.c to
+// prove that a BZ_TabletopStop() call arriving while still STARTING
+// prevents RUNNING from ever being published at all (not merely that the
+// final observable state is STOPPED, which by itself is also true of the
+// bug this accessor exists to catch — the frame loop's first iteration
+// would already observe stop_requested and break before running a frame
+// either way, so the final state/shutdown-count alone cannot distinguish
+// "RUNNING was skipped" from "RUNNING was briefly published, then the loop
+// immediately exited without ticking").
+int BZ_TabletopRunningPublishCount(bzTabletopLifecycle_t const *lc);
+
 #ifdef __cplusplus
 }
 #endif

@@ -146,7 +146,16 @@ engine thread `BZ_TabletopStart()` creates — satisfying
 `common/bz_runtime.h`'s "callers must serialize onto one thread"
 requirement. The engine thread's loop:
 
-1. `BZ_RuntimeInit()` → publish `RUNNING` or `FAILED` (unblocks `Start()`).
+1. `BZ_RuntimeInit()` → on failure, publish `FAILED` (unblocks `Start()`).
+   On success, check whether a stop was already requested (an external
+   `BZ_TabletopStop()` call can arrive from another thread while this is
+   still running) **before** publishing anything: if so, skip `RUNNING`
+   entirely and fall straight to step 3's shutdown path; otherwise publish
+   `RUNNING` (unblocks `Start()`) and continue to step 2. This closes the
+   one remaining way a background startup path could otherwise make the
+   visible state transition *away* from an already-requested stop, even
+   transiently — the only state transitions ever seen from here on are
+   forward towards `STOPPED`.
 2. Loop: wait out `SUSPENDED`, then `BZ_RuntimeFrame(elapsed_ms)` using
    `clock_gettime(CLOCK_MONOTONIC, …)` (never `SDL_GetTicks`, since no SDL is
    linked). No display link drives frames yet in this layer — the loop
@@ -155,8 +164,9 @@ requirement. The engine thread's loop:
    needed.
 3. Break the loop on an external stop request **or** `BZ_RuntimeFrame()`
    returning `false` (the frame limit or a console "quit" was reached
-   internally) — both cases call `BZ_RuntimeShutdown()` (idempotent) before
-   publishing `STOPPED`.
+   internally) — both cases (and step 1's early-stop path above) call
+   `BZ_RuntimeShutdown()` (idempotent) before publishing `STOPPED`, which is
+   itself terminal: nothing writes to the state after this point.
 
 ### `Sys_Quit()` and thread-local self-identification
 
@@ -192,12 +202,42 @@ on the same thread undefined); `BZ_TabletopStart()` called again after
 reaching the terminal `STOPPED` or `FAILED` state is rejected as a no-op
 (state does not regress, `CL_Init()`/init is not re-run);
 `BZ_TabletopDestroy()` without a prior explicit stop still joins cleanly;
-and reaching `+com_frame_limit` drives the engine to `STOPPED` on its own
-(via the `Sys_Quit()` thread-local path) without any external
-`BZ_TabletopStop()` call. The concurrent-stop scenario was additionally
-verified with ThreadSanitizer (`-fsanitize=thread`), which reported zero
-data races across five runs after the join-serialization fix (an earlier
-revision without it reliably aborted under TSan inside `pthread_join`).
+`BZ_TabletopStop()` called while the engine thread is still inside
+`BZ_RuntimeInit()` (still `STARTING`) — verified with a deliberately slowed
+stub `CL_Init()` to widen the race window — reaches `STOPPED` having run
+shutdown exactly once and having never entered the frame loop, without ever
+publishing `RUNNING`; and reaching `+com_frame_limit` drives the engine to
+`STOPPED` on its own (via the `Sys_Quit()` thread-local path) without any
+external `BZ_TabletopStop()` call. The concurrent-stop scenario was
+additionally verified with ThreadSanitizer (`-fsanitize=thread`), which
+reported zero data races across multiple runs after the join-serialization
+fix (an earlier revision without it reliably aborted under TSan inside
+`pthread_join`).
+
+### Local verification baseline and methodology
+
+This layer's build/test/link-check results above were verified against
+Xcode 26.6 (`xcodebuild -version`) with the `xrsimulator`/`xros` SDKs at
+26.5 (`xcrun --sdk <sdk> --show-sdk-version`) — record any future baseline
+bump here rather than assuming it implicitly. Two methodology notes for
+whoever extends this layer's verification (e.g. inspecting `otool -L`/`nm`
+output, or eventually running a built binary):
+
+- Never combine `set -o pipefail` with an early-exiting consumer like
+  `producer | grep -q pattern`: once `grep -q` finds its first match it
+  exits immediately, and `producer` can then receive `SIGPIPE` on its next
+  write — under `pipefail` that surfaces as a spurious non-zero exit even
+  though the check itself passed. Redirect the producer's output to a file
+  (or a shell variable) first, then `grep`/`grep -c` that captured output.
+- Any acceptance/verification wait on an external process (a simulator
+  boot, an app launch) must be bounded with an explicit timeout and remain
+  cancellable — never an unbounded blocking wait — and must capture that
+  process's `stderr` directly (e.g. explicit `2>` redirection to a file, or
+  inheriting the caller's own stream) rather than discarding it, so a
+  failure is diagnosable instead of silent. No such process-launch
+  verification exists yet in this layer (`bridge-link-smoke` is built but
+  intentionally never run — see above); this note is guidance for the
+  layer that eventually adds one.
 
 ## What this layer does not do
 

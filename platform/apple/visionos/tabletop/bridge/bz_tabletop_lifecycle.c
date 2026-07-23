@@ -14,6 +14,8 @@ struct bzTabletopLifecycle_s {
     bool thread_started; /* a pthread_create()'d handle exists and has not been joined yet */
     bool joining; /* another thread is currently inside pthread_join(lc->thread) */
     int spawn_count; /* how many times pthread_create() has succeeded for this instance (never >1: single-shot) */
+    int running_publish_count; /* how many times state has actually been set to RUNNING (test/diagnostic only) */
+
 
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -65,9 +67,33 @@ static void *EngineThreadMain(void *arg) {
         tls_current_lc = NULL;
         return NULL;
     }
-    lc->state = BZ_TABLETOP_STATE_RUNNING;
+    /* An external BZ_TabletopStop() may have arrived while we were still
+     * inside BZ_RuntimeInit() above (state STARTING) — reap_engine_thread()
+     * is already blocked in pthread_join() waiting for us in that case.
+     * This background init-completion path must never publish RUNNING
+     * once a stop has been requested: doing so would let a background
+     * startup path transition the visible state away from the shutdown
+     * the caller already asked for, even if only for a brief window before
+     * the loop below immediately breaks. Skip straight to shutdown/STOPPED
+     * instead — BZ_RuntimeInit() already ran (NET_Init() etc. may have
+     * allocated resources), so BZ_RuntimeShutdown() below still must run. */
+    bool stop_before_running = lc->stop_requested;
+    if (!stop_before_running) {
+        lc->state = BZ_TABLETOP_STATE_RUNNING;
+        lc->running_publish_count++;
+    }
     pthread_cond_broadcast(&lc->cond);
     pthread_mutex_unlock(&lc->lock);
+
+    if (stop_before_running) {
+        BZ_RuntimeShutdown();
+        pthread_mutex_lock(&lc->lock);
+        lc->state = BZ_TABLETOP_STATE_STOPPED;
+        pthread_cond_broadcast(&lc->cond);
+        pthread_mutex_unlock(&lc->lock);
+        tls_current_lc = NULL;
+        return NULL;
+    }
 
     struct timespec prev;
     clock_gettime(CLOCK_MONOTONIC, &prev);
@@ -330,6 +356,16 @@ int BZ_TabletopEngineThreadSpawnCount(bzTabletopLifecycle_t const *lc) {
     }
     pthread_mutex_lock((pthread_mutex_t *)&lc->lock);
     int count = lc->spawn_count;
+    pthread_mutex_unlock((pthread_mutex_t *)&lc->lock);
+    return count;
+}
+
+int BZ_TabletopRunningPublishCount(bzTabletopLifecycle_t const *lc) {
+    if (!lc) {
+        return 0;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&lc->lock);
+    int count = lc->running_publish_count;
     pthread_mutex_unlock((pthread_mutex_t *)&lc->lock);
     return count;
 }

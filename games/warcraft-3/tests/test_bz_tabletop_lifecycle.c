@@ -33,6 +33,7 @@ static int cl_frame_calls;
 static int cl_shutdown_calls;
 static int sv_init_calls;
 static int sv_shutdown_calls;
+static volatile bool cl_init_delay_requested; /* see test_stop_during_starting_skips_running below */
 
 void Key_Init(void) { }
 void Key_WriteBindings(FILE *file) { (void)file; }
@@ -40,7 +41,16 @@ void Cmd_ForwardToServer(LPCSTR text) { (void)text; }
 void CL_SetGameplayBindings(void) { }
 void PF_Sleep(DWORD msec) { (void)msec; }
 
-void CL_Init(void) { cl_init_calls++; }
+void CL_Init(void) {
+    if (cl_init_delay_requested) {
+        /* Widens the STARTING window so a concurrent BZ_TabletopStop() call
+         * from the test's main thread has a reliable chance to set
+         * stop_requested before BZ_RuntimeInit() returns. */
+        struct timespec delay = { 0, 100L * 1000L * 1000L }; /* 100ms */
+        nanosleep(&delay, NULL);
+    }
+    cl_init_calls++;
+}
 void CL_Frame(DWORD msec) { (void)msec; cl_frame_calls++; }
 void CL_Shutdown(void) { cl_shutdown_calls++; }
 void CL_Connect(LPCSTR host, unsigned short port) { (void)host; (void)port; }
@@ -56,6 +66,7 @@ static void reset_counters(void) {
     cl_init_calls = cl_frame_calls = cl_shutdown_calls = 0;
     sv_init_calls = sv_shutdown_calls = 0;
     svs.initialized = false;
+    cl_init_delay_requested = false;
 }
 
 /* Polls BZ_TabletopGetState() until it matches `want` or `timeout_ms`
@@ -86,6 +97,7 @@ static void test_valid_init_reaches_running(void) {
     ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_RUNNING);
     ASSERT_NULL(BZ_TabletopLastError(lc));
     ASSERT_EQ_INT(cl_init_calls, 1);
+    ASSERT_EQ_INT(BZ_TabletopRunningPublishCount(lc), 1);
 
     BZ_TabletopStop(lc);
     ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_STOPPED);
@@ -231,6 +243,47 @@ static void test_start_after_failed_is_rejected(void) {
     BZ_TabletopDestroy(lc);
 }
 
+static void *starter_thread_main(void *arg) {
+    BZ_TabletopStart((bzTabletopLifecycle_t *)arg);
+    return NULL;
+}
+
+static void test_stop_during_starting_skips_running(void) {
+    reset_counters();
+    cl_init_delay_requested = true; /* widen the STARTING window - see CL_Init() above */
+    const char *argv[] = { "test_bz_tabletop_lifecycle", "-data", "build/tests", "+com_frame_limit", "0" };
+    bzTabletopLifecycle_t *lc = BZ_TabletopCreate(5, argv);
+
+    /* BZ_TabletopStart() blocks its caller until STARTING is left, so it
+     * must run on its own thread here: this test needs the main thread
+     * free to call BZ_TabletopStop() while the engine thread is still
+     * inside BZ_RuntimeInit() (i.e. still STARTING). */
+    pthread_t starter;
+    pthread_create(&starter, NULL, starter_thread_main, lc);
+
+    struct timespec lead = { 0, 10L * 1000L * 1000L }; /* 10ms: CL_Init()'s 100ms delay gives ample margin */
+    nanosleep(&lead, NULL);
+    ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_STARTING);
+
+    /* Requests a stop while still STARTING. The engine thread's
+     * background init-completion path must never publish RUNNING once
+     * this has been requested - it should go straight to STOPPED. */
+    BZ_TabletopStop(lc);
+    pthread_join(starter, NULL);
+
+    ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_STOPPED);
+    ASSERT_EQ_INT(cl_init_calls, 1);       /* BZ_RuntimeInit() ran to completion */
+    ASSERT_EQ_INT(cl_frame_calls, 0);      /* the frame loop was never entered */
+    ASSERT_EQ_INT(cl_shutdown_calls, 1);   /* shutdown still ran exactly once */
+    /* The critical assertion: final state/call-counts above are identical
+     * whether or not EngineThreadMain() actually skips publishing RUNNING
+     * (the frame loop's first check would break before ticking either
+     * way), so only this counter proves RUNNING was never set at all. */
+    ASSERT_EQ_INT(BZ_TabletopRunningPublishCount(lc), 0);
+
+    BZ_TabletopDestroy(lc);
+}
+
 static void test_destroy_implies_stop(void) {
     reset_counters();
     const char *argv[] = { "test_bz_tabletop_lifecycle", "-data", "build/tests", "+com_frame_limit", "0" };
@@ -280,6 +333,7 @@ void run_bz_tabletop_lifecycle_tests(void) {
     RUN_TEST(test_concurrent_stop_calls_do_not_crash_or_hang);
     RUN_TEST(test_start_after_terminal_state_is_rejected);
     RUN_TEST(test_start_after_failed_is_rejected);
+    RUN_TEST(test_stop_during_starting_skips_running);
     RUN_TEST(test_destroy_implies_stop);
     RUN_TEST(test_frame_limit_triggers_self_stop_without_external_stop);
 }
