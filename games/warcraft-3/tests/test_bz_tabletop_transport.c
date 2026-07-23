@@ -190,6 +190,56 @@ static void test_snapshot_reflects_player_and_configstrings(void) {
     BZ_TTSnapshot_Release(snap);
 }
 
+static void test_configstring_count_is_zero_for_null_snapshot(void) {
+    /* No reset_all()/init needed - this accessor must handle a NULL
+     * snapshot pointer the same way every other BZ_TTSnapshot_* accessor
+     * does (see BZ_TTSnapshot_Generation/Player/etc.), independent of
+     * transport lifecycle state. */
+    ASSERT_EQ_INT(BZ_TTSnapshot_ConfigStringCount(NULL), 0);
+}
+
+static void test_configstring_count_and_iteration_bounds(void) {
+    reset_all();
+    snprintf(cl.configstrings[CS_WORLD], sizeof(cl.configstrings[CS_WORLD]), "%s", "Human02");
+    /* Leave every other slot empty - a valid, in-range, empty slot, distinct
+     * from an out-of-range index. */
+
+    BZ_TT_PublishSnapshotFromClient();
+    const bzTTSnapshot_t *snap = BZ_TT_Latest();
+    ASSERT_NOT_NULL(snap);
+
+    uint32_t count = BZ_TTSnapshot_ConfigStringCount(snap);
+    ASSERT_EQ_INT(count, MAX_CONFIGSTRINGS);
+
+    char cs[64];
+    uint32_t populated = 0;
+    uint32_t empty_in_range = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (BZ_TTSnapshot_ConfigString(snap, i, cs, sizeof(cs))) {
+            populated++;
+        } else {
+            /* An in-range index reporting false must mean "validly empty",
+             * never "out of range" - callers iterating [0, count) never
+             * need to special-case this. */
+            empty_in_range++;
+        }
+    }
+    ASSERT_EQ_INT(populated, 1);
+    ASSERT_EQ_INT(empty_in_range, count - 1);
+
+    /* Last valid index (count - 1) must be reachable and behave like any
+     * other in-range index (empty here, since only CS_WORLD was set). */
+    ASSERT(!BZ_TTSnapshot_ConfigString(snap, count - 1, cs, sizeof(cs)));
+
+    /* One-past-the-end (== count) is genuinely out of range, same as any
+     * index beyond it - both return false, matching BZ_TTSnapshot_ConfigString's
+     * existing out-of-range behavior. */
+    ASSERT(!BZ_TTSnapshot_ConfigString(snap, count, cs, sizeof(cs)));
+    ASSERT(!BZ_TTSnapshot_ConfigString(snap, count + 1000, cs, sizeof(cs)));
+
+    BZ_TTSnapshot_Release(snap);
+}
+
 static void test_map_bounds_only_valid_when_refresh_prepped(void) {
     reset_all();
     bzTTBox2_t bounds;
@@ -625,6 +675,8 @@ void run_bz_tabletop_transport_tests(void) {
     RUN_TEST(test_retained_snapshot_is_immutable_across_a_later_publish);
     RUN_TEST(test_retain_and_release_are_reference_counted);
     RUN_TEST(test_snapshot_reflects_player_and_configstrings);
+    RUN_TEST(test_configstring_count_is_zero_for_null_snapshot);
+    RUN_TEST(test_configstring_count_and_iteration_bounds);
     RUN_TEST(test_map_bounds_only_valid_when_refresh_prepped);
     RUN_TEST(test_snapshot_reflects_entities_and_selection);
     RUN_TEST(test_entity_overflow_is_reported_not_truncated_silently);

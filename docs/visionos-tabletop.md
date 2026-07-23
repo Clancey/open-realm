@@ -337,7 +337,13 @@ exposed, a documented gap rather than fabricated data); the local player
 ids; visible entities (`bzTTEntity_t`, deep-copied subset of
 `entityState_t`, capped at `BZ_TT_MAX_ENTITIES` = 1024 with an explicit
 `EntitiesOverflowCount()` rather than silent truncation); fog-of-war
-dimensions plus visible/explored planes; configstrings by index; and a
+dimensions plus visible/explored planes; configstrings by index
+(`BZ_TTSnapshot_ConfigStringCount()` returns the number of captured slots so
+callers can iterate `[0, count)` without importing the engine-private
+`MAX_CONFIGSTRINGS` constant; within that range `BZ_TTSnapshot_ConfigString()`
+returning `false` means a validly-empty slot, and `false` at or beyond
+`count` means out of range — added post-freeze, append-only, no ABI version
+bump, to unblock Swift-side enumeration); and a
 bounded, best-effort command-card/inventory/build-queue layout per unit
 (`bzTTUnitLayout_t`, decoded from the legacy `svc_unit_ui` message — see
 `CL_ParseUnitUI()` in `client/cl_scrn.c` — frequently all-zero today since

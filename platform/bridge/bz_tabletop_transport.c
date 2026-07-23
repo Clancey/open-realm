@@ -81,6 +81,10 @@ struct bzTTSnapshot {
     uint8_t *fog_visible;   /* fog_width*fog_height bytes, or NULL */
     uint8_t *fog_explored;  /* fog_width*fog_height bytes, or NULL */
     char configstrings[MAX_CONFIGSTRINGS][BZ_TT_MAX_CONFIGSTRING_LEN];
+    uint32_t num_configstrings; /* always MAX_CONFIGSTRINGS today; stored (not just
+                                 * returned as a #define) so a future snapshot that
+                                 * captures a subset can report its true shape without
+                                 * an ABI break - see BZ_TTSnapshot_ConfigStringCount(). */
     uint32_t num_unit_layouts;
     bzTTUnitLayout_t unit_layouts[BZ_TT_MAX_UNIT_LAYOUTS];
 };
@@ -243,8 +247,13 @@ uint32_t BZ_TTSnapshot_FogExplored(const bzTTSnapshot_t *snap, uint8_t *dst, uin
     return n;
 }
 
+uint32_t BZ_TTSnapshot_ConfigStringCount(const bzTTSnapshot_t *snap) {
+    if (!snap) return 0;
+    return snap->num_configstrings;
+}
+
 bool BZ_TTSnapshot_ConfigString(const bzTTSnapshot_t *snap, uint32_t cs_index, char *out, size_t cap) {
-    if (!snap || cs_index >= MAX_CONFIGSTRINGS || !out || cap == 0) return false;
+    if (!snap || cs_index >= snap->num_configstrings || !out || cap == 0) return false;
     if (!snap->configstrings[cs_index][0]) return false;
     snprintf(out, cap, "%s", snap->configstrings[cs_index]);
     return true;
@@ -567,6 +576,7 @@ void BZ_TT_PublishSnapshotFromClient(void) {
     BuildFog(snap);
     _Static_assert(sizeof(snap->configstrings) == sizeof(cl.configstrings), "configstring block shape must match cl.configstrings");
     memcpy(snap->configstrings, cl.configstrings, sizeof(snap->configstrings));
+    snap->num_configstrings = MAX_CONFIGSTRINGS;
     /* Unit command-card layouts: populated only via BZTT_CopyCachedUnitUI()
      * (see platform/apple/visionos/tabletop/client/ui_tabletop_null.c),
      * which mirrors whatever the last CL_ParseUnitUI() decode delivered to

@@ -253,9 +253,22 @@ bool BZ_TTSnapshot_FogDimensions(const bzTTSnapshot_t *snap, uint32_t *out_width
 uint32_t BZ_TTSnapshot_FogVisible(const bzTTSnapshot_t *snap, uint8_t *dst, uint32_t dst_cap);
 uint32_t BZ_TTSnapshot_FogExplored(const bzTTSnapshot_t *snap, uint8_t *dst, uint32_t dst_cap);
 
+/* Number of configstring slots captured by this snapshot (0 for a NULL
+ * snapshot). Callers should iterate `cs_index` in `[0,
+ * BZ_TTSnapshot_ConfigStringCount(snap))` rather than importing the
+ * engine's private MAX_CONFIGSTRINGS constant, which this header
+ * deliberately does not expose. Within that range, BZ_TTSnapshot_ConfigString()
+ * returning false means the slot is validly empty, not out of range -
+ * out-of-range indices (>= this count) also return false, so a caller that
+ * only iterates the documented range never needs to distinguish the two
+ * cases. Added after the initial ABI release as an append-only accessor;
+ * does not change BZ_TT_ConfigString's existing behavior or signature. */
+uint32_t BZ_TTSnapshot_ConfigStringCount(const bzTTSnapshot_t *snap);
+
 /* Copies configstring `cs_index` (model/image/sound/... identity - see
  * common/shared.h's CS_* enum, mirrored numerically) into out; returns false
- * if cs_index is out of range or the string is empty. */
+ * if cs_index is out of range (see BZ_TTSnapshot_ConfigStringCount() above)
+ * or the string is empty. */
 bool BZ_TTSnapshot_ConfigString(const bzTTSnapshot_t *snap, uint32_t cs_index, char *out, size_t cap);
 
 uint32_t BZ_TTSnapshot_UnitLayoutCount(const bzTTSnapshot_t *snap);
