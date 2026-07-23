@@ -9,6 +9,8 @@ StormLib-master/
 .DS_Store
 _codeql_detected_source_root
 War3.mpq
+War3x.mpq
+War3xLocal.mpq
 .mcp.json
 /share/config.cfg
 /share/openwarcraft3-config.cfg
