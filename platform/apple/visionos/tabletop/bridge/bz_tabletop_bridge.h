@@ -32,9 +32,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)initWithArguments:(NSArray<NSString *> *)arguments NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
-// Spawns the dedicated engine thread and blocks until BZ_RuntimeInit()
-// completes (state leaves Starting). Safe to call again after a Failed or
-// Stopped state to restart.
+// Spawns the dedicated, single-shot engine thread and blocks until
+// BZ_RuntimeInit() completes (state leaves Starting). Failed and Stopped
+// are terminal — a further call after either is rejected as a no-op;
+// create a new BZTabletopBridge instance to run again.
 - (void)start;
 - (void)suspend;
 - (void)resume;

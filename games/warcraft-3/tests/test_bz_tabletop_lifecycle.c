@@ -180,26 +180,54 @@ static void test_concurrent_stop_calls_do_not_crash_or_hang(void) {
     BZ_TabletopDestroy(lc);
 }
 
-static void test_restart_after_stop_rejoins_previous_thread(void) {
+static void test_start_after_terminal_state_is_rejected(void) {
     reset_counters();
     const char *argv[] = { "test_bz_tabletop_lifecycle", "-data", "build/tests", "+com_frame_limit", "0" };
     bzTabletopLifecycle_t *lc = BZ_TabletopCreate(5, argv);
 
     BZ_TabletopStart(lc);
     ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_RUNNING);
+    ASSERT_EQ_INT(BZ_TabletopEngineThreadSpawnCount(lc), 1);
     BZ_TabletopStop(lc);
     ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_STOPPED);
     ASSERT_EQ_INT(cl_init_calls, 1);
 
-    /* Restarting after a full external stop must spin up a fresh engine
-     * thread (joining the old, already-exited one first) and reach
-     * RUNNING again, not get stuck STOPPED/FAILED. */
+    /* The engine thread is single-shot per instance: STOPPED is terminal
+     * and must never regress back into STARTING/RUNNING. A further
+     * BZ_TabletopStart() call must be rejected as a no-op — no second
+     * engine thread, no second CL_Init(), state stays STOPPED. Callers
+     * that need to run again must BZ_TabletopCreate() a fresh instance. */
     BZ_TabletopStart(lc);
-    ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_RUNNING);
-    ASSERT_EQ_INT(cl_init_calls, 2);
-
-    BZ_TabletopStop(lc);
     ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_STOPPED);
+    ASSERT_EQ_INT(cl_init_calls, 1);
+    ASSERT_EQ_INT(BZ_TabletopEngineThreadSpawnCount(lc), 1);
+
+    BZ_TabletopDestroy(lc);
+}
+
+static void test_start_after_failed_is_rejected(void) {
+    reset_counters();
+    const char *argv[] = { "test_bz_tabletop_lifecycle", "-data", "build/tests/does-not-exist" };
+    bzTabletopLifecycle_t *lc = BZ_TabletopCreate(3, argv);
+
+    BZ_TabletopStart(lc);
+    ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_FAILED);
+    ASSERT_NOT_NULL(BZ_TabletopLastError(lc));
+    /* None of BZ_RuntimeInit()'s failure paths reach CL_Init()/SV_Init()
+     * (they all return before either is called), so cl_init_calls/
+     * sv_init_calls can't distinguish "rejected" from "silently re-ran and
+     * failed again" here. BZ_TabletopEngineThreadSpawnCount() can: it only
+     * increments when BZ_TabletopStart() actually pthread_create()s a new
+     * engine thread, which happened exactly once so far. */
+    ASSERT_EQ_INT(BZ_TabletopEngineThreadSpawnCount(lc), 1);
+
+    /* FAILED is equally terminal: a bad first init must not be retried by
+     * calling BZ_TabletopStart() again on the same instance — verified by
+     * the spawn count staying at 1 rather than becoming 2. */
+    BZ_TabletopStart(lc);
+    ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_FAILED);
+    ASSERT_EQ_INT(BZ_TabletopEngineThreadSpawnCount(lc), 1);
+
     BZ_TabletopDestroy(lc);
 }
 
@@ -250,7 +278,8 @@ void run_bz_tabletop_lifecycle_tests(void) {
     RUN_TEST(test_suspend_resume_transitions);
     RUN_TEST(test_stop_blocks_until_stopped_and_is_idempotent);
     RUN_TEST(test_concurrent_stop_calls_do_not_crash_or_hang);
-    RUN_TEST(test_restart_after_stop_rejoins_previous_thread);
+    RUN_TEST(test_start_after_terminal_state_is_rejected);
+    RUN_TEST(test_start_after_failed_is_rejected);
     RUN_TEST(test_destroy_implies_stop);
     RUN_TEST(test_frame_limit_triggers_self_stop_without_external_stop);
 }

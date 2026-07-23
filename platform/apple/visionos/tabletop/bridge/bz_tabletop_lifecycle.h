@@ -26,10 +26,15 @@ extern "C" {
  * bz_tabletop_lifecycle.c still uses common/bz_runtime.h's real types
  * internally; only this public surface stays ObjC-safe.
  *
- * Threading contract: BZ_TabletopStart() spawns one dedicated engine
- * thread per instance and never runs the engine on the calling thread.
- * Every BZ_RuntimeInit/Frame/Shutdown call happens on that one thread,
- * satisfying bz_runtime.h's "serialize onto one thread" requirement.
+ * Threading contract: BZ_TabletopStart() spawns exactly one dedicated,
+ * single-shot engine thread per instance and never runs the engine on the
+ * calling thread. Every BZ_RuntimeInit/Frame/Shutdown call happens on that
+ * one thread, satisfying bz_runtime.h's "serialize onto one thread"
+ * requirement. Once that thread exits — whether from an external
+ * BZ_TabletopStop() or the engine quitting itself (frame limit / console
+ * "quit") — the instance is terminal (FAILED or STOPPED) and cannot be
+ * restarted; BZ_TabletopStart() rejects any further call on it. Callers
+ * that need to run again must BZ_TabletopCreate() a fresh instance.
  * BZ_TabletopStop() is safe to call from any thread, including
  * re-entrantly from the engine thread itself (Sys_Quit(), defined in
  * bz_tabletop_lifecycle.c, does exactly this when a frame-limit or
@@ -53,11 +58,13 @@ typedef struct bzTabletopLifecycle_s bzTabletopLifecycle_t;
 // Does not start the engine thread — call BZ_TabletopStart for that.
 bzTabletopLifecycle_t *BZ_TabletopCreate(int argc, const char **argv);
 
-// Starts the dedicated engine thread and blocks the calling thread until
-// BZ_RuntimeInit() has run to completion on it, i.e. until the state has
-// left STARTING (either RUNNING or FAILED). No-op if already
-// STARTING/RUNNING/SUSPENDED. Safe to call again after FAILED/STOPPED to
-// restart: any previous engine thread is joined first.
+// Starts the dedicated, single-shot engine thread and blocks the calling
+// thread until BZ_RuntimeInit() has run to completion on it, i.e. until
+// the state has left STARTING (either RUNNING or FAILED). No-op if
+// already STARTING/RUNNING/SUSPENDED. FAILED and STOPPED are terminal:
+// once reached, this instance's engine thread has exited for good and
+// BZ_TabletopStart() rejects (logs and no-ops) any further call — create
+// a new BZ_TabletopCreate() instance to run again.
 void BZ_TabletopStart(bzTabletopLifecycle_t *lc);
 
 // Pauses/resumes per-frame ticking without tearing the engine down.
@@ -83,6 +90,17 @@ void BZ_TabletopDestroy(bzTabletopLifecycle_t *lc);
 bzTabletopState_t BZ_TabletopGetState(bzTabletopLifecycle_t const *lc);
 // NULL when no initialization error has occurred.
 const char *BZ_TabletopLastError(bzTabletopLifecycle_t const *lc);
+
+// Test/diagnostic accessor: how many times the dedicated engine thread has
+// actually been spawned for this instance. Should never exceed 1, since
+// BZ_TabletopStart() is single-shot per instance and rejects any call
+// after the first thread is created (see BZ_TabletopStart's own comment).
+// Used by test_bz_tabletop_lifecycle.c to verify a rejected restart truly
+// did not spawn a second engine thread, since none of the BZ_RuntimeInit()
+// failure paths run CL_Init()/SV_Init() (they all return before reaching
+// either), so those stub counters alone can't distinguish "rejected" from
+// "silently re-ran and failed again" for the FAILED-terminal case.
+int BZ_TabletopEngineThreadSpawnCount(bzTabletopLifecycle_t const *lc);
 
 #ifdef __cplusplus
 }

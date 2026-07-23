@@ -104,11 +104,24 @@ IDLE -> STARTING -> RUNNING <-> SUSPENDED
 STARTING -> FAILED (bad -data/+map/… — BZ_TabletopLastError() explains why)
 ```
 
+`STOPPED` and `FAILED` are **terminal** — the engine thread is single-shot
+per lifecycle instance and is never restarted or rejoined into a fresh run.
+Once either is reached, `BZ_TabletopStart()` rejects any further call on
+that instance (logs once, no-op); a caller that needs to run again must
+`BZ_TabletopCreate()` a new instance. This matches the intended
+static-archive + swiftc/clang host architecture: an embedding app spins up
+one `BZTabletopBridge`/lifecycle per session and discards it on shutdown,
+rather than pooling/reusing engine threads.
+
 - `BZ_TabletopCreate(argc, argv)` — allocate, deep-copy args, no thread yet.
-- `BZ_TabletopStart(lc)` — spawns one dedicated engine thread (never the
-  caller's thread), blocks until `BZ_RuntimeInit()` completes (state leaves
-  `STARTING`). Safe to call again after `FAILED`/`STOPPED` to restart — any
-  previous thread is joined first.
+- `BZ_TabletopStart(lc)` — spawns the one dedicated, single-shot engine
+  thread (never the caller's thread), blocks until `BZ_RuntimeInit()`
+  completes (state leaves `STARTING`). No-op if already
+  `STARTING`/`RUNNING`/`SUSPENDED`; rejected (logged, no-op) if the instance
+  has already reached the terminal `FAILED`/`STOPPED` state. The state
+  check and the `IDLE` → `STARTING` claim happen atomically under one lock
+  hold, so two threads racing `BZ_TabletopStart()` on a fresh instance
+  cannot both pass and both spawn a thread for it.
 - `BZ_TabletopSuspend`/`Resume(lc)` — pause/resume per-frame ticking without
   tearing the engine down.
 - `BZ_TabletopStop(lc)` — requests an orderly shutdown. From any thread other
@@ -118,12 +131,11 @@ STARTING -> FAILED (bad -data/+map/… — BZ_TabletopLastError() explains why)
   the stop request and returns immediately — a thread cannot join itself —
   leaving the actual join for a later call from another thread.
   Idempotent: safe to call repeatedly, from any state. If two external
-  threads call `BZ_TabletopStop()` (or one calls `Stop()` while another calls
-  `Start()`'s restart-join path) at the same time, only one of them actually
-  performs `pthread_join()` — a mutex-guarded `joining` flag makes the rest
-  wait on a condvar for that join to finish instead of racing their own
-  `pthread_join()` call against it, since POSIX leaves concurrent joins on
-  the same thread undefined.
+  threads call `BZ_TabletopStop()` at the same time, only one of them
+  actually performs `pthread_join()` — a mutex-guarded `joining` flag makes
+  the rest wait on a condvar for that join to finish instead of racing their
+  own `pthread_join()` call against it, since POSIX leaves concurrent joins
+  on the same thread undefined.
 - `BZ_TabletopDestroy(lc)` — calls `BZ_TabletopStop()` first, then frees.
 - `BZ_TabletopGetState`/`LastError(lc)` — read-only, thread-safe.
 
@@ -176,15 +188,16 @@ exercise the internal join-serialization path (a `joining` flag guarded by
 the lifecycle mutex ensures only one caller ever calls `pthread_join()` on
 the engine thread — concurrent callers instead wait on the condvar for the
 first join to finish, since POSIX leaves concurrent `pthread_join()` calls
-on the same thread undefined); restart after stop correctly rejoins the
-previous thread and reaches `RUNNING` again; `BZ_TabletopDestroy()` without a
-prior explicit stop still joins cleanly; and reaching `+com_frame_limit`
-drives the engine to `STOPPED` on its own (via the `Sys_Quit()` thread-local
-path) without any external `BZ_TabletopStop()` call. The concurrent-stop
-scenario was additionally verified with ThreadSanitizer
-(`-fsanitize=thread`), which reported zero data races across five runs after
-the join-serialization fix (an earlier revision without it reliably aborted
-under TSan inside `pthread_join`).
+on the same thread undefined); `BZ_TabletopStart()` called again after
+reaching the terminal `STOPPED` or `FAILED` state is rejected as a no-op
+(state does not regress, `CL_Init()`/init is not re-run);
+`BZ_TabletopDestroy()` without a prior explicit stop still joins cleanly;
+and reaching `+com_frame_limit` drives the engine to `STOPPED` on its own
+(via the `Sys_Quit()` thread-local path) without any external
+`BZ_TabletopStop()` call. The concurrent-stop scenario was additionally
+verified with ThreadSanitizer (`-fsanitize=thread`), which reported zero
+data races across five runs after the join-serialization fix (an earlier
+revision without it reliably aborted under TSan inside `pthread_join`).
 
 ## What this layer does not do
 
@@ -195,3 +208,14 @@ under TSan inside `pthread_join`).
 - No gameplay input/controls and no multiplayer/networking beyond what
   `common/net.c` already provides headlessly.
 - No SDL/OpenGL window, no SDL input polling, no Xcode project.
+- No audio: `sound/s_sound.c` is not linked into the tabletop archive at
+  all (see `platform/apple/visionos/tabletop/null/cl_null.c`'s header
+  comment) — not even a null/dummy backend exists yet. A later layer adds
+  an explicit, named simulator-only dummy audio backend; this layer is
+  silent-by-omission only because nothing currently calls into an audio
+  API on this path, not because a call is being dropped.
+- No code signing: the `xros` (device) static targets are deliberately
+  unsigned. Producing a signed, installable device build is an external
+  gate (a valid Apple provisioning profile/signing identity) outside this
+  layer's scope — see the `xros`/`xros-bridge` build notes above.
+

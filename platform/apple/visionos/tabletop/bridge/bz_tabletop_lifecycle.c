@@ -13,6 +13,7 @@ struct bzTabletopLifecycle_s {
     pthread_t thread;
     bool thread_started; /* a pthread_create()'d handle exists and has not been joined yet */
     bool joining; /* another thread is currently inside pthread_join(lc->thread) */
+    int spawn_count; /* how many times pthread_create() has succeeded for this instance (never >1: single-shot) */
 
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -113,11 +114,12 @@ static void *EngineThreadMain(void *arg) {
     return NULL;
 }
 
-/* Joins lc->thread if a previous engine thread run has ended but not yet
- * been reaped (thread_started still true) — used by both BZ_TabletopStart()
- * (rejoining before a restart) and BZ_TabletopStop() (the external-stop
- * path). Must NEVER be called from the engine thread itself (callers check
- * pthread_equal() first; see BZ_TabletopStop()).
+/* Joins lc->thread if the engine thread has ended but not yet been reaped
+ * (thread_started still true) — used by BZ_TabletopStop()'s external-stop
+ * path so a frame-limit/console-"quit" self-stop that already exited
+ * doesn't leak its thread handle. Must NEVER be called from the engine
+ * thread itself (callers check pthread_equal() first; see
+ * BZ_TabletopStop()).
  *
  * Only one caller may actually be inside pthread_join(lc->thread) at a
  * time: calling pthread_join() on the same target thread from two threads
@@ -185,24 +187,23 @@ void BZ_TabletopStart(bzTabletopLifecycle_t *lc) {
         return;
     }
 
+    /* The engine thread is single-shot per lifecycle instance: STOPPED and
+     * FAILED are terminal and must never regress back into
+     * STARTING/RUNNING. Checking state and (if IDLE) claiming STARTING
+     * happen atomically under one lock hold so two threads racing
+     * BZ_TabletopStart() concurrently on a fresh IDLE instance cannot both
+     * pass the check and both pthread_create() a thread for the same
+     * lc. Callers that need to run again must BZ_TabletopCreate() a new
+     * instance. */
     pthread_mutex_lock(&lc->lock);
-    if (lc->state == BZ_TABLETOP_STATE_STARTING ||
-        lc->state == BZ_TABLETOP_STATE_RUNNING ||
-        lc->state == BZ_TABLETOP_STATE_SUSPENDED) {
+    if (lc->state != BZ_TABLETOP_STATE_IDLE) {
+        if (lc->state == BZ_TABLETOP_STATE_FAILED || lc->state == BZ_TABLETOP_STATE_STOPPED) {
+            fprintf(stderr, "BZ_TabletopStart: instance already reached a terminal state "
+                             "(engine thread is single-shot); create a new lifecycle to run again\n");
+        }
         pthread_mutex_unlock(&lc->lock);
         return;
     }
-    pthread_mutex_unlock(&lc->lock);
-
-    /* A previous run may have ended without an external BZ_TabletopStop()
-     * call (e.g. the frame limit or a console "quit" stopped it from
-     * inside, via Sys_Quit()'s re-entrant path) — reap it now so we never
-     * leak a thread handle or race a fresh one against it. Safe to call
-     * concurrently with an external BZ_TabletopStop() call: both funnel
-     * through the same join-serialization in reap_engine_thread(). */
-    reap_engine_thread(lc);
-
-    pthread_mutex_lock(&lc->lock);
     lc->state = BZ_TABLETOP_STATE_STARTING;
     lc->stop_requested = false;
     lc->last_error = NULL;
@@ -222,6 +223,7 @@ void BZ_TabletopStart(bzTabletopLifecycle_t *lc) {
     pthread_mutex_lock(&lc->lock);
     lc->thread = tid;
     lc->thread_started = true;
+    lc->spawn_count++;
     while (lc->state == BZ_TABLETOP_STATE_STARTING) {
         pthread_cond_wait(&lc->cond, &lc->lock);
     }
@@ -262,9 +264,14 @@ void BZ_TabletopStop(bzTabletopLifecycle_t *lc) {
         lc->state = BZ_TABLETOP_STATE_STOPPED; /* engine thread never ran */
     }
     lc->stop_requested = true;
-    /* Snapshot the self-thread check under the same lock that protects
-     * lc->thread/thread_started, so it cannot race a concurrent
-     * BZ_TabletopStart()'s reap_engine_thread()/pthread_create() sequence. */
+    /* Snapshot the self-thread check under the same lock that guards
+     * lc->thread/thread_started, so it cannot race BZ_TabletopStart()'s
+     * own pthread_create()-success write of those two fields (which also
+     * happens under this lock, immediately after spawning — see
+     * BZ_TabletopStart()). Since Start() never re-spawns once a thread
+     * exists (single-shot/terminal design), there is no restart path here
+     * to race against; this snapshot only needs to be consistent with the
+     * one-time IDLE->STARTING transition. */
     bool is_self = lc->thread_started && pthread_equal(pthread_self(), lc->thread);
     pthread_cond_broadcast(&lc->cond); /* wake a SUSPENDED engine thread so it observes the stop request */
     pthread_mutex_unlock(&lc->lock);
@@ -315,4 +322,14 @@ LPCSTR BZ_TabletopLastError(bzTabletopLifecycle_t const *lc) {
         return NULL;
     }
     return lc->last_error;
+}
+
+int BZ_TabletopEngineThreadSpawnCount(bzTabletopLifecycle_t const *lc) {
+    if (!lc) {
+        return 0;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&lc->lock);
+    int count = lc->spawn_count;
+    pthread_mutex_unlock((pthread_mutex_t *)&lc->lock);
+    return count;
 }
