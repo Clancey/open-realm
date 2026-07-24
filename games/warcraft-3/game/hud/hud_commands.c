@@ -89,6 +89,9 @@ void UI_WriteCommandButtonFrame(gameCommandButton_t const *button) {
     rect = UI_CommandButtonRect(button->x, button->y);
     memset(&frame, 0, sizeof(frame));
     frame.flags.type = FT_COMMANDBUTTON;
+    frame.flags.hidden = button->hidden;
+    frame.flags.disabled = button->disabled;
+    frame.flags.target = button->target;
     frame.color = COLOR32_WHITE;
     frame.tex.index = gi.ImageIndex(button->art);
     frame.stat = button->active;

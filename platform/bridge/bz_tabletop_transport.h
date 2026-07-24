@@ -51,7 +51,7 @@ extern "C" {
 /* Bump on every incompatible change to any struct/enum/function signature
  * below. Append-only: existing fields/values must never be renumbered or
  * removed, only added after the last member. */
-#define BZ_TABLETOP_ABI_VERSION 1u
+#define BZ_TABLETOP_ABI_VERSION 2u
 
 enum {
     BZ_TT_MAX_ENTITIES              = 1024, /* per-snapshot visible-entity cap; overflow is reported, never silently dropped - see BZ_TTSnapshot_EntitiesOverflowCount() */
@@ -69,6 +69,8 @@ enum {
     BZ_TT_MAX_ART_LEN               = 256,
     BZ_TT_MAX_TOOLTIP_LEN           = 256,
     BZ_TT_MAX_UBERTIP_LEN           = 512,
+    BZ_TT_MAX_BUTTON_CODE_LEN       = 255,  /* safe button token, excluding trailing NUL */
+    BZ_TT_MAX_ACTION_TOOLTIP_LEN    = 1024,
 };
 
 /* Mirrors client/client.h's connstate_t ordering (never call-through: this
@@ -92,11 +94,19 @@ typedef enum {
 } bzTTResult_t;
 
 typedef enum {
+    BZ_TT_ACTION_TARGET_NONE = 0,
+    BZ_TT_ACTION_TARGET_POINT,
+    BZ_TT_ACTION_TARGET_ENTITY,
+    BZ_TT_ACTION_TARGET_ENTITY_OR_POINT,
+} bzTTActionTarget_t;
+
+typedef enum {
     BZ_TT_CMD_SELECT = 0,   /* select <id...>    - replace the local selection set */
     BZ_TT_CMD_SMART_ENTITY, /* smart <id>        - smart-command targeted at an entity */
     BZ_TT_CMD_SMART_POINT,  /* smartpoint <x> <y> - smart-command targeted at a world point */
     BZ_TT_CMD_BUTTON,       /* button <code>     - command-card/ability button press */
-    BZ_TT_CMD_CANCEL,       /* cancel            - cancel the current command/menu */
+    BZ_TT_CMD_CANCEL,       /* button CmdCancel  - cancel the current command/menu */
+    BZ_TT_CMD_TARGET_POINT, /* point <x> <y>     - submit an active point-target action */
 } bzTTCommandType_t;
 
 /* Opaque, immutable, reference-counted snapshot. Never dereference directly;
@@ -151,6 +161,7 @@ typedef struct {
     uint32_t resource_food_cap;
     uint32_t resource_hero_tokens;
     char name[BZ_TT_MAX_NAME_LEN];
+    bzTTActionTarget_t target;
 } bzTTPlayer_t;
 
 typedef struct {
@@ -178,15 +189,10 @@ typedef struct {
     uint32_t entity;
 } bzTTQueueItem_t;
 
-/* Bounded, best-effort semantic command-card layout for one unit, decoded
- * from the server's legacy svc_unit_ui message (see the "Legacy unit UI
- * response parser" comment above CL_ParseUnitUI() in client/cl_scrn.c). The
- * current, primary command-card HUD is computed locally inside the
- * game-specific UI library (out of scope for this headless transport), so
- * in practice this legacy path - and therefore this struct - is frequently
- * all-zero (num_* == 0) even mid-game. That is reported honestly (an
- * explicitly empty, versioned value), never backfilled with fabricated
- * data. */
+/* Retained ABI mirror of the retired svc_unit_ui message. The authoritative
+ * command card now comes from svc_layout and BZ_TTSnapshot_ActionLayout();
+ * this legacy value therefore remains explicitly empty unless old traffic is
+ * received, never backfilled with fabricated data. */
 typedef struct {
     uint32_t entity_num;
     uint8_t num_buttons;
@@ -196,6 +202,35 @@ typedef struct {
     uint8_t num_queue;
     bzTTQueueItem_t queue[BZ_TT_MAX_BUILD_QUEUE_ITEMS];
 } bzTTUnitLayout_t;
+
+typedef enum {
+    BZ_TT_ACTION_UNSUPPORTED = 0,
+    BZ_TT_ACTION_BUTTON,
+    BZ_TT_ACTION_CANCEL,
+} bzTTActionSemantic_t;
+
+typedef struct {
+    uint32_t image_index;
+    char tooltip[BZ_TT_MAX_ACTION_TOOLTIP_LEN];
+    char action_code[BZ_TT_MAX_BUTTON_CODE_LEN + 1];
+    char hotkey;
+    uint8_t grid_x, grid_y;
+    bool hidden, disabled;
+    float cooldown;
+    bzTTActionTarget_t target;
+    bzTTActionSemantic_t semantic;
+} bzTTActionButton_t;
+
+/* Authoritative LAYER_COMMANDBAR snapshot decoded from the cached svc_layout.
+ * present reports whether a payload exists; valid reports a fully bounded,
+ * terminated decode. visible additionally applies player client_ui_state and
+ * uiflags. Unsupported onclick forms remain present but disabled. */
+typedef struct {
+    bool present, visible, valid;
+    bzTTActionTarget_t current_target;
+    uint8_t num_buttons;
+    bzTTActionButton_t buttons[BZ_TT_MAX_COMMAND_BUTTONS];
+} bzTTActionLayout_t;
 
 /* --- Lifecycle -------------------------------------------------------- */
 
@@ -273,6 +308,7 @@ bool BZ_TTSnapshot_ConfigString(const bzTTSnapshot_t *snap, uint32_t cs_index, c
 
 uint32_t BZ_TTSnapshot_UnitLayoutCount(const bzTTSnapshot_t *snap);
 bool BZ_TTSnapshot_UnitLayoutAt(const bzTTSnapshot_t *snap, uint32_t index, bzTTUnitLayout_t *out);
+const bzTTActionLayout_t *BZ_TTSnapshot_ActionLayout(const bzTTSnapshot_t *snap);
 
 /* --- Command posting (any thread) --------------------------------------- */
 
@@ -285,11 +321,14 @@ bzTTResult_t BZ_TT_PostSmartEntity(uint32_t abi_version, uint64_t observed_gener
                                     uint32_t target_entity_id);
 bzTTResult_t BZ_TT_PostSmartPoint(uint32_t abi_version, uint64_t observed_generation,
                                    float x, float y);
-/* code must be exactly BZ_TT_BUTTON_CODE_LEN bytes (a WC3 4-char rawcode,
- * NOT NUL-terminated is fine as long as code_len == 4). */
+/* code must be one safe token of 1..BZ_TT_MAX_BUTTON_CODE_LEN alphanumeric or
+ * underscore bytes. Four-character rawcodes and generic tokens are supported;
+ * whitespace/control/punctuation are rejected rather than string-encoded. */
 bzTTResult_t BZ_TT_PostButton(uint32_t abi_version, uint64_t observed_generation,
                                const char *code, size_t code_len);
 bzTTResult_t BZ_TT_PostCancel(uint32_t abi_version, uint64_t observed_generation);
+bzTTResult_t BZ_TT_PostTargetPoint(uint32_t abi_version, uint64_t observed_generation,
+                                    float x, float y);
 
 /* --- Engine-thread-only integration -------------------------------------
  *
@@ -301,7 +340,7 @@ bzTTResult_t BZ_TT_PostCancel(uint32_t abi_version, uint64_t observed_generation
  */
 
 /* Encodes every currently-queued command through the existing clc_stringcmd
- * network command path (select/smart/smartpoint/button/cancel) into the
+ * network command path (select/smart/smartpoint/point/button) into the
  * client's outgoing netchan message. Call once per frame, before the
  * client's normal command-send step. No-op if the transport is terminal or
  * not initialized. */

@@ -66,4 +66,5 @@ void SP_ability_holylight(LPCSTR classname, ability_t *self) {
 ability_t a_holylight = {
     .cmd = holylight_command,
     .init = SP_ability_holylight,
+    .target = UI_ACTION_TARGET_ENTITY,
 };

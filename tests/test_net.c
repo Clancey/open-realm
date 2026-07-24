@@ -523,6 +523,7 @@ static void test_playerinfo_game_state_switches_to_game_input_without_retargetin
     to.fov = 50;
     to.distance = 1650;
     to.client_ui_state = CLIENT_UI_GAME;
+    to.client_ui_target = UI_ACTION_TARGET_ENTITY_OR_POINT;
 
     MSG_WriteByte(&sb, svc_playerinfo);
     MSG_WriteDeltaPlayerState(&sb, &from, &to);
@@ -532,8 +533,39 @@ static void test_playerinfo_game_state_switches_to_game_input_without_retargetin
     ASSERT_EQ_INT(cls.key_dest, key_game);
     ASSERT_EQ_INT(cls.netchan.remote_address.type, NA_IP);
     ASSERT_EQ_INT(cl.playerstate.number, 1);
+    ASSERT_EQ_INT(cl.playerstate.client_ui_target, UI_ACTION_TARGET_ENTITY_OR_POINT);
     ASSERT_EQ_FLOAT(cl.viewDef.camerastate[0].origin.x, 128.0f, 0.0001f);
     ASSERT_EQ_FLOAT(cl.viewDef.camerastate[0].origin.y, 256.0f, 0.0001f);
+}
+
+static void test_ui_frame_semantics_and_cooldown_roundtrip(void) {
+    BYTE buf[256];
+    sizeBuf_t sb = make_msg_buf(buf, sizeof(buf));
+    uiFrame_t from = { 0 };
+    uiFrame_t to = { 0 };
+    uiFrame_t decoded = { 0 };
+    DWORD bits;
+
+    to.number = 7;
+    to.flags.type = FT_COMMANDBUTTON;
+    to.flags.hidden = true;
+    to.flags.disabled = true;
+    to.flags.target = UI_ACTION_TARGET_ENTITY;
+    to.value = 0.625f;
+    MSG_WriteDeltaUIFrame(&sb, &from, &to, false);
+    ASSERT(sb.cursize > sizeof(DWORD) + sizeof(WORD));
+    ASSERT_EQ_INT(MSG_ReadEntityBits(&sb, &bits), 7);
+    MSG_ReadDeltaUIFrame(&sb, &decoded, 7, bits);
+    ASSERT_EQ_INT(decoded.flags.type, FT_COMMANDBUTTON);
+    ASSERT(decoded.flags.hidden);
+    ASSERT(decoded.flags.disabled);
+    ASSERT_EQ_INT(decoded.flags.target, UI_ACTION_TARGET_ENTITY);
+    ASSERT_EQ_FLOAT(decoded.value, 0.625f, 0.0001f);
+    ASSERT_EQ_INT(sb.readcount, sb.cursize);
+
+    SZ_Clear(&sb);
+    MSG_WriteDeltaUIFrame(&sb, &to, &to, false);
+    ASSERT_EQ_INT(sb.cursize, 0);
 }
 
 static void test_fow_full_message_unpacks_visible_and_explored_planes(void) {
@@ -697,6 +729,7 @@ void run_net_tests(void) {
     RUN_TEST(test_unit_ui_parser_preserves_distinct_strings);
     RUN_TEST(test_cursor_splat_message_sets_and_clears_state);
     RUN_TEST(test_playerinfo_game_state_switches_to_game_input_without_retargeting);
+    RUN_TEST(test_ui_frame_semantics_and_cooldown_roundtrip);
     RUN_TEST(test_fow_full_message_unpacks_visible_and_explored_planes);
     RUN_TEST(test_fow_row_delta_reconstructs_client_grid);
     RUN_TEST(test_fow_rle_255_continues_current_value);

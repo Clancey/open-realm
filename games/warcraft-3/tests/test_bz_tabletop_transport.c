@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -176,6 +177,7 @@ static void test_snapshot_reflects_player_and_configstrings(void) {
     cl.playerstate.race = 2;
     cl.playerstate.uiflags = 0x5;
     cl.playerstate.client_ui_state = 1;
+    cl.playerstate.client_ui_target = UI_ACTION_TARGET_ENTITY_OR_POINT;
     cl.playerstate.selected_entity = 7;
     cl.playerstate.start_location = 2;
     cl.playerstate.stats[PLAYERSTATE_RESOURCE_GOLD] = 250;
@@ -197,6 +199,7 @@ static void test_snapshot_reflects_player_and_configstrings(void) {
     ASSERT_EQ_INT(player->race, 2);
     ASSERT_EQ_INT(player->uiflags, 0x5);
     ASSERT_EQ_INT(player->client_ui_state, 1);
+    ASSERT_EQ_INT(player->target, BZ_TT_ACTION_TARGET_ENTITY_OR_POINT);
     ASSERT_EQ_INT(player->selected_entity, 7);
     ASSERT_EQ_INT(player->start_location, 2);
     ASSERT_EQ_INT(player->resource_gold, 250);
@@ -442,6 +445,34 @@ static void test_unit_layout_reflects_cached_ui_data(void) {
     test_transport_set_unit_layouts(NULL, 0);
 }
 
+static void test_action_layout_absent_and_malformed_states_are_explicit(void) {
+    reset_all();
+    cl.playerstate.client_ui_state = CLIENT_UI_GAME;
+    BZ_TT_PublishSnapshotFromClient();
+    const bzTTSnapshot_t *snap = BZ_TT_Latest();
+    const bzTTActionLayout_t *layout = BZ_TTSnapshot_ActionLayout(snap);
+    ASSERT_NOT_NULL(layout);
+    ASSERT(!layout->present);
+    ASSERT(!layout->valid);
+    ASSERT(layout->visible);
+    ASSERT_EQ_INT(layout->num_buttons, 0);
+    ASSERT_NULL(BZ_TTSnapshot_ActionLayout(NULL));
+    BZ_TTSnapshot_Release(snap);
+
+    DWORD malformed_size = MAX_MSGLEN + 1;
+    cl.layout[LAYER_COMMANDBAR] = malloc(sizeof(malformed_size));
+    memcpy(cl.layout[LAYER_COMMANDBAR], &malformed_size, sizeof(malformed_size));
+    BZ_TT_PublishSnapshotFromClient();
+    snap = BZ_TT_Latest();
+    layout = BZ_TTSnapshot_ActionLayout(snap);
+    ASSERT(layout->present);
+    ASSERT(!layout->valid);
+    ASSERT_EQ_INT(layout->num_buttons, 0);
+    BZ_TTSnapshot_Release(snap);
+    free(cl.layout[LAYER_COMMANDBAR]);
+    cl.layout[LAYER_COMMANDBAR] = NULL;
+}
+
 /* --- Commands: every type + its invalid inverse -------------------------- */
 
 static char *drain_and_read_message(char *out, size_t cap) {
@@ -512,8 +543,20 @@ static void test_post_button_encodes_and_rejects_invalid(void) {
     char buf[64];
     ASSERT_STR_EQ(drain_and_read_message(buf, sizeof(buf)), "button hpea");
 
-    ASSERT_EQ_INT(BZ_TT_PostButton(BZ_TABLETOP_ABI_VERSION, 0, "hpe", 3), BZ_TT_ERR_INVALID_ARGUMENT);
+    reset_netchan_message();
+    ASSERT_EQ_INT(BZ_TT_PostButton(BZ_TABLETOP_ABI_VERSION, 0, "CmdMove", 7), BZ_TT_OK);
+    BZ_TT_Drain();
+    ASSERT_STR_EQ(drain_and_read_message(buf, sizeof(buf)), "button CmdMove");
+
+    char oversized[BZ_TT_MAX_BUTTON_CODE_LEN + 1];
+    memset(oversized, 'A', sizeof(oversized));
+    ASSERT_EQ_INT(BZ_TT_PostButton(BZ_TABLETOP_ABI_VERSION, 0, "", 0), BZ_TT_ERR_INVALID_ARGUMENT);
     ASSERT_EQ_INT(BZ_TT_PostButton(BZ_TABLETOP_ABI_VERSION, 0, NULL, 4), BZ_TT_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(BZ_TT_PostButton(BZ_TABLETOP_ABI_VERSION, 0, oversized, sizeof(oversized)),
+                  BZ_TT_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(BZ_TT_PostButton(BZ_TABLETOP_ABI_VERSION, 0, "Cmd Move", 8), BZ_TT_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(BZ_TT_PostButton(BZ_TABLETOP_ABI_VERSION, 0, "Cmd\nMove", 8), BZ_TT_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(BZ_TT_PostButton(BZ_TABLETOP_ABI_VERSION, 0, "Cmd;Move", 8), BZ_TT_ERR_INVALID_ARGUMENT);
 }
 
 static void test_post_cancel_encodes_and_rejects_bad_abi_version(void) {
@@ -522,9 +565,22 @@ static void test_post_cancel_encodes_and_rejects_bad_abi_version(void) {
     ASSERT_EQ_INT(BZ_TT_PostCancel(BZ_TABLETOP_ABI_VERSION, 0), BZ_TT_OK);
     BZ_TT_Drain();
     char buf[64];
-    ASSERT_STR_EQ(drain_and_read_message(buf, sizeof(buf)), "cancel");
+    ASSERT_STR_EQ(drain_and_read_message(buf, sizeof(buf)), "button CmdCancel");
 
     ASSERT_EQ_INT(BZ_TT_PostCancel(BZ_TABLETOP_ABI_VERSION + 1, 0), BZ_TT_ERR_ABI_VERSION);
+}
+
+static void test_post_target_point_encodes_and_rejects_invalid(void) {
+    reset_all();
+    reset_netchan_message();
+    ASSERT_EQ_INT(BZ_TT_PostTargetPoint(BZ_TABLETOP_ABI_VERSION, 0, 120.0f, -45.0f), BZ_TT_OK);
+    BZ_TT_Drain();
+    char buf[64];
+    ASSERT_STR_EQ(drain_and_read_message(buf, sizeof(buf)), "point 120 -45");
+
+    ASSERT_EQ_INT(BZ_TT_PostTargetPoint(BZ_TABLETOP_ABI_VERSION, 0, NAN, 0), BZ_TT_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(BZ_TT_PostTargetPoint(BZ_TABLETOP_ABI_VERSION, 0, 0, INFINITY), BZ_TT_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(BZ_TT_PostTargetPoint(BZ_TABLETOP_ABI_VERSION, 0, 1e7f, 0), BZ_TT_ERR_INVALID_ARGUMENT);
 }
 
 static void test_queue_overflow_reports_full_without_dropping_silently(void) {
@@ -723,11 +779,13 @@ void run_bz_tabletop_transport_tests(void) {
     RUN_TEST(test_fog_dimensions_false_when_no_fog_buffer);
     RUN_TEST(test_unit_layout_is_versioned_empty_when_never_delivered);
     RUN_TEST(test_unit_layout_reflects_cached_ui_data);
+    RUN_TEST(test_action_layout_absent_and_malformed_states_are_explicit);
     RUN_TEST(test_post_select_encodes_ids_and_rejects_invalid);
     RUN_TEST(test_post_smart_entity_encodes_and_rejects_invalid);
     RUN_TEST(test_post_smart_point_encodes_and_rejects_invalid);
     RUN_TEST(test_post_button_encodes_and_rejects_invalid);
     RUN_TEST(test_post_cancel_encodes_and_rejects_bad_abi_version);
+    RUN_TEST(test_post_target_point_encodes_and_rejects_invalid);
     RUN_TEST(test_queue_overflow_reports_full_without_dropping_silently);
     RUN_TEST(test_stale_generation_rejects_commands_from_a_superseded_snapshot);
     RUN_TEST(test_concurrent_readers_survive_repeated_publish);

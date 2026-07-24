@@ -356,4 +356,5 @@ void attack_command(LPEDICT ent) {
 
 ability_t a_attack = {
     .cmd = attack_command,
+    .target = UI_ACTION_TARGET_ENTITY_OR_POINT,
 };

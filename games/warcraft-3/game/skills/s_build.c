@@ -124,4 +124,5 @@ void build_start(LPEDICT self, LPEDICT target) {
 
 ability_t a_build = {
     .cmd = build_command,
+    .target = UI_ACTION_TARGET_POINT,
 };

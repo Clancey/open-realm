@@ -602,12 +602,12 @@ LPEDICT G_GetMainSelectedUnit(LPGAMECLIENT client) {
  * (a_attack is the real symbol from s_attack.c, a_stop/a_move from their
  * respective .c files, a_patrol from s_patrol.c, a_holdpos from s_holdpos.c
  * — only the remaining abilities need stubs here.) */
-ability_t a_build       = {0};
+ability_t a_build       = { .target = UI_ACTION_TARGET_POINT };
 ability_t a_cancel      = {0};
 ability_t a_selectskill = {0};
-ability_t a_harvest     = {0};
+ability_t a_harvest     = { .target = UI_ACTION_TARGET_ENTITY };
 ability_t a_militia     = {0};
 ability_t a_repair      = {0};
 ability_t a_goldmine    = {0};
 ability_t a_devotionaura = {0};
-ability_t a_holylight   = {0};
+ability_t a_holylight   = { .target = UI_ACTION_TARGET_ENTITY };

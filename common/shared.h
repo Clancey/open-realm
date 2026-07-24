@@ -343,6 +343,13 @@ typedef enum {
     CLIENT_UI_CINEMATIC,
 } CLIENTUISTATE;
 
+typedef enum {
+    UI_ACTION_TARGET_NONE,
+    UI_ACTION_TARGET_POINT,
+    UI_ACTION_TARGET_ENTITY,
+    UI_ACTION_TARGET_ENTITY_OR_POINT,
+} uiActionTarget_t;
+
 struct playerState_s {
     DWORD number;
     QUATERNION viewquat;
@@ -353,6 +360,7 @@ struct playerState_s {
     DWORD rdflags;
     DWORD uiflags;
     DWORD client_ui_state;
+    DWORD client_ui_target;   /* authoritative uiActionTarget_t for the active server menu */
     DWORD cinematic_portrait;   /* model index of the cinematic transmission portrait (0 = none) */
     DWORD team;
     DWORD color;    // player color index (0 = red, 1 = blue, … see PLAYER_COLOR_*)
@@ -632,8 +640,12 @@ typedef struct uiFrame_s {
     } tex;
     union {
         struct {
-            FRAMETYPE type: 8;
-            BYTE alphaMode: 2;
+            DWORD type: 8;
+            DWORD alphaMode: 2;
+            DWORD hidden: 1;
+            DWORD disabled: 1;
+            DWORD target: 2;   /* uiActionTarget_t */
+            DWORD reserved: 18;
         } flags;
         DWORD flagsvalue;
     };

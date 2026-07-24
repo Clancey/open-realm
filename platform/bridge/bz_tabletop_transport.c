@@ -19,6 +19,7 @@
 #include "bz_tabletop_transport.h"
 #include "bz_tabletop_assets.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -48,6 +49,11 @@ _Static_assert((int)BZ_TT_CONN_DISCONNECTED == (int)ca_disconnected, "conn state
 _Static_assert((int)BZ_TT_CONN_CONNECTING == (int)ca_connecting, "conn state enum must track connstate_t");
 _Static_assert((int)BZ_TT_CONN_CONNECTED == (int)ca_connected, "conn state enum must track connstate_t");
 _Static_assert((int)BZ_TT_CONN_ACTIVE == (int)ca_active, "conn state enum must track connstate_t");
+_Static_assert((int)BZ_TT_ACTION_TARGET_NONE == (int)UI_ACTION_TARGET_NONE, "action target enum must track engine");
+_Static_assert((int)BZ_TT_ACTION_TARGET_POINT == (int)UI_ACTION_TARGET_POINT, "action target enum must track engine");
+_Static_assert((int)BZ_TT_ACTION_TARGET_ENTITY == (int)UI_ACTION_TARGET_ENTITY, "action target enum must track engine");
+_Static_assert((int)BZ_TT_ACTION_TARGET_ENTITY_OR_POINT == (int)UI_ACTION_TARGET_ENTITY_OR_POINT,
+               "action target enum must track engine");
 
 /* Sanity bound for smartpoint coordinates: generous enough for any real
  * map (WC3 maps are on the order of 10^2-10^4 units), tight enough to catch
@@ -88,6 +94,7 @@ struct bzTTSnapshot {
                                  * an ABI break - see BZ_TTSnapshot_ConfigStringCount(). */
     uint32_t num_unit_layouts;
     bzTTUnitLayout_t unit_layouts[BZ_TT_MAX_UNIT_LAYOUTS];
+    bzTTActionLayout_t action_layout;
 };
 
 typedef struct {
@@ -96,7 +103,7 @@ typedef struct {
     uint32_t select_count;
     uint32_t smart_entity_id;
     float point_x, point_y;
-    char button_code[BZ_TT_BUTTON_CODE_LEN];
+    char button_code[BZ_TT_MAX_BUTTON_CODE_LEN + 1];
 } bzTTQueuedCommand_t;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -271,6 +278,10 @@ bool BZ_TTSnapshot_UnitLayoutAt(const bzTTSnapshot_t *snap, uint32_t index, bzTT
     return true;
 }
 
+const bzTTActionLayout_t *BZ_TTSnapshot_ActionLayout(const bzTTSnapshot_t *snap) {
+    return snap ? &snap->action_layout : NULL;
+}
+
 /* --- Command posting ----------------------------------------------------
  *
  * Pure argument validation (ids/counts/coordinates/payload length) happens
@@ -340,11 +351,15 @@ bzTTResult_t BZ_TT_PostSmartEntity(uint32_t abi_version, uint64_t observed_gener
     return ValidateAndEnqueue(abi_version, observed_generation, &cmd);
 }
 
+static bool IsValidPoint(float x, float y) {
+    return !isnan(x) && !isnan(y) && !isinf(x) && !isinf(y) &&
+           fabsf(x) <= BZ_TT_MAX_WORLD_COORD && fabsf(y) <= BZ_TT_MAX_WORLD_COORD;
+}
+
 bzTTResult_t BZ_TT_PostSmartPoint(uint32_t abi_version, uint64_t observed_generation, float x, float y) {
     bzTTQueuedCommand_t cmd = { .type = BZ_TT_CMD_SMART_POINT };
 
-    if (isnan(x) || isnan(y) || isinf(x) || isinf(y) ||
-        fabsf(x) > BZ_TT_MAX_WORLD_COORD || fabsf(y) > BZ_TT_MAX_WORLD_COORD) {
+    if (!IsValidPoint(x, y)) {
         return BZ_TT_ERR_INVALID_ARGUMENT;
     }
     cmd.point_x = x;
@@ -352,18 +367,35 @@ bzTTResult_t BZ_TT_PostSmartPoint(uint32_t abi_version, uint64_t observed_genera
     return ValidateAndEnqueue(abi_version, observed_generation, &cmd);
 }
 
+static bool IsSafeButtonCode(const char *code, size_t code_len) {
+    if (!code || code_len == 0 || code_len > BZ_TT_MAX_BUTTON_CODE_LEN)
+        return false;
+    for (size_t i = 0; i < code_len; i++)
+        if (!isalnum((unsigned char)code[i]) && code[i] != '_')
+            return false;
+    return true;
+}
+
 bzTTResult_t BZ_TT_PostButton(uint32_t abi_version, uint64_t observed_generation, const char *code, size_t code_len) {
     bzTTQueuedCommand_t cmd = { .type = BZ_TT_CMD_BUTTON };
 
-    if (!code || code_len != BZ_TT_BUTTON_CODE_LEN) {
+    if (!IsSafeButtonCode(code, code_len)) {
         return BZ_TT_ERR_INVALID_ARGUMENT;
     }
-    memcpy(cmd.button_code, code, BZ_TT_BUTTON_CODE_LEN);
+    memcpy(cmd.button_code, code, code_len);
     return ValidateAndEnqueue(abi_version, observed_generation, &cmd);
 }
 
 bzTTResult_t BZ_TT_PostCancel(uint32_t abi_version, uint64_t observed_generation) {
     bzTTQueuedCommand_t cmd = { .type = BZ_TT_CMD_CANCEL };
+    return ValidateAndEnqueue(abi_version, observed_generation, &cmd);
+}
+
+bzTTResult_t BZ_TT_PostTargetPoint(uint32_t abi_version, uint64_t observed_generation, float x, float y) {
+    bzTTQueuedCommand_t cmd = { .type = BZ_TT_CMD_TARGET_POINT };
+    if (!IsValidPoint(x, y))
+        return BZ_TT_ERR_INVALID_ARGUMENT;
+    cmd.point_x = x; cmd.point_y = y;
     return ValidateAndEnqueue(abi_version, observed_generation, &cmd);
 }
 
@@ -394,10 +426,13 @@ static void EncodeCommand(const bzTTQueuedCommand_t *cmd) {
             snprintf(buf, sizeof(buf), "smartpoint %d %d", (int)cmd->point_x, (int)cmd->point_y);
             break;
         case BZ_TT_CMD_BUTTON:
-            snprintf(buf, sizeof(buf), "button %.4s", cmd->button_code);
+            snprintf(buf, sizeof(buf), "button %s", cmd->button_code);
             break;
         case BZ_TT_CMD_CANCEL:
-            snprintf(buf, sizeof(buf), "cancel");
+            snprintf(buf, sizeof(buf), "button CmdCancel");
+            break;
+        case BZ_TT_CMD_TARGET_POINT:
+            snprintf(buf, sizeof(buf), "point %d %d", (int)cmd->point_x, (int)cmd->point_y);
             break;
         default:
             fprintf(stderr, "BZTabletopTransport: dropping unknown queued command type %d\n", (int)cmd->type);
@@ -447,6 +482,7 @@ static void BuildPlayer(bzTTPlayer_t *out) {
     if (ps->name) {
         snprintf(out->name, sizeof(out->name), "%s", ps->name);
     }
+    out->target = (bzTTActionTarget_t)ps->client_ui_target;
 }
 
 static void BuildEntity(bzTTEntity_t *out, centity_t const *ce) {
@@ -530,6 +566,123 @@ static void BuildFog(bzTTSnapshot_t *snap) {
     memcpy(snap->fog_explored, cl.fow.explored, cells);
 }
 
+/* MSG_ReadDeltaUIFrame assumes a trusted packet; validate every variable field
+ * before calling it because cached layout corruption must publish empty state,
+ * not let its text walkers run beyond the bounded payload. */
+static bool ActionFrameFieldsFit(const sizeBuf_t *msg, DWORD bits) {
+    static BYTE const sizes[] = { 2, 2, 4, 4, 4, 4, 4, 4, 8, 4, 4, 1, 4, 0, 0, 0, 1, 4 };
+    DWORD cursor = msg->readcount;
+    if (bits & ~((1u << (sizeof(sizes) / sizeof(sizes[0]))) - 1))
+        return false;
+    FOR_LOOP(i, sizeof(sizes) / sizeof(sizes[0])) {
+        if (!(bits & (1u << i)))
+            continue;
+        if (i >= 13 && i <= 15) {
+            LPBYTE end;
+            if (cursor >= msg->cursize ||
+                !(end = memchr(msg->data + cursor, '\0', msg->cursize - cursor)))
+                return false;
+            cursor = (DWORD)(end - msg->data) + 1;
+        } else {
+            if (sizes[i] > msg->cursize - cursor)
+                return false;
+            cursor += sizes[i];
+        }
+    }
+    return true;
+}
+
+/* Only a single safe button token crosses the typed ABI. All other authored
+ * onclick forms remain visible as unsupported/disabled data and are never run. */
+static bzTTActionSemantic_t BuildActionButton(bzTTActionButton_t *out, LPCUIFRAME frame, DWORD order) {
+    LPCSTR onclick = frame->onclick ? frame->onclick : "";
+    LPCSTR code = !strncmp(onclick, "button ", 7) ? onclick + 7 : NULL;
+    size_t code_len = code ? strlen(code) : 0;
+    memset(out, 0, sizeof(*out));
+    out->image_index = frame->tex.index;
+    snprintf(out->tooltip, sizeof(out->tooltip), "%s", frame->tooltip ? frame->tooltip : "");
+    out->hotkey = (char)frame->hotkey;
+    out->grid_x = order % 4; out->grid_y = order / 4;
+    out->hidden = frame->flags.hidden;
+    out->disabled = frame->flags.disabled;
+    out->cooldown = frame->value;
+    out->target = (bzTTActionTarget_t)frame->flags.target;
+    if (code && IsSafeButtonCode(code, code_len)) {
+        snprintf(out->action_code, sizeof(out->action_code), "%s", code);
+        return !strcmp(code, "CmdCancel") ? BZ_TT_ACTION_CANCEL : BZ_TT_ACTION_BUTTON;
+    }
+    out->disabled = true;
+    return BZ_TT_ACTION_UNSUPPORTED;
+}
+
+/* Decode the authoritative command-bar cache independently of desktop layout
+ * globals so publication remains a pure, bounded client-state snapshot. */
+static void BuildActionLayout(bzTTActionLayout_t *out) {
+    LPBYTE cached = cl.layout[LAYER_COMMANDBAR];
+    sizeBuf_t msg;
+    DWORD payload_size;
+    bool terminated = false;
+    static bool warned_malformed, warned_unsupported, warned_overflow;
+
+    memset(out, 0, sizeof(*out));
+    out->current_target = (bzTTActionTarget_t)cl.playerstate.client_ui_target;
+    out->visible = cl.playerstate.client_ui_state == CLIENT_UI_GAME &&
+                   !(cl.playerstate.uiflags & (1u << LAYER_COMMANDBAR));
+    if (!cached)
+        return;
+    out->present = true;
+    memcpy(&payload_size, cached, sizeof(payload_size));
+    if (!payload_size || payload_size > MAX_MSGLEN)
+        goto malformed;
+    msg = (sizeBuf_t){ .data = cached + sizeof(payload_size), .maxsize = payload_size, .cursize = payload_size };
+    while (msg.readcount + sizeof(DWORD) + sizeof(WORD) <= msg.cursize) {
+        uiFrame_t frame = { 0 };
+        DWORD bits = 0;
+        DWORD number = MSG_ReadEntityBits(&msg, &bits);
+        if (!number && !bits) {
+            terminated = msg.readcount == msg.cursize;
+            break;
+        }
+        if (number >= MAX_LAYOUT_OBJECTS || !ActionFrameFieldsFit(&msg, bits))
+            goto malformed;
+        MSG_ReadDeltaUIFrame(&msg, &frame, number, bits);
+        if (msg.readcount >= msg.cursize)
+            goto malformed;
+        frame.buffer.size = MSG_ReadByte(&msg);
+        if (frame.buffer.size > msg.cursize - msg.readcount)
+            goto malformed;
+        msg.readcount += frame.buffer.size;
+        if (frame.flags.type != FT_COMMANDBUTTON)
+            continue;
+        if (out->num_buttons >= BZ_TT_MAX_COMMAND_BUTTONS) {
+            if (!warned_overflow) {
+                fprintf(stderr, "BZTabletopTransport: command-bar button cap exceeded (logged once)\n");
+                warned_overflow = true;
+            }
+            continue;
+        }
+        bzTTActionButton_t *button = &out->buttons[out->num_buttons];
+        button->semantic = BuildActionButton(button, &frame, out->num_buttons);
+        if (button->semantic == BZ_TT_ACTION_UNSUPPORTED && !warned_unsupported) {
+            fprintf(stderr, "BZTabletopTransport: unsupported command-bar onclick \"%s\" (logged once)\n",
+                    frame.onclick ? frame.onclick : "");
+            warned_unsupported = true;
+        }
+        out->num_buttons++;
+    }
+    if (!terminated)
+        goto malformed;
+    out->valid = true;
+    return;
+
+malformed:
+    out->num_buttons = 0;
+    if (!warned_malformed) {
+        fprintf(stderr, "BZTabletopTransport: malformed cached command-bar layout; publishing empty (logged once)\n");
+        warned_malformed = true;
+    }
+}
+
 /* Map bounds are only valid once the client has locally loaded the
  * collision model for the current map - cl.refresh_prepped tracks exactly
  * that (see client/cl_view.c's CL_PrepRefresh(), which sets it true only
@@ -589,6 +742,7 @@ void BZ_TT_PublishSnapshotFromClient(void) {
      * which mirrors whatever the last CL_ParseUnitUI() decode delivered to
      * ui.UpdateUnitUI(). Left at 0 (all-zero, versioned-empty) otherwise. */
     snap->num_unit_layouts = BZTT_CopyCachedUnitUI(snap->unit_layouts, BZ_TT_MAX_UNIT_LAYOUTS);
+    BuildActionLayout(&snap->action_layout);
 
     pthread_mutex_lock(&g_lock);
     if (!g_initialized || g_terminal) {

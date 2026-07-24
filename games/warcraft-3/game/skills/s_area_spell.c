@@ -145,10 +145,12 @@ static void channel_test_command(LPEDICT clent) {
 
 ability_t a_blizzard = {
     .cmd = blizzard_command,
+    .target = UI_ACTION_TARGET_POINT,
 };
 
 ability_t a_carrion_swarm = {
     .cmd = carrion_swarm_command,
+    .target = UI_ACTION_TARGET_POINT,
 };
 
 ability_t a_channel_test = {

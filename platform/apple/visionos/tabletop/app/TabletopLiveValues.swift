@@ -33,6 +33,7 @@ struct TabletopPlayerSnapshot: Equatable, Sendable {
     var foodCap: UInt32
     var heroTokens: UInt32
     var name: String
+    var target: TabletopActionTarget = .none
 }
 
 struct TabletopFogSnapshot: Equatable, Sendable {

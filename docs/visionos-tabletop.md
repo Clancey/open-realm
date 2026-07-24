@@ -1,12 +1,11 @@
 # visionOS tabletop runtime and native shell
 
-Layer 1 establishes a callable, statically-linked, visionOS-compatible
-Warcraft III engine runtime that a later layer can host from Swift/RealityKit
-without disturbing the desktop `openwarcraft3`/`opensc2` executables. This
-layer does **not** implement asset export/MPQ bundling, gameplay controls,
-multiplayer, or a snapshot bridge. The data layer supplies the local-only build
-contract for staging legally owned Warcraft III MPQs; no retail data is
-committed.
+The visionOS lane hosts a callable, statically linked Warcraft III engine from
+Swift/RealityKit without disturbing desktop `openwarcraft3`/`opensc2`.
+Successive layers provide the lifecycle host, copied snapshot/command transport,
+production asset descriptors, RealityKit renderer, and native spatial gameplay
+controls. The data layer supplies the local-only build contract for staging
+legally owned Warcraft III MPQs; no retail data is committed.
 
 The native shell under `platform/apple/visionos/tabletop/app/` adds a SwiftUI
 launcher and RealityKit mixed immersive board. Its pure Swift transport seam
@@ -30,6 +29,9 @@ TabletopSceneState (pure reconciliation plan)
         |
 RealityTabletopReconciler (RealityKit ownership)
 ```
+
+Layer 6 controls, command flow, state ownership, and simulator checks are
+documented in [visionos-tabletop-controls.md](visionos-tabletop-controls.md).
 
 ### Layer 5 descriptor renderer
 
@@ -152,7 +154,8 @@ Resolution errors remain `unknown` with explicit placeholder diagnostics.
 - `LiveTabletopTransport` starts/stops `BZTabletopBridge`, retains with
   `BZ_TT_Latest()`, validates both ABI versions, and copies connection,
   map, player/resource, selection, every entity POD field, fog planes, and
-  nested unit-layout/button/inventory/queue strings and arrays into
+  nested unit-layout/button/inventory/queue strings and arrays plus the
+  authoritative semantic action layout into
   framework-free Swift values. It records ABI overflow and duplicate slot IDs,
   surfaces their current values as a non-fatal diagnostic, and a tested lease
   helper always releases before returning or throwing. During that lease it
@@ -160,10 +163,10 @@ Resolution errors remain `unknown` with explicit placeholder diagnostics.
   texture, obtains/releases `BZ_TTA_LatestTerrain()`, registers/copies every
   ground and cliff image while that terrain remains retained, and releases each
   retained asset on both success and error paths.
-  Typed `TabletopCommand` values call only the five validated `BZ_TT_Post*`
-  entry points. Tap selection uses the ABI's documented generation-zero bypass
-  because the engine publishes around 60 Hz while rendering polls around 30 Hz;
-  the Swift session ID still rejects commands crossing lifecycle restarts.
+  Typed `TabletopCommand` values call only the six validated `BZ_TT_Post*`
+  entry points. Entity hits carry the copied entity ID, generation, and session
+  ID; interaction rejects a hit unless it matches the currently presented
+  snapshot. The C transport separately rejects stale generations and sessions.
 - The launcher opens the `tabletop` mixed `ImmersiveSpace` automatically. It
   first starts the selected transport and waits up to three cancellable seconds
   for an ABI-validated snapshot, then opens the space. It dismisses its window
@@ -611,9 +614,9 @@ output, or eventually running a built binary):
 - No proprietary Warcraft III data in source control. The data helper stages
   exactly the required locally owned MPQs into a caller-owned build directory;
   fixture mode does not silently replace missing production data.
-- Tap selection posts a typed command in both modes. Dragging remains local
-  placement scaffolding until an authoritative world-point interaction design
-  lands; it does not fabricate engine coordinates.
+- Entity and board hits post only typed server commands. Gameplay entities are
+  never moved locally; the separate tabletop transform supports bounded
+  translation, rotation, and scale without emitting game commands.
 - No SDL/OpenGL window, no SDL input polling, no Xcode project.
 - No audio output: Layer 2 supplies the explicit, log-once no-op backend
   `platform/apple/visionos/tabletop/client/s_tabletop_null.c`.

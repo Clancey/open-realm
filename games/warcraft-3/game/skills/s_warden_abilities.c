@@ -145,6 +145,7 @@ static void SP_ability_noop(LPCSTR classname, ability_t *self) {
 ability_t a_blink = {
     .init = SP_ability_noop,
     .cmd = blink_command,
+    .target = UI_ACTION_TARGET_POINT,
 };
 
 ability_t a_fan_of_knives = {
@@ -155,4 +156,5 @@ ability_t a_fan_of_knives = {
 ability_t a_shadow_strike = {
     .init = SP_ability_noop,
     .cmd = shadowstrike_command,
+    .target = UI_ACTION_TARGET_ENTITY,
 };

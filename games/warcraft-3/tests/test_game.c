@@ -46,6 +46,40 @@ static LPEDICT make_test_unit(void) {
     return ent;
 }
 
+static BOOL test_menu_entity_target(LPEDICT client, LPEDICT target) {
+    (void)client; (void)target; return true;
+}
+
+static BOOL test_menu_point_target(LPEDICT client, LPCVECTOR2 point) {
+    (void)client; (void)point; return true;
+}
+
+static void test_menu_target_kind_covers_every_callback_combination(void) {
+    menu_t menu = { 0 };
+    ASSERT_EQ_INT(G_MenuActionTarget(&menu), UI_ACTION_TARGET_NONE);
+    menu.on_location_selected = test_menu_point_target;
+    ASSERT_EQ_INT(G_MenuActionTarget(&menu), UI_ACTION_TARGET_POINT);
+    menu.on_location_selected = NULL;
+    menu.on_entity_selected = test_menu_entity_target;
+    ASSERT_EQ_INT(G_MenuActionTarget(&menu), UI_ACTION_TARGET_ENTITY);
+    menu.on_location_selected = test_menu_point_target;
+    ASSERT_EQ_INT(G_MenuActionTarget(&menu), UI_ACTION_TARGET_ENTITY_OR_POINT);
+}
+
+static void test_command_button_disabled_covers_cooldown_and_mana(void) {
+    EDICT ent = { 0 };
+    gameCommandButton_t button = { 0 };
+    ent.mana.value = 10;
+    ASSERT(!G_CommandButtonDisabled(&ent, &button));
+    button.cooldown = 0.01f;
+    ASSERT(G_CommandButtonDisabled(&ent, &button));
+    button.cooldown = 0;
+    button.manacost = 11;
+    ASSERT(G_CommandButtonDisabled(&ent, &button));
+    button.manacost = 10;
+    ASSERT(!G_CommandButtonDisabled(&ent, &button));
+}
+
 /* =========================================================================
  * HUD frame numbering
  * ========================================================================= */
@@ -516,6 +550,8 @@ static void test_fow_full_sync_marks_player_connected(void) {
  * ========================================================================= */
 
 BEGIN_SUITE(game)
+    RUN_TEST(test_menu_target_kind_covers_every_callback_combination);
+    RUN_TEST(test_command_button_disabled_covers_cooldown_and_mana);
     RUN_TEST(test_hud_proxy_number_advances_past_fdf_frame);
     RUN_TEST(test_hud_proxy_number_never_moves_backwards);
     RUN_TEST(test_text_exact_width_fits);

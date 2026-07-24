@@ -34,6 +34,7 @@ xcrun swiftc -parse-as-library \
     "$TABLETOP/app/TabletopPlacement.swift" \
     "$TABLETOP/app/TabletopReconciliation.swift" \
     "$TABLETOP/app/TabletopGesture.swift" \
+    "$TABLETOP/app/TabletopControls.swift" \
     "$TABLETOP/tests/TabletopPureTests.swift" \
     -o "$OUT"
 "$OUT"

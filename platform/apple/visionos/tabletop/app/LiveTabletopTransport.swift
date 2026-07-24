@@ -34,7 +34,8 @@ private struct LiveSnapshotLease: TabletopSnapshotLease {
             entities: entities.values, sessionID: sessionID, coordinateSpace: .world(bounds),
             connectionState: connectionState(), mapName: mapName, player: copyPlayer(),
             selectedEntityIDs: copySelection(), fog: try copyFog(), unitLayouts: try copyUnitLayouts(),
-            configStrings: copyConfigStrings(), entitiesOverflowCount: BZ_TTSnapshot_EntitiesOverflowCount(retained),
+            actionLayout: copyActionLayout(), configStrings: copyConfigStrings(),
+            entitiesOverflowCount: BZ_TTSnapshot_EntitiesOverflowCount(retained),
             duplicateEntityCount: entities.duplicateCount, warcraftAssets: warcraftAssets)
     }
 
@@ -81,7 +82,8 @@ private struct LiveSnapshotLease: TabletopSnapshotLease {
             clientUIState: raw.client_ui_state, selectedEntity: raw.selected_entity,
             startLocation: raw.start_location, gold: raw.resource_gold, lumber: raw.resource_lumber,
             foodUsed: raw.resource_food_used, foodCap: raw.resource_food_cap,
-            heroTokens: raw.resource_hero_tokens, name: tupleString(raw.name))
+            heroTokens: raw.resource_hero_tokens, name: tupleString(raw.name),
+            target: actionTarget(raw.target))
     }
 
     private func copySelection() -> [UInt32] {
@@ -160,6 +162,27 @@ private struct LiveSnapshotLease: TabletopSnapshotLease {
         return values
     }
 
+    private func copyActionLayout() -> TabletopActionLayoutSnapshot {
+        guard let pointer = BZ_TTSnapshot_ActionLayout(retained) else {
+            return TabletopActionLayoutSnapshot()
+        }
+        let raw = pointer.pointee
+        let count = min(Int(raw.num_buttons), Int(BZ_TT_MAX_COMMAND_BUTTONS))
+        let buttons = withUnsafeBytes(of: raw.buttons) {
+            Array($0.bindMemory(to: bzTTActionButton_t.self).prefix(count)).map {
+                TabletopActionButtonSnapshot(
+                    imageIndex: $0.image_index, tooltip: tupleString($0.tooltip),
+                    actionCode: tupleString($0.action_code), hotkey: $0.hotkey,
+                    gridX: $0.grid_x, gridY: $0.grid_y, hidden: $0.hidden, disabled: $0.disabled,
+                    cooldown: $0.cooldown, target: actionTarget($0.target),
+                    semantic: actionSemantic($0.semantic))
+            }
+        }
+        return TabletopActionLayoutSnapshot(
+            present: raw.present, visible: raw.visible, valid: raw.valid,
+            currentTarget: actionTarget(raw.current_target), buttons: buttons)
+    }
+
     private func connectionState() -> TabletopConnectionState {
         switch BZ_TTSnapshot_ConnState(retained) {
         case BZ_TT_CONN_CONNECTING: return .connecting
@@ -173,6 +196,14 @@ private struct LiveSnapshotLease: TabletopSnapshotLease {
         withUnsafeBytes(of: tuple) {
             String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self)
         }
+    }
+
+    private func actionTarget(_ raw: bzTTActionTarget_t) -> TabletopActionTarget {
+        TabletopActionTarget(rawValue: raw.rawValue) ?? .none
+    }
+
+    private func actionSemantic(_ raw: bzTTActionSemantic_t) -> TabletopActionSemantic {
+        TabletopActionSemantic(rawValue: raw.rawValue) ?? .unsupported
     }
 }
 
@@ -739,6 +770,8 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
             result = BZ_TT_PostSmartEntity(UInt32(BZ_TABLETOP_ABI_VERSION), generation, id)
         case .smartPoint(let x, let y, let generation):
             result = BZ_TT_PostSmartPoint(UInt32(BZ_TABLETOP_ABI_VERSION), generation, x, y)
+        case .targetPoint(let x, let y, let generation):
+            result = BZ_TT_PostTargetPoint(UInt32(BZ_TABLETOP_ABI_VERSION), generation, x, y)
         case .button(let bytes, let generation):
             result = bytes.withUnsafeBufferPointer {
                 BZ_TT_PostButton(UInt32(BZ_TABLETOP_ABI_VERSION), generation, $0.baseAddress, $0.count)

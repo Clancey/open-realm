@@ -79,6 +79,7 @@ netField_t entityStateFields[] = {
  *                   xmin, xmax, ymin, ymax scaled to 0-255)
  *   stat          — player stat index shown as a live number;
  *                   0 means use the text string instead
+ *   value         — type-specific scalar (command-button cooldown fraction)
  *   color         — RGBA tint
  *   text          — static display string (label, button caption, …)
  *   tooltip       — tooltip string shown on hover
@@ -107,6 +108,7 @@ netField_t uiFrameFields[] = {
     { NETF(uiFrame_t, tooltip), NFT_TEXT },
     { NETF(uiFrame_t, onclick), NFT_TEXT },
     { NETF(uiFrame_t, hotkey), NFT_BYTE },
+    { NETF(uiFrame_t, value), NFT_FLOAT },
     { NULL }
 };
 
@@ -144,6 +146,7 @@ netField_t playerStateFields[] = {
     { NETF(PLAYER, texts[5]), NFT_DUPTEXT },
     { NETF(PLAYER, texts[6]), NFT_DUPTEXT },
     { NETF(PLAYER, texts[7]), NFT_DUPTEXT },
+    { NETF(PLAYER, client_ui_target), NFT_LONG },
     { NULL }
 };
 void MSG_Write(LPSIZEBUF buf, LPCVOID value, DWORD size) {
@@ -287,21 +290,21 @@ static DWORD MSG_GetBits(void const *from,
         int *toF = (int *)((uint8_t *)to + field->offset);
         switch (field->type) {
             case NFT_VECTOR2:
-                if (memcmp(fromF, toF, sizeof(VECTOR2))!=0) bits |= 1 << (field - fields);
+                if (memcmp(fromF, toF, sizeof(VECTOR2))!=0) bits |= 1u << (field - fields);
                 break;
             case NFT_VECTOR3:
             case NFT_VECTOR3_FLOAT:
-                if (memcmp(fromF, toF, sizeof(VECTOR3))!=0) bits |= 1 << (field - fields);
+                if (memcmp(fromF, toF, sizeof(VECTOR3))!=0) bits |= 1u << (field - fields);
                 break;
             case NFT_QUATERNION:
-                if (memcmp(fromF, toF, sizeof(QUATERNION))!=0) bits |= 1 << (field - fields);
+                if (memcmp(fromF, toF, sizeof(QUATERNION))!=0) bits |= 1u << (field - fields);
                 break;
             default:
                 if (*fromF != *toF) {
                     if ((field->type == NFT_TEXT || field->type == NFT_DUPTEXT) && **((LPCSTR *)toF) == 0) {
                         continue;
                     }
-                    bits |= 1 << (field - fields);
+                    bits |= 1u << (field - fields);
                 }
                 break;
         }
@@ -315,7 +318,7 @@ static void MSG_WriteFields(LPSIZEBUF msg,
                             DWORD bits)
 {
     for (netField_t *field = fields; field->name; field++) {
-        if ((bits & (1 << (field - fields))) == 0)
+        if ((bits & (1u << (field - fields))) == 0)
             continue;
         int *toF = (int *)((uint8_t *)to + field->offset);
         FLOAT *_float = (FLOAT *)toF;
@@ -343,7 +346,7 @@ static void MSG_ReadFields(LPSIZEBUF msg,
                            DWORD bits)
 {
     for (netField_t *field = fields; field->name; field++) {
-        if ((bits & (1 << (field - fields))) == 0)
+        if ((bits & (1u << (field - fields))) == 0)
             continue;
         int *toF = (int *)((uint8_t *)edict + field->offset);
         FLOAT *_float = (FLOAT *)toF;

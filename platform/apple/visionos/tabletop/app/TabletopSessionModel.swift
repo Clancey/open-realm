@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor
 final class TabletopSessionModel: ObservableObject {
+    private static let currentTransportGeneration: UInt64 = 0
     @Published private(set) var renderSnapshot = TabletopRenderSnapshot.empty
     @Published private(set) var errorMessage: String?
     @Published private(set) var snapshotDiagnostic: String?
@@ -150,16 +151,82 @@ final class TabletopSessionModel: ObservableObject {
         pollingTask = nil
     }
 
-    func select(entityID: UInt64) {
-        guard let commandTransport, let id = UInt32(exactly: entityID), renderSnapshot.sessionID != 0 else { return }
-        let epoch = commandEpoch, sessionID = renderSnapshot.sessionID
-        let command = TabletopCommand.select(entityIDs: [id], observedGeneration: 0,
-                                              sessionID: sessionID)
+    func select(_ hit: TabletopEntityHit, mode: TabletopSelectionMode) {
+        do {
+            let ids = try TabletopHitValidation.selection(hit, mode: mode, in: renderSnapshot)
+            submit(.select(entityIDs: ids, observedGeneration: Self.currentTransportGeneration,
+                           sessionID: hit.sessionID))
+        } catch { commandFailed(error) }
+    }
+
+    func smartEntity(_ hit: TabletopEntityHit) {
+        do {
+            let id = try TabletopHitValidation.entityID(hit, in: renderSnapshot)
+            submit(.smartEntity(entityID: id, observedGeneration: Self.currentTransportGeneration,
+                                sessionID: hit.sessionID))
+        } catch { commandFailed(error) }
+    }
+
+    func targetEntity(_ hit: TabletopEntityHit) {
+        do {
+            guard renderSnapshot.actionLayout.currentTarget.acceptsEntity else {
+                throw TabletopTransportError.invalidInteractionState("The server is not accepting an entity target")
+            }
+            let id = try TabletopHitValidation.entityID(hit, in: renderSnapshot)
+            submit(.select(entityIDs: [id], observedGeneration: Self.currentTransportGeneration,
+                           sessionID: hit.sessionID))
+        } catch { commandFailed(error) }
+    }
+
+    func smartPoint(x: Float, y: Float) {
+        submit(.smartPoint(x: x, y: y, observedGeneration: Self.currentTransportGeneration,
+                           sessionID: renderSnapshot.sessionID))
+    }
+
+    func targetPoint(x: Float, y: Float) {
+        guard renderSnapshot.actionLayout.currentTarget.acceptsPoint else {
+            commandFailed(TabletopTransportError.invalidInteractionState(
+                "The server is not accepting a point target"))
+            return
+        }
+        submit(.targetPoint(x: x, y: y, observedGeneration: Self.currentTransportGeneration,
+                            sessionID: renderSnapshot.sessionID))
+    }
+
+    func activate(_ button: TabletopActionButtonSnapshot) {
+        do {
+            submit(try TabletopActionValidation.command(
+                button, layout: renderSnapshot.actionLayout, generation: Self.currentTransportGeneration,
+                sessionID: renderSnapshot.sessionID))
+        } catch { commandFailed(error) }
+    }
+
+    func cancelTargeting() {
+        guard renderSnapshot.actionLayout.currentTarget != .none else {
+            commandFailed(TabletopTransportError.invalidInteractionState(
+                "There is no authoritative target mode to cancel"))
+            return
+        }
+        submit(.cancel(observedGeneration: Self.currentTransportGeneration, sessionID: renderSnapshot.sessionID))
+    }
+
+    private func submit(_ command: TabletopCommand) {
+        guard let commandTransport, phase == .running, renderSnapshot.sessionID != 0 else {
+            commandFailed(TabletopTransportError.terminal)
+            return
+        }
+        let epoch = commandEpoch
         Task {
             guard commandEpoch == epoch else { return }
             do { try await commandTransport.post(command) }
             catch where commandEpoch == epoch { errorMessage = "Tabletop command failed: \(error)" }
         }
+    }
+
+    private func commandFailed(_ error: Error) {
+        let message = "Tabletop command failed: \(error)"
+        errorMessage = message
+        FileHandle.standardError.write(Data("OpenRealmTabletop: \(message)\n".utf8))
     }
 
     func stop() async {

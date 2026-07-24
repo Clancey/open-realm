@@ -112,6 +112,7 @@ enum TabletopLoweredCommand: Equatable, Sendable {
     case select([UInt32], UInt64)
     case smartEntity(UInt32, UInt64)
     case smartPoint(Float, Float, UInt64)
+    case targetPoint(Float, Float, UInt64)
     case button([Int8], UInt64)
     case cancel(UInt64)
 }
@@ -137,10 +138,18 @@ enum TabletopCommandLowering {
                 throw TabletopTransportError.invalidCommand("Invalid smart-target point")
             }
             return .smartPoint(x, y, generation)
+        case .targetPoint(let x, let y, let generation, _):
+            guard x.isFinite, y.isFinite, abs(x) <= maxWorldCoordinate, abs(y) <= maxWorldCoordinate else {
+                throw TabletopTransportError.invalidCommand("Invalid active target point")
+            }
+            return .targetPoint(x, y, generation)
         case .button(let code, let generation, _):
             let bytes = code.utf8.map { Int8(bitPattern: $0) }
-            guard bytes.count == 4 else {
-                throw TabletopTransportError.invalidCommand("Button code must contain exactly four UTF-8 bytes")
+            guard !bytes.isEmpty, bytes.count <= 255,
+                  code.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) ||
+                                         ($0 >= 97 && $0 <= 122) || $0 == 95 }) else {
+                throw TabletopTransportError.invalidCommand(
+                    "Button code must be one safe token of 1...255 UTF-8 bytes")
             }
             return .button(bytes, generation)
         case .cancel(let generation, _): return .cancel(generation)
