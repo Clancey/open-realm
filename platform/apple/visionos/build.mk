@@ -1,27 +1,35 @@
 # ---------------------------------------------------------------------------
-# visionOS tabletop engine archives (Layer 1: callable static WC3 engine)
+# visionOS tabletop engine archives (Layer 1: callable static WC3 engine;
+# Layer 2: real headless client + bz_tabletop_transport ABI)
 #
 # Builds a statically-linked, headless Warcraft III engine library for the
 # visionOS Simulator (xrsimulator) and device (xros) SDKs, using only
 # `xcrun`/clang target triples and `ar` - no Xcode project is created or
 # required. The result is a set of `.a` archives under
-# build/lib/visionos/<platform>/ for a later Objective-C++ host
-# (platform/apple/visionos/tabletop/bridge/) to link against.
+# build/lib/visionos/<platform>/ for a later Objective-C++/Swift host
+# (platform/apple/visionos/tabletop/bridge/, platform/bridge/) to link
+# against.
 #
-# This build target intentionally excludes client/ (SDL window + SDL input
-# polling + per-game gameplay input), renderer/ (SDL/OpenGL), and sound/
-# (SDL audio): the real common/*.c and server/*.c never call into those
-# modules directly (verified: no CM_/S_/R_ references outside client/), so
-# the only replacement needed is platform/apple/visionos/tabletop/null/
-# cl_null.c, a small explicit null client that satisfies the handful of
-# CL_/Key_/Cmd_ForwardToServer symbols common/bz_runtime.c and
-# common/common.c call unconditionally (see that file's header comment).
-#
-# Desktop dylib/so/dll targets defined elsewhere in this Makefile and in
-# games/warcraft-3/game.mk are entirely unaffected by this file.
+# This build target links the real client/*.c networking/parse/state path
+# (cl_main.c, cl_parse.c, cl_view.c, cl_tent.c, keys.c) so the tabletop
+# transport (platform/bridge/bz_tabletop_transport.c) can publish
+# authoritative snapshots straight from cl.ents/cl.playerstate/cl.selection/
+# cl.fow/configstrings - never by reading server ge->edicts directly (see
+# docs/visionos-tabletop.md). It still excludes renderer/ (SDL/OpenGL),
+# sound/ (SDL audio), and the SDL-tainted client/ files (cl_input.c,
+# cl_input_w3.c, cl_input_wow.c, cl_scrn.c, console.c, cl_fx.c, cl_layout.c):
+# platform/apple/visionos/tabletop/client/ supplies small, explicit,
+# link-selected headless replacements for exactly the renderer/input/sound/
+# UI-drawing seams the real client calls unconditionally (R_GetAPI/
+# R_StdoutGetAPI, S_Init/S_Shutdown/S_PlaySound*, UI_GetAPI, CL_Input,
+# CL_SetGameplayBindings, SCR_UpdateScreen, CL_ParseUnitUI, CON_printf/
+# CON_Init, CL_EntityEvent) - see that directory's header comments for why
+# each one is safe to no-op or simplify headlessly. None of them create a
+# window, open a GL context, or poll platform input.
 # ---------------------------------------------------------------------------
 BZ_XR_MIN_OS  ?= 1.0
-BZ_XR_NULL_DIR := platform/apple/visionos/tabletop/null
+BZ_XR_TT_CLIENT_DIR := platform/apple/visionos/tabletop/client
+BZ_XR_BRIDGE_TRANSPORT_DIR := platform/bridge
 BZ_XR_LIB_DIR  := $(LIB_DIR)/visionos
 
 # Independent from the desktop CFLAGS/WC3_CFLAGS: those pick up Darwin's
@@ -36,9 +44,21 @@ BZ_XR_FDF_CFLAGS   := $(BZ_XR_CFLAGS) -DSTB_FDF_IMPLEMENTATION -DSTB_FDF_GLOBALS
 # directly (the same trick the desktop GAME_LIB dylib relies on, since each
 # dylib needs its own copy under macOS's two-level namespace). Combining a
 # second copy into one static archive would duplicate-define CM_*/world.
+#
+# The real client sources plus this layer's headless glue and the transport
+# ABI are listed explicitly (not via `find | sort`, unlike the rest of this
+# unity object): the null glue files must be compiled ahead of the real
+# client files that call their symbols without a header-visible prototype
+# (e.g. client/cl_view.c calls CL_MouseOverGameplayUI(), which only
+# client/cl_input_local.h - itself SDL-tainted and excluded - declares).
+# This mirrors how the desktop unity build (Makefile's `CSRC`, alphabetically
+# sorted) happens to place cl_input.c before cl_view.c today.
+BZ_XR_CLIENT_SRCS := $(shell find $(BZ_XR_TT_CLIENT_DIR) -name '*.c' | sort) \
+                     $(BZ_XR_BRIDGE_TRANSPORT_DIR)/bz_tabletop_transport.c \
+                     client/cl_main.c client/cl_parse.c client/cl_view.c client/cl_tent.c client/keys.c
 BZ_XR_ENGINE_SRCS := $(shell find common -name '*.c' ! -name main.c ! -name macos.c ! -name world.c ! -name routing.c | sort) \
                      $(shell find server -name '*.c' | sort) \
-                     $(BZ_XR_NULL_DIR)/cl_null.c
+                     $(BZ_XR_CLIENT_SRCS)
 BZ_XR_GAME_SRCS   := $(shell find $(WC3_DIR)/game -name '*.c' | sort) \
                      $(shell find $(WC3_DIR)/common -name '*.c' ! -name world_w3.c | sort)
 BZ_XR_JASS_SRCS   := $(shell find $(WC3_JASS_DIR) -name '*.c' | sort)

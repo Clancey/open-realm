@@ -21,14 +21,16 @@ common/bz_runtime.{h,c}  <----------------------- bz_tabletop_lifecycle.{h,c}
   frame / shutdown), factored out of the desktop `main()` loop. Both the
   desktop executable and the visionOS bridge call the exact same three
   functions; neither duplicates client/server/network bring-up.
-- **`platform/apple/visionos/tabletop/null/cl_null.c`** — a real, log-once
-  (never silent) null implementation of the handful of `CL_*`/`Key_*`/
-  `Cmd_ForwardToServer` symbols `common/bz_runtime.c` and `common/common.c`
-  call unconditionally. It replaces the entire `client/` module (SDL window,
-  SDL input polling, OpenGL renderer dispatch) for this static archive — the
+- **`platform/apple/visionos/tabletop/null/cl_null.c`** *(Layer 1 only —
+  retired in Layer 2, see below)* — a real, log-once (never silent) null
+  implementation of the handful of `CL_*`/`Key_*`/`Cmd_ForwardToServer`
+  symbols `common/bz_runtime.c` and `common/common.c` call unconditionally.
+  It replaced the entire `client/` module (SDL window, SDL input polling,
+  OpenGL renderer dispatch) for this static archive in Layer 1, since the
   real `common/*.c` and `server/*.c` never reference `client/`-only symbols
-  directly, so this is the only replacement needed. See its header comment
-  for the exact symbol list and log-once rationale.
+  directly. Layer 2 deletes this file and links the real `client/` networking/
+  parse/state path instead — see the "Layer 2" section below for why and
+  with what it was replaced.
 - **`platform/apple/visionos/build.mk`** — builds
   `build/lib/visionos/<platform>/libopenwarcraft3-engine.a` (the headless
   engine) for `xrsimulator` and `xros` via `xcrun`/clang target triples and
@@ -54,7 +56,7 @@ make visionos-bridge      # both of the above
 Each `<platform>` target produces:
 
 ```
-build/lib/visionos/<platform>/libopenwarcraft3-engine.a   # common/ + server/ + cl_null.c + game/jass/sheet/shared
+build/lib/visionos/<platform>/libopenwarcraft3-engine.a   # common/ + server/ + real client/ + tabletop client/ glue (see "Layer 2" below; Layer 1 originally used cl_null.c here, now retired) + game/jass/sheet/shared
 build/lib/visionos/<platform>/libopenwarcraft3-bridge.a   # bz_tabletop_lifecycle.o + bz_tabletop_bridge.o
 build/lib/visionos/<platform>/bridge-link-smoke           # link-check binary (built, not run — see below)
 ```
@@ -250,12 +252,229 @@ output, or eventually running a built binary):
 - No SDL/OpenGL window, no SDL input polling, no Xcode project.
 - No audio: `sound/s_sound.c` is not linked into the tabletop archive at
   all (see `platform/apple/visionos/tabletop/null/cl_null.c`'s header
-  comment) — not even a null/dummy backend exists yet. A later layer adds
-  an explicit, named simulator-only dummy audio backend; this layer is
-  silent-by-omission only because nothing currently calls into an audio
-  API on this path, not because a call is being dropped.
+  comment) — not even a null/dummy backend existed yet in Layer 1. *(Layer 2
+  adds an explicit, named, log-once-only no-op audio backend,
+  `platform/apple/visionos/tabletop/client/s_tabletop_null.c` — see the
+  "Layer 2" section below. This bullet describes the original Layer 1-only
+  state.)*
 - No code signing: the `xros` (device) static targets are deliberately
   unsigned. Producing a signed, installable device build is an external
   gate (a valid Apple provisioning profile/signing identity) outside this
   layer's scope — see the `xros`/`xros-bridge` build notes above.
 
+# Layer 2: real headless client + snapshot/command transport
+
+Layer 2 replaces Layer 1's link-smoke-only null client with the **real**
+`client/*.c` networking/parse/state path, and adds
+`platform/bridge/bz_tabletop_transport.{h,c}` — a pure C, versioned,
+Objective-C/Swift/SDL/RealityKit-free ABI that a later native Swift/
+RealityKit host imports directly (or via a bridging header) to read
+authoritative snapshots and post typed commands. It still does **not**
+implement Swift/SwiftUI/RealityKit, MPQ bundling, asset decoding/export,
+visible rendering, audio, menus, or multiplayer — those remain later layers.
+Do not confuse `bz_tabletop_transport.{h,c}` (this layer, a plain-C ABI
+under `platform/bridge/`) with the Objective-C++ lifecycle bridge class
+`BZTabletopBridge` (`platform/apple/visionos/tabletop/bridge/`, Layer 1) —
+they are two distinct, separately-versioned surfaces.
+
+## Why a real client, not a bigger null client
+
+Layer 1's `cl_null.c` never parsed a single server packet — it existed only
+to satisfy link-time symbol requirements. A snapshot transport needs
+**authoritative** state: `cl.ents`/`cl.playerstate`/`cl.selection`/`cl.fow`/
+configstrings as decoded by the real `client/cl_parse.c`, never by reading
+`ge->edicts` directly out of the server (that would bypass client-side
+prediction/interpolation and the client/server boundary this engine relies
+on everywhere else). So Layer 2 retires `cl_null.c` and links the real
+`client/cl_main.c`, `cl_parse.c`, `cl_view.c`, `cl_tent.c`, and `keys.c`,
+replacing only the renderer/input/sound/UI *drawing* seams those files call
+unconditionally — never the network/parse/state logic itself.
+
+## New headless client glue: `platform/apple/visionos/tabletop/client/`
+
+Each file is a small, explicit, named replacement for exactly the symbols
+the real, linked client files call unconditionally — never a silent or
+partial reimplementation of the excluded module:
+
+| File | Replaces | What it does |
+|---|---|---|
+| `r_tabletop_null.c` | `renderer/` (SDL/OpenGL) | `R_GetAPI()`/`R_StdoutGetAPI()` — every entry point is a harmless placeholder or named no-op; creates no window/GL context; logs only one-time Init/Shutdown/RegisterMap events, never per-frame. Also owns `BZ_TT_Init()`/`BZ_TT_Shutdown()` pairing (bracketed by `re.Init()`/`re.Shutdown()`, the one seam guaranteed to bracket exactly one client session). |
+| `s_tabletop_null.c` | `sound/` (SDL audio) | `S_Init()` logs once ("no audio backend (no-op)"); `S_PlaySound*()` are silent no-ops (called per-event, must not spam). |
+| `ui_tabletop_null.c` | per-game `ui/` (menu/glue UI) | No-op `UI_GetAPI()`, plus a same-thread cache fed by `ui.UpdateUnitUI()` (from `CL_ParseUnitUI()`) that `BZTT_CopyCachedUnitUI()` reads back into `bzTTUnitLayout_t` — the one UI callback that carries data the transport's snapshot needs. |
+| `cl_input_tabletop_null.c` | `cl_input.c`/`cl_input_w3.c`/`cl_input_wow.c` (SDL input) | Only the input-facing symbols other linked files call unconditionally; calls `BZ_TT_Drain()` from `CL_Input()` — the same point real mouse-driven commands would otherwise queue, always before `CL_SendCommand()`. |
+| `cl_scrn_tabletop_null.c` | `cl_scrn.c` (SDL draw calls) | "Draw the frame" → `BZ_TT_PublishSnapshotFromClient()`; `svc_unit_ui` decode is forwarded verbatim to the UI glue cache. |
+| `cl_console_tabletop_null.c` | `console.c` (SDL text input + ring buffer) | `CON_printf()` → `stderr` directly (more useful than the original, which was only visible if the in-game console screen was drawn). |
+| `cl_fx_tabletop_null.c` | `cl_fx.c` (particle/sound entity events) | `CL_EntityEvent()` is a no-op — the event is still visible to the transport via `entityState_t.event`. |
+| `bz_tabletop_client_glue.h` | — | Internal (non-ABI) seam declaring `BZTT_CopyCachedUnitUI()`; free to use engine types, unlike `bz_tabletop_transport.h`. |
+
+`platform/apple/visionos/build.mk`'s `BZ_XR_CLIENT_SRCS` lists these files
+(plus `bz_tabletop_transport.c` and the real client files) **explicitly**,
+not via `find | sort` like the rest of the unity object: the null glue
+files must compile ahead of real client files that call their symbols
+without a header-visible prototype (e.g. `cl_view.c` calls
+`CL_MouseOverGameplayUI()`, declared only in the excluded, SDL-tainted
+`cl_input_local.h`) — mirroring how the desktop unity build's alphabetical
+`CSRC` ordering happens to place `cl_input.c` before `cl_view.c` today.
+
+## `bz_tabletop_transport.{h,c}` — the public ABI
+
+`BZ_TABLETOP_ABI_VERSION` (currently `1`) must be bumped on any incompatible
+struct/enum/function-signature change; the ABI is append-only (existing
+fields/values are never renumbered or removed). The header includes nothing
+but `<stdbool.h>`/`<stddef.h>`/`<stdint.h>` and no engine headers — every
+type is a bounded, deep-copied POD value, never a live pointer into engine
+state.
+
+**Snapshots** (`bzTTSnapshot_t`, opaque) are immutable, reference-counted,
+with a monotonically increasing `generation`. `BZ_TT_Latest()` returns a
+retained reference the caller must `BZ_TTSnapshot_Release()`; once retained,
+contents never change underneath the caller, from any thread. Accessors
+expose: connection state (`bzTTConnState_t`, mirrors `connstate_t`); map
+name/bounds (`false`/zeroed if no map is loaded — raw terrain tile/height
+data has no public engine accessor yet, so it is intentionally **not**
+exposed, a documented gap rather than fabricated data); the local player
+(`bzTTPlayer_t` — number/team/color/race/uiflags/resources); selected entity
+ids; visible entities (`bzTTEntity_t`, deep-copied subset of
+`entityState_t`, capped at `BZ_TT_MAX_ENTITIES` = 1024 with an explicit
+`EntitiesOverflowCount()` rather than silent truncation); fog-of-war
+dimensions plus visible/explored planes; configstrings by index
+(`BZ_TTSnapshot_ConfigStringCount()` returns the number of captured slots so
+callers can iterate `[0, count)` without importing the engine-private
+`MAX_CONFIGSTRINGS` constant; within that range `BZ_TTSnapshot_ConfigString()`
+returning `false` means a validly-empty slot, and `false` at or beyond
+`count` means out of range — added post-freeze, append-only, no ABI version
+bump, to unblock Swift-side enumeration); and a
+bounded, best-effort command-card/inventory/build-queue layout per unit
+(`bzTTUnitLayout_t`, decoded from the legacy `svc_unit_ui` message — see
+`CL_ParseUnitUI()` in `client/cl_scrn.c` — frequently all-zero today since
+the primary command-card HUD is computed client-side in a game-specific UI
+library, out of scope here; reported honestly as empty, not backfilled).
+
+**Commands** are typed, never free-form strings, posted from any thread via
+`BZ_TT_PostSelect/SmartEntity/SmartPoint/Button/Cancel()` into a bounded
+256-entry (`BZ_TT_COMMAND_QUEUE_CAPACITY`) ring buffer. Every Post validates
+entity ids (`< BZ_TT_ENTITY_ID_LIMIT`), counts (`<=
+BZ_TT_MAX_SELECT_IDS_PER_COMMAND`), coordinates (finite floats), payload
+length (button codes must be exactly `BZ_TT_BUTTON_CODE_LEN` = 4 bytes), the
+caller's `abi_version` against `BZ_TABLETOP_ABI_VERSION`, and an optional
+`observed_generation` staleness check (pass 0 to skip; otherwise rejected
+with `BZ_TT_ERR_STALE_GENERATION` if a strictly newer snapshot has since
+published). `BZ_TT_Drain()` — engine/client thread only, not safe to call
+concurrently with itself — encodes every queued command through the
+existing `clc_stringcmd` network command path (`select`/`smart`/
+`smartpoint`/`button`/`cancel`, wire strings built with `SZ_Printf`), so a
+native/Swift caller can never mutate game state directly; it only ever
+reaches the game through the same command path a real player's input would.
+
+**Synchronization**: one lock backs `Init`/`Shutdown`/`Publish`/`Latest`/
+`Retain`/`Release`/`Post*`/`Drain`. `Publish`/`Drain` recheck
+initialized/terminal state while holding that same lock, so `Shutdown`
+(idempotent, safe from any thread) can never race a concurrent reader/
+writer into observing half-torn-down state; the lock itself is a static
+POSIX object, never destroyed, so no path can ever reach a destroyed mutex.
+
+## Client integration order (per frame)
+
+`BZ_TT_Drain()` runs from `CL_Input()`, **before** `CL_SendCommand()` in the
+normal per-frame client loop — so typed commands are encoded into the same
+outgoing netchan message a real player's input would have populated.
+`BZ_TT_PublishSnapshotFromClient()` runs from `SCR_UpdateScreen()`'s
+replacement, **after** the client has finished reading and parsing all
+pending server packets for that frame (`cl.ents`/`cl.playerstate`/
+`cl.selection`/`cl.fow`/configstrings are therefore always internally
+consistent in a published snapshot — never a partially-applied delta).
+Existing loopback listen-server semantics (`common/net.c`'s
+`NET_SendLoopPacket`/`NET_GetLoopPacket`) are unmodified; the desktop
+`openwarcraft3`/`opensc2` executables never link this transport at all, so
+their behavior is unaffected.
+
+## Testing
+
+```sh
+make test-bz-tabletop-transport   # this layer's transport suite alone
+make test                         # full suite, includes the above
+```
+
+Three new files under `games/warcraft-3/tests/`:
+
+- `test_bz_tabletop_transport.c` — ABI-level unit suite: lifecycle
+  (not-initialized/terminal error ordering — see note below), snapshot
+  generation/immutability/refcounting, content correctness (player,
+  configstrings, map bounds, entities, selection, fog), every
+  `BZ_TT_Post*` command plus its invalid inverse, queue overflow at
+  capacity, stale-generation rejection, and concurrency stress tests
+  (concurrent readers vs. publisher, terminal cleanup races, repeated
+  publish/shutdown races).
+- `test_bz_tabletop_transport_client.c` — integration tests using the
+  **real** production wire-format functions, not a parallel reimplementation:
+  builds a genuine wire message with `MSG_WriteDeltaEntity`/
+  `MSG_WriteDeltaPlayerState`, decodes it with the real
+  `CL_ParseServerMessage()`, then asserts `BZ_TT_PublishSnapshotFromClient()`
+  produces the expected snapshot; and a real-loopback command-delivery test
+  that drains a posted command through genuine `Netchan_Transmit()` →
+  `NET_SendLoopPacket()` → `NET_GetPacket()` plumbing (no UDP socket or full
+  server bootstrap needed — `cls.netchan.remote_address.type = NA_LOOPBACK`
+  is sufficient).
+- `test_bz_tabletop_transport_stubs.c` — the handful of link-time-only
+  symbols the real linked files still need (`CL_BeginLoadingMap`,
+  `Cvar_Integer/String`, `MemAlloc/MemFree`, `CM_GetWorldBounds`,
+  `BZTT_CopyCachedUnitUI`, ...) instead of linking the full cvar/cmd
+  subsystem or the real same-thread UI cache.
+
+`games/warcraft-3/game.mk`'s `TEST_SRCS` wildcard (`find ... -name
+'test_*.c'`) excludes all four of the above files explicitly, the same way
+it already excludes `test_bz_tabletop_lifecycle.c` and friends — otherwise
+they would also be swept into the main `test_openwarcraft3` binary, which
+does not link `bz_tabletop_transport.c`, producing undefined-symbol link
+errors. Any future `test_bz_tabletop_*` file must be added to this
+exclusion list.
+
+**Note on the "not initialized" vs. "terminal" test**: the transport's
+globals default `g_initialized = false` and `g_terminal = true` (i.e. both
+are true pre-`Init()`), and validation checks `!g_initialized` before
+`g_terminal`. `BZ_TT_Shutdown()` never resets `g_initialized`, so
+"not-initialized" is only observable as the very first test to touch the
+module in a process, before any `BZ_TT_Init()` call has ever run — the test
+file documents this ordering dependency inline.
+
+Verified clean under ThreadSanitizer and AddressSanitizer +
+UndefinedBehaviorSanitizer (410/410 assertions passing under all three
+configurations, plus the plain build).
+
+## Wire-protocol quirks discovered while building the real-parse test
+
+- `common/msg.c`'s `entityStateFields[]`/`playerStateFields[]` tables are
+  the ground truth for what actually crosses the wire.
+  `entityState_t.sound/event/renderfx/ability` and
+  `playerState_t.selected_entity` are **not** wire-transmitted (client-local
+  only) — the transport still reports them from `cl.ents`, just never
+  expect them to reflect a just-received packet delta in a test.
+  `playerState_t.stats[]` wire-transmits only even indices among
+  `{0,2,4,6,8,16,18,20,...}`; `PLAYERSTATE_RESOURCE_GOLD` (1),
+  `_HERO_TOKENS` (3), and `_FOOD_USED` (5) are **not** wire indices — a
+  pre-existing protocol characteristic, not a bug.
+- `CL_ReadPacketEntities()` always sets `cl.num_entities =
+  MAX_CLIENT_ENTITIES` (16384) regardless of how many entities a packet
+  actually touched. This means any real `svc_packetentities` parse makes
+  `BZ_TTSnapshot_EntityCount()` report exactly `BZ_TT_MAX_ENTITIES` (1024)
+  and `EntitiesOverflowCount()` report exactly `MAX_CLIENT_ENTITIES -
+  BZ_TT_MAX_ENTITIES` (15360) — a pre-existing real-parser characteristic,
+  asserted exactly in the test rather than treated as a bug.
+- `Netchan_Transmit()` resets `netchan->message.cursize` to 0 after handing
+  off to `NET_SendPacket()`, and is a no-op if `cursize == 0` — useful for
+  asserting both that a real send actually ran, and that draining an empty
+  command queue never transmits an empty datagram.
+
+## What Layer 2 does not do
+
+- No Swift/SwiftUI/RealityKit code, no MPQ bundling, no asset decoding/
+  export, no visible rendering, no audio, no menus, no multiplayer beyond
+  what `common/net.c` already provides headlessly (unchanged from Layer 1).
+- No raw terrain tile/height data in snapshots (no public engine accessor
+  exists yet — documented gap above, not silently substituted).
+- No free-form command strings cross the ABI — only the five typed
+  `bzTTCommandType_t` variants.
+- Never reads server `ge->edicts` directly, and never adds fields to
+  `entityState_t`, `playerState_t`, renderer structs, or game import/export
+  APIs — every new field lives in the transport's own `bzTT*_t` value
+  types.

@@ -12,8 +12,8 @@
 #include "client.h"
 #include "tr_public.h"
 #include "ui_layout.h"
-#include "sound/s_local.h"
 #include <arpa/inet.h>
+#include <stdlib.h> // atoi() - previously pulled in transitively via sound/s_local.h's SDL2/SDL.h
 
 refExport_t re;
 uiExport_t ui;
