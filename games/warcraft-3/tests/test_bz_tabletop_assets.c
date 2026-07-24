@@ -550,7 +550,7 @@ static void *register_water(void *opaque) {
     return NULL;
 }
 
-/* Water is one C-authored semantic image, referenced only when W3E corners require it. */
+/* Water is one C-authored image, referenced only when desktop would render at least one tile. */
 static void test_water_texture_semantic_success_missing_and_concurrency(void) {
     enum { THREADS = 8 };
     const bzTTTerrain_t *terrain;
@@ -558,6 +558,7 @@ static void test_water_texture_semantic_success_missing_and_concurrency(void) {
     bzTTTerrainTextureInfo_t texture;
     waterRegistrationCtx_t ctx[THREADS];
     pthread_t threads[THREADS];
+    LPWAR3MAPVERTEX vertices;
 
     for (int tft = 0; tft < 2; tft++) {
         test_assets_set_tft(tft); test_assets_set_water_available(true);
@@ -578,6 +579,31 @@ static void test_water_texture_semantic_success_missing_and_concurrency(void) {
         ASSERT_EQ_INT(test_assets_water_reads(), 1);
         BZ_TTAsset_Release(water); BZ_TTTerrain_Release(terrain); free_terrain();
     }
+
+    test_assets_set_water_available(true);
+    make_terrain(4, 4, 0); vertices = world.map->vertices;
+    vertices[15].water = true; vertices[15].mapedge = true;
+    reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    terrain = BZ_TTA_LatestTerrain(); ASSERT_NOT_NULL(terrain);
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER), 1);
+    ASSERT(BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER, 0, &texture));
+    ASSERT_EQ_INT(texture.corner_count, 2);
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND), 2);
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF), 1);
+    BZ_TTTerrain_Release(terrain); free_terrain();
+
+    test_assets_set_water_available(false);
+    make_terrain(4, 4, 0); vertices = world.map->vertices; vertices[5].mapedge = true;
+    reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    terrain = BZ_TTA_LatestTerrain(); ASSERT_NOT_NULL(terrain);
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER), 0);
+    ASSERT(!BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER, 0, &texture));
+    ASSERT_NULL(BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                              BZ_TTA_TERRAIN_TEXTURE_WATER, 0));
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND), 2);
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF), 1);
+    ASSERT_EQ_INT(test_assets_water_reads(), 0); ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 0);
+    BZ_TTTerrain_Release(terrain); free_terrain();
 
     test_assets_set_water_available(false);
     make_terrain(4, 4, 0);

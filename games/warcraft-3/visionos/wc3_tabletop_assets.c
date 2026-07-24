@@ -372,6 +372,14 @@ static bzTTTerrain_t *wc3_copy_terrain(uintptr_t *source_token, bzTTAResult_t *s
         if (src->cliff != 0x0f) cliffs[src->cliff].corner_count++;
         if (src->water) terrain->water_corner_count++;
     }
+    /* Match desktop IsTileWater: any wet corner renders unless any corner suppresses the tile at the map edge. */
+    for (uint32_t y = 0; y < map->height - 1; y++) for (uint32_t x = 0; x < map->width - 1; x++) {
+        uint32_t i = y * map->width + x;
+        uint8_t flags = corners[i].flags | corners[i + 1].flags |
+                        corners[i + map->width].flags | corners[i + map->width + 1].flags;
+        if ((flags & BZ_TTA_TERRAIN_WATER) && !(flags & BZ_TTA_TERRAIN_MAP_EDGE))
+            terrain->water_tile_count++;
+    }
     pthread_mutex_lock(&terrain_sheet_lock);
     ground_sheet = FS_ParseSLK("TerrainArt\\Terrain.slk");
     cliff_sheet = FS_ParseSLK("TerrainArt\\CliffTypes.slk");

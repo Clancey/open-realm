@@ -290,7 +290,8 @@ bool BZ_TTTerrain_Corner(const bzTTTerrain_t *terrain, uint32_t x, uint32_t y,
 bool BZ_TTTerrain_GroundType(const bzTTTerrain_t *terrain, uint32_t index, uint32_t *out);
 bool BZ_TTTerrain_CliffType(const bzTTTerrain_t *terrain, uint32_t index, uint32_t *out);
 /* Returns the dense registration list while preserving each W3E table index for corners.
- * Water has one reference iff any corner is wet: type_index/type_id=0, corner_count=wet corners. */
+ * Water has one reference iff a non-map-edge tile renders: type_index/type_id=0,
+ * corner_count remains the authoritative number of water-flagged corners. */
 uint32_t BZ_TTTerrain_ReferencedTextureCount(const bzTTTerrain_t *terrain,
                                              bzTTTerrainTextureKind_t kind);
 bool BZ_TTTerrain_ReferencedTexture(const bzTTTerrain_t *terrain,

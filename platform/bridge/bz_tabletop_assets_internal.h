@@ -47,7 +47,7 @@ struct bzTTTerrain {
     uint64_t generation;
     bzTTTerrainInfo_t info;
     uint32_t corners_offset, grounds_offset, cliffs_offset;
-    uint32_t water_corner_count;
+    uint32_t water_corner_count, water_tile_count;
     uint8_t tileset;
     size_t allocation_size;
     unsigned char data[];
