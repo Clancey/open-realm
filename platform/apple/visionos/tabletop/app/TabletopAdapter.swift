@@ -1,6 +1,6 @@
 enum TabletopRuntimeMode: Equatable, Sendable {
     case fixture
-    case live(dataPath: String, map: String?, connect: String?)
+    case live(dataPath: String, map: String?, connect: String?, tft: Bool)
 }
 
 enum TabletopProduct {
@@ -22,7 +22,14 @@ enum TabletopRuntimeModeResolver {
             }
             let connect = nonEmpty(environment["BZ_TABLETOP_CONNECT"])
             let map = nonEmpty(environment["BZ_TABLETOP_MAP"]) ?? (connect == nil ? TabletopProduct.defaultMap : nil)
-            return .live(dataPath: dataPath, map: map, connect: connect)
+            let tft: Bool
+            switch environment["BZ_TABLETOP_TFT"] {
+            case nil, "0": tft = false
+            case "1": tft = true
+            case let value?: throw TabletopTransportError.configuration(
+                "BZ_TABLETOP_TFT must be 0 or 1, got '\(value)'")
+            }
+            return .live(dataPath: dataPath, map: map, connect: connect, tft: tft)
         case let mode: throw TabletopTransportError.configuration("Unknown BZ_TABLETOP_MODE '\(mode)'")
         }
     }
@@ -40,6 +47,12 @@ enum TabletopConfigStringCopy {
         for index in 0..<count { values[index] = valueAt(index) ?? "" }
         return values
     }
+
+}
+
+enum TabletopCoordinateConversion {
+    /* Swapping engine Y/Z changes handedness, so positive engine yaw becomes negative RealityKit yaw. */
+    static func heading(_ value: Float) -> Float { -value }
 }
 
 struct TabletopDataEntry: Equatable, Sendable {

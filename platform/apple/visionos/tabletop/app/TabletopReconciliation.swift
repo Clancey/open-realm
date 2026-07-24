@@ -18,10 +18,11 @@ struct TabletopRenderSnapshot: Equatable {
     var cellSize: Float
     var terrain: [TabletopRenderTile]
     var entities: [TabletopRenderEntity]
+    var warcraft: WarcraftRenderSnapshot?
     var authoritative = false
 
     static let empty = TabletopRenderSnapshot(generation: 0, sessionID: 0, cellSize: 0.18, terrain: [], entities: [],
-                                               authoritative: false)
+                                               warcraft: nil, authoritative: false)
 }
 
 enum TabletopSnapshotConverter {
@@ -29,6 +30,20 @@ enum TabletopSnapshotConverter {
                                              cellSize: 0.18)
 
     static func convert(_ snapshot: TabletopSnapshot) -> TabletopRenderSnapshot {
+        convert(snapshot, warcraft: nil)
+    }
+
+    static func convert(_ snapshot: TabletopSnapshot,
+                        provider: any WarcraftRenderDescriptorProvider) throws -> TabletopRenderSnapshot {
+        try convert(snapshot, warcraft: WarcraftSceneBuilder.build(provider.scene(for: snapshot)))
+    }
+
+    static func convert(_ prepared: WarcraftPreparedSnapshot) -> TabletopRenderSnapshot {
+        convert(prepared.snapshot, warcraft: prepared.render)
+    }
+
+    private static func convert(_ snapshot: TabletopSnapshot,
+                                warcraft: WarcraftRenderSnapshot?) -> TabletopRenderSnapshot {
         let terrain = snapshot.terrain.map { TabletopRenderTile(
             id: $0.id, kind: $0.kind,
             position: TabletopPlacement.worldPosition(
@@ -51,7 +66,8 @@ enum TabletopSnapshotConverter {
         }
         return TabletopRenderSnapshot(generation: snapshot.generation, sessionID: snapshot.sessionID,
                                       cellSize: layout.cellSize,
-                                      terrain: terrain, entities: entities, authoritative: authoritative)
+                                      terrain: terrain, entities: entities, warcraft: warcraft,
+                                      authoritative: authoritative)
     }
 
     private static func bounds(for snapshot: TabletopSnapshot) -> TabletopBounds2? {

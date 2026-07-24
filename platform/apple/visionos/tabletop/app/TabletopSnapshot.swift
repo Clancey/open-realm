@@ -69,6 +69,7 @@ struct TabletopSnapshot: Equatable, Sendable {
     var configStrings: [UInt32: String] = [:]
     var entitiesOverflowCount: UInt32 = 0
     var duplicateEntityCount: UInt32 = 0
+    var warcraftAssets: WarcraftProductionAssets?
 }
 
 protocol TabletopSnapshotTransport: Sendable {

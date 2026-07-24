@@ -81,6 +81,8 @@ if /usr/bin/strings "$BIN" | grep -Eq '/Users/|/Volumes/|/Applications/Xcode'; t
 fi
 xcrun nm "$BIN" > "$TMP/symbols"
 for SYMBOL in _BZ_TT_Latest _BZ_TTSnapshot_ConfigStringCount _BZ_TT_PostSelect \
+        _BZ_TTA_RegisterTerrainTexture _BZ_TTA_ResolveEntityMetadata \
+        _BZ_TTTerrain_ReferencedTextureCount _BZ_TTTerrain_ReferencedTexture \
         '_OBJC_CLASS_$_BZTabletopBridge'; do
     if ! grep -Fq "$SYMBOL" "$TMP/symbols"; then
         echo "live tabletop symbol is not linked: $SYMBOL" >&2

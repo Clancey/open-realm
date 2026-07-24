@@ -8,13 +8,20 @@ struct OpenRealmTabletopApp: App {
     init() {
         let environment = ProcessInfo.processInfo.environment
         do {
-            switch try TabletopRuntimeModeResolver.resolve(
-                environment: environment, bundlePath: Bundle.main.bundlePath) {
+            let runtimeMode = try TabletopRuntimeModeResolver.resolve(
+                environment: environment, bundlePath: Bundle.main.bundlePath)
+            let providerMode = try WarcraftRenderProviderModeResolver.resolve(
+                environment: environment, runtimeMode: runtimeMode)
+            let provider: any WarcraftRenderDescriptorProvider = providerMode == .fixture ?
+                FixtureWarcraftRenderProvider() : ProductionWarcraftRenderProvider()
+            let providerName = providerMode == .fixture ? "Fixture descriptors" : "Production descriptors"
+            switch runtimeMode {
             case .fixture:
                 let fixture = FixtureSnapshotTransport()
                 _model = StateObject(wrappedValue: TabletopSessionModel(
-                    modeName: "Fixture", transport: fixture, commands: fixture))
-            case .live(let dataPath, let map, let connect):
+                    modeName: "Fixture / \(providerName)", transport: fixture,
+                    renderProvider: provider, commands: fixture))
+            case .live(let dataPath, let map, let connect, let tft):
                 guard TabletopDataPreflight.isUsable(
                     entries: try Self.dataEntries(dataPath), localMapRequired: map != nil) else {
                     throw TabletopTransportError.configuration(
@@ -22,16 +29,19 @@ struct OpenRealmTabletopApp: App {
                         "run the production bundle staging target or set BZ_TABLETOP_DATA_PATH")
                 }
                 var arguments = [TabletopProduct.executable, "-data", dataPath]
+                if tft { arguments.append("-tft") }
                 if let map { arguments += ["+map", map] }
                 if let connect { arguments += ["+connect", connect] }
                 let live = LiveTabletopTransport(arguments: arguments)
                 _model = StateObject(wrappedValue: TabletopSessionModel(
-                    modeName: "Live", transport: live, commands: live))
+                    modeName: "Live / \(providerName)", transport: live,
+                    renderProvider: provider, commands: live))
             }
         } catch {
             let unavailable = UnavailableTabletopTransport(String(describing: error))
             _model = StateObject(wrappedValue: TabletopSessionModel(
-                modeName: "Unavailable", transport: unavailable))
+                modeName: "Unavailable", transport: unavailable,
+                renderProvider: ProductionWarcraftRenderProvider()))
         }
     }
 

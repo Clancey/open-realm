@@ -9,16 +9,21 @@ final class TabletopSessionModel: ObservableObject {
 
     private let transport: any TabletopSnapshotTransport
     private let commandTransport: (any TabletopCommandTransport)?
-    private var deduplicator = TabletopGenerationDeduplicator()
+    private let renderPipeline: WarcraftRenderPipeline
+    private let snapshotMailbox = TabletopSnapshotMailbox()
+    private let preparedMailbox = TabletopPreparedSnapshotMailbox()
     private var pollingTask: Task<Void, Never>?
+    private var processingTask: Task<Void, Never>?
     private var commandEpoch: UInt64 = 0
     private var phase = TabletopLifecycleState.idle
     let modeName: String
 
     init(modeName: String, transport: any TabletopSnapshotTransport,
+         renderProvider: any WarcraftRenderDescriptorProvider,
          commands: (any TabletopCommandTransport)? = nil) {
         self.modeName = modeName
         self.transport = transport
+        renderPipeline = WarcraftRenderPipeline(provider: renderProvider)
         self.commandTransport = commands
     }
 
@@ -30,18 +35,28 @@ final class TabletopSessionModel: ObservableObject {
             }
             await current.value
         }
+        if let current = processingTask {
+            current.cancel()
+            await current.value
+            processingTask = nil
+        }
         guard phase == .idle else { throw TabletopTransportError.runtime("Tabletop startup is already in progress") }
         phase = .starting
         commandEpoch &+= 1
         renderSnapshot = .empty
         errorMessage = nil
         snapshotDiagnostic = nil
-        deduplicator = TabletopGenerationDeduplicator()
+        await renderPipeline.reset()
+        await snapshotMailbox.reset()
+        await preparedMailbox.reset()
         do {
             try await transport.start()
             let first = try await TabletopPolling.firstSnapshot(
                 transport: transport, attempts: 90, sleep: { try await Task.sleep(for: .milliseconds(33)) })
-            consume(first)
+            guard let prepared = try await renderPipeline.prepare(first) else {
+                throw TabletopTransportError.runtime("First renderer generation was unexpectedly deduplicated")
+            }
+            consume(prepared)
             FileHandle.standardError.write(Data(
                 "OpenRealmTabletop: first snapshot generation \(first.generation), map \(first.mapName ?? "<none>")\n".utf8))
             phase = .running
@@ -50,29 +65,89 @@ final class TabletopSessionModel: ObservableObject {
             phase = .idle
             throw error
         }
-        pollingTask = Task { [weak self] in
-            guard let self else { return }
+        let pipeline = renderPipeline, transport = transport
+        let snapshots = snapshotMailbox, prepared = preparedMailbox
+        let epoch = commandEpoch
+        pollingTask = Task.detached { [weak self] in
+            var terminalMessage: String?
             do {
                 try await TabletopPolling.run(
                     transport: transport, sleep: { try await Task.sleep(for: .milliseconds(33)) },
-                    receive: { [weak self] snapshot in await self?.consume(snapshot) })
+                    receive: { [weak self] snapshot in
+                        guard await snapshots.submit(snapshot) else { return }
+                        await self?.startProcessing(
+                            epoch: epoch, pipeline: pipeline, snapshots: snapshots, prepared: prepared)
+                    })
             } catch is CancellationError {
                 // Cancellation is normal when the immersive scene closes.
             } catch {
-                errorMessage = "Tabletop transport failed: \(error)"
+                terminalMessage = "Tabletop transport failed: \(error)"
             }
             await transport.stop()
-            phase = .idle
-            pollingTask = nil
+            await self?.pollingFinished(terminalMessage, epoch: epoch)
         }
     }
 
-    private func consume(_ snapshot: TabletopSnapshot) {
-        guard let fresh = deduplicator.accept(snapshot) else { return }
-        // The transport has already released all C storage before this main-actor conversion.
-        renderSnapshot = TabletopSnapshotConverter.convert(fresh)
-        snapshotDiagnostic = TabletopSnapshotDiagnostics.message(
-            overflow: fresh.entitiesOverflowCount, duplicates: fresh.duplicateEntityCount)
+    /* The worker is owned by the session so stop/restart cannot leak an old generation into a new pipeline. */
+    private func startProcessing(epoch: UInt64, pipeline: WarcraftRenderPipeline,
+                                 snapshots: TabletopSnapshotMailbox,
+                                 prepared: TabletopPreparedSnapshotMailbox) {
+        guard commandEpoch == epoch, phase == .running else { return }
+        processingTask = Task.detached { [weak self] in
+            repeat {
+                if Task.isCancelled { break }
+                guard let snapshot = await snapshots.take() else { break }
+                do {
+                    if let output = try await pipeline.prepare(snapshot) {
+                        try Task.checkCancellation()
+                        _ = await prepared.submit(output)
+                        await self?.consumePrepared(epoch: epoch, prepared: prepared)
+                    }
+                } catch is CancellationError {
+                    break
+                } catch {
+                    await self?.rendererFailed(error, epoch: epoch)
+                }
+            } while await snapshots.finish()
+        }
+    }
+
+    private func consumePrepared(epoch: UInt64, prepared: TabletopPreparedSnapshotMailbox) async {
+        guard let output = await prepared.take(),
+              commandEpoch == epoch, phase == .running else { return }
+        consume(output)
+    }
+
+    private func consume(_ prepared: WarcraftPreparedSnapshot) {
+        // The provider actor has copied and converted all descriptor values before this main-actor handoff.
+        renderSnapshot = TabletopSnapshotConverter.convert(prepared)
+        let transportMessage = TabletopSnapshotDiagnostics.message(
+            overflow: prepared.snapshot.entitiesOverflowCount,
+            duplicates: prepared.snapshot.duplicateEntityCount)
+        snapshotDiagnostic = ([transportMessage].compactMap { $0 } +
+            (renderSnapshot.warcraft?.diagnostics ?? [])).joined(separator: "\n")
+        if snapshotDiagnostic?.isEmpty == true { snapshotDiagnostic = nil }
+    }
+
+    private func rendererFailed(_ error: Error, epoch: UInt64) {
+        guard commandEpoch == epoch, phase == .running else { return }
+        errorMessage = "Tabletop renderer failed: \(error)"
+    }
+
+    private func pollingFinished(_ terminalMessage: String?, epoch: UInt64) async {
+        guard commandEpoch == epoch else { return }
+        let processing = processingTask
+        processing?.cancel()
+        await processing?.value
+        processingTask = nil
+        await snapshotMailbox.reset()
+        await preparedMailbox.reset()
+        if let terminalMessage {
+            errorMessage = terminalMessage
+            FileHandle.standardError.write(Data("OpenRealmTabletop: \(terminalMessage)\n".utf8))
+        }
+        phase = .idle
+        pollingTask = nil
     }
 
     func select(entityID: UInt64) {
@@ -91,14 +166,21 @@ final class TabletopSessionModel: ObservableObject {
         commandEpoch &+= 1
         renderSnapshot = .empty
         snapshotDiagnostic = nil
-        guard let pollingTask else {
+        guard pollingTask != nil || processingTask != nil else {
             await transport.stop()
             phase = .idle
             return
         }
         phase = .stopped
-        pollingTask.cancel()
-        await pollingTask.value
+        let polling = pollingTask, processing = processingTask
+        polling?.cancel()
+        processing?.cancel()
+        await polling?.value
+        await processing?.value
+        pollingTask = nil
+        processingTask = nil
+        await snapshotMailbox.reset()
+        await preparedMailbox.reset()
         phase = .idle
     }
 }

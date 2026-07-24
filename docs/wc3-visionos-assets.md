@@ -13,7 +13,7 @@ Asset identity comes from a retained tabletop snapshot and a configstring slot:
 
 ```c
 asset = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION,
-                                    snapshot, model_index,
+                                    snapshot, CS_MODELS + model_index,
                                     BZ_TTA_ASSET_MODEL, &metadata);
 texture = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
                                       asset, texture_index);
@@ -72,6 +72,11 @@ until they release their own references. Each initialization advances a
 generation, so a filesystem load or terrain copy started before shutdown cannot
 publish into a restarted lifecycle.
 
+The Swift adapter mirrors the current public configstring layout's
+`CS_MODELS == 32` when converting the entity's relative model index to the
+absolute slot required by `BZ_TTA_RegisterConfigString`. It performs this call
+before releasing the retained transport snapshot. No archive path is inferred.
+
 ## Team textures
 
 Classic MDX replaceable IDs 1 and 2 are per-entity team color and team glow,
@@ -103,6 +108,12 @@ ROC images through normal archive order. Team color 00 is an opaque uniform 8x8
 image, while team glow 00 is an authored opaque 32x32 gradient; substituting a
 solid palette color for glow loses required spatial image data.
 
+Swift deep-copies each retained image once per `(kind, team_color)` while the
+asset lifecycle is valid, then keys per-entity material variants by copied image
+kind, team index, and content. Team images never mutate or key shared geometry templates. Textureless
+fixture roles may use the deterministic Swift palette; production team roles
+always consume the C image and preserve the exported MDX blend/flags/alpha.
+
 ```sh
 build/bin/mpqtool -mpq "$HOME/Downloads/Warcraft III/War3.mpq" \
   ls ReplaceableTextures/TeamColor
@@ -133,6 +144,14 @@ Each corner exports:
 - ground/cliff variations and cliff level;
 - ramp, water, blight, boundary, and map-edge flags.
 
+These values drive desktop-equivalent water placement. Swift emits water only
+when at least one corner is wet and no corner is a map edge, uses the four
+corrected water heights, repeats the registered singleton image every three
+tiles, and clamps each corner's opacity to
+`max(0, min(0.5, (water_height - ground_height) / 50))`. RealityKit carries the
+four opacity values as vertex color into a water-only shader graph; it does not
+replace the exported image with a color material.
+
 The W3E cliff nibble reserves value 15 as a no-cliff sentinel rather than a
 cliff-table index. `BZ_TTA_TERRAIN_NO_CLIFF` preserves that state and
 `cliff_id` is zero for those corners. A bounded retail Human02 inspection found
@@ -145,7 +164,10 @@ unreferenced editor data. The dense `BZ_TTTerrain_ReferencedTextureCount()` /
 exported non-sentinel corners. Each `bzTTTerrainTextureInfo_t` preserves the
 original `type_index`, FourCC `type_id`, and authoritative `corner_count`, so
 corner indices and registration indices cannot diverge. Consumers register only
-this list. Human02 contains cliff types `[CLdi, CLgr, CLno]`, but its corner
+this list and preserve its original indices when building layers; unreferenced
+gaps in the complete W3E table do not require registration, and the lowest
+published index becomes the base when index zero is unused. Human02 contains
+cliff types `[CLdi, CLgr, CLno]`, but its corner
 counts are `[2796, 11496, 0]`; retail ROC/TFT `CliffTypes.slk` contains no
 `CLno` row because the map never references it. A referenced missing type still
 returns the normal explicit status-bearing placeholder.
@@ -233,11 +255,29 @@ dimensions are preflighted against the BLP header before full decode.
 800 and flattens it into one file-shaped allocation:
 
 - model/sequence/geoset bounds;
-- geoset positions, normals, UVs, and validated 16-bit triangle indices;
+- geoset positions, normals, optional UVs, and validated 16-bit triangle indices; MDX 800 permits
+  an absent `UVBS` array, which Swift expands to deterministic `(0,0)` coordinates for RealityKit,
+  while any nonzero UV count must match the vertex count;
 - materials and static layers, including blend/filter mode and texture index;
 - texture references, replaceable IDs, and wrapping flags;
 - sequences;
 - nodes, pivots, and the first translation/rotation/scaling track values.
+
+MDX replaceable IDs 1 and 2 are team color and glow. Other IDs require
+the server-authored per-entity image override rather than a model-name
+inference. `SP_SpawnDestructable()` resolves `DestructableData.slk` `texFile`
+through `ImageIndex`; transport ABI v1 already copies that relative
+`CS_IMAGES` index. Swift registers the configstring while its retained snapshot
+is alive and applies the copied image only to non-team replaceable layers.
+Model-template cache keys include the override identity and copied-content
+hash so two entities may share MDX geometry without sharing different skins.
+Human02's replaceable-ID-31 Lordaeron trees exercise this path.
+
+RealityKit lacks destination-color multiply blending. Human02's filter-mode-5
+SmokeSmudge textures are grayscale JPEGs (bounded retail probe: maximum RGB
+channel spread 5), so Swift converts them exactly to unlit black alpha masks.
+Colored modulate textures remain explicit unsupported materials; mode 6 applies
+the documented 2x luminance before conversion.
 
 MDX texture records contain a 260-byte path field. The ABI identity buffer is
 therefore 260 bytes; treating it as a conventional 256-byte path truncates
@@ -252,6 +292,38 @@ Classic MDX may omit a geoset `UVBS` stream entirely; the descriptor then
 authoritatively reports `uv_count=0`. Consumers may synthesize zero UVs for that
 fully absent stream, but a partial nonzero stream remains malformed.
 
+## Swift value adapter
+
+`WarcraftAssetAdapter.swift` contains framework-free exported-value records and
+validation/lowering. `LiveTabletopTransport.swift` is the only Swift file that
+touches retained C handles: it copies model bounds, geosets, materials/layers,
+textures, sequences, nodes, terrain corners/type tables/images, resolved entity
+metadata, and cache counters, then releases each handle before actor/main-thread
+handoff. Terrain textures are registered only while their retained terrain
+snapshot is alive. One copied terrain and at most 256 copied models are retained
+for the live transport lifecycle, avoiding repeated corner/geoset/pixel copies
+while C registration continues to validate cache-hit behavior. MDX z-up
+positions and normals become RealityKit y-up values
+and triangle winding is reversed to preserve front faces. BLP orientation
+remains explicit and is normalized to top-left before texture creation.
+
+Swift iterates the dense referenced-texture list, validates each original table
+index/FourCC/corner count, then passes `type_index` to
+`BZ_TTA_RegisterTerrainTexture`; the game exporter owns all
+Terrain.slk/CliffTypes.slk identity, zero-reference filtering, and fallback
+rules. The pure terrain adapter retains the complete type tables for corner
+layer semantics and applies the desktop 64x64 atlas/layer-mask rules, including
+base variation selection and the 5% center inset. It preserves no-cliff
+sentinels, uses per-cell cliff materials, and never accepts placeholder
+ground/cliff images as production terrain.
+
+Entity classes pass through `BZ_TTA_ResolveEntityMetadata`. The transport
+player is an explicit team-color override; no runtime tint override is supplied
+because the transport has no authoritative tint field. Successful results
+drive mobile/building/resource/doodad/destructable categories and WC3 table
+footprints. Failed results remain explicit placeholders rather than Swift
+radius/category guesses.
+
 ## Validation
 
 ```sh
@@ -261,9 +333,10 @@ make openwarcraft3 opensc2
 make xrsimulator xros
 ```
 
-Focused fixtures cover ROC/TFT resolution, asymmetric BLP orientation, MDX
-geometry/material/bounds and repeated inclusive records, terrain
-dimensions/corners/water/cliffs, concurrent placeholder log-once/cache behavior,
+Focused fixtures cover ROC/TFT terrain and entity metadata resolution,
+asymmetric BLP orientation, MDX geometry/material/bounds and repeated inclusive
+records, terrain dimensions/corners/water/cliffs/no-cliff sentinels and atlas
+layer UVs, concurrent placeholder log-once/cache behavior,
 path confinement, malformed spans and zero arrays, lifecycle-crossing loads,
 retained concurrent readers, and cleanup/publication races. The fixtures are
 generated data; retail MPQs and decoded proprietary outputs must never enter
