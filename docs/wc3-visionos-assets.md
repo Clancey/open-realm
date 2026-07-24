@@ -21,6 +21,8 @@ count = BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_GROU
 BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND, 0, &terrain_texture);
 ground = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
                                        BZ_TTA_TERRAIN_TEXTURE_GROUND, terrain_texture.type_index);
+water = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                      BZ_TTA_TERRAIN_TEXTURE_WATER, 0);
 status = BZ_TTA_ResolveEntityMetadata(BZ_TABLETOP_ASSETS_ABI_VERSION,
                                       &entity_input, &metadata);
 ```
@@ -106,6 +108,17 @@ counts are `[2796, 11496, 0]`; retail ROC/TFT `CliffTypes.slk` contains no
 `CLno` row because the map never references it. A referenced missing type still
 returns the normal explicit status-bearing placeholder.
 
+Water is one semantic terrain image rather than a W3E FourCC table. For a map
+with at least one `BZ_TTA_TERRAIN_WATER` corner, the referenced-texture APIs
+return one record with `type_index=0`, `type_id=0`, and `corner_count` equal to
+the authoritative wet-corner count. The renderer registers index zero; the
+Warcraft provider resolves it to `ReplaceableTextures\Water\Water12.blp`.
+A no-water map returns zero references, and registration returns `NULL` before
+path resolution, archive lookup, cache insertion, or logging. A referenced but
+missing Water12 file uses the normal retained `NOT_FOUND` placeholder,
+log-once, and cache semantics. Success returns a retained `OK` image; each
+registration owns one caller reference that must be released.
+
 The publication token includes the map identity, vertex storage, dimensions,
 and type-table storage. Repeated snapshots of an unchanged map reuse the
 published immutable terrain.
@@ -116,6 +129,19 @@ Ground FourCCs use `TerrainArt\Terrain.slk` fields `dir` and `file`, forming
 `texFile`: the source first checks `<texDir>\<map tileset>_<texFile>.blp`, then
 the generic `<texDir>\<texFile>.blp`. The returned retained image therefore
 uses the same tileset fallback and MPQ override order as the desktop renderer.
+The global water identity matches desktop `R_GameLoadAssets()`. Verify the
+archive placement without extracting proprietary data:
+
+```sh
+build/bin/mpqtool -mpq "$HOME/Downloads/Warcraft III/War3.mpq" \
+  info ReplaceableTextures/Water/Water12.blp
+build/bin/mpqtool -mpq "$HOME/Downloads/Warcraft III/War3x.mpq" \
+  info ReplaceableTextures/Water/Water12.blp
+```
+
+Retail ROC reports a 14,963-byte uncompressed Water12 entry; `War3x.mpq` has no
+replacement, so TFT correctly inherits the ROC image through archive override
+order.
 
 ## Entity metadata
 

@@ -60,6 +60,7 @@ typedef enum {
 typedef enum {
     BZ_TTA_TERRAIN_TEXTURE_GROUND = 1,
     BZ_TTA_TERRAIN_TEXTURE_CLIFF = 2,
+    BZ_TTA_TERRAIN_TEXTURE_WATER = 3,
 } bzTTTerrainTextureKind_t;
 
 enum {
@@ -238,9 +239,8 @@ const bzTTAsset_t *BZ_TTA_RegisterConfigString(uint32_t abi_version,
 const bzTTAsset_t *BZ_TTA_RegisterModelTexture(uint32_t abi_version,
                                               const bzTTAsset_t *model,
                                               uint32_t texture_index);
-/* Resolves a referenced W3E terrain type through Terrain.slk or CliffTypes.slk. Cliff
- * resolution includes the authoritative map-tileset candidate and generic fallback.
- * Zero-reference table entries are not registrations and return NULL without lookup. */
+/* Resolves referenced W3E terrain imagery. Ground/cliff use their table type_index;
+ * water is the singleton type_index 0. Unreferenced entries return NULL without lookup. */
 const bzTTAsset_t *BZ_TTA_RegisterTerrainTexture(uint32_t abi_version,
                                                 const bzTTTerrain_t *terrain,
                                                 bzTTTerrainTextureKind_t kind,
@@ -289,7 +289,8 @@ bool BZ_TTTerrain_Corner(const bzTTTerrain_t *terrain, uint32_t x, uint32_t y,
                          bzTTTerrainCorner_t *out);
 bool BZ_TTTerrain_GroundType(const bzTTTerrain_t *terrain, uint32_t index, uint32_t *out);
 bool BZ_TTTerrain_CliffType(const bzTTTerrain_t *terrain, uint32_t index, uint32_t *out);
-/* Returns the dense registration list while preserving each W3E table index for corners. */
+/* Returns the dense registration list while preserving each W3E table index for corners.
+ * Water has one reference iff any corner is wet: type_index/type_id=0, corner_count=wet corners. */
 uint32_t BZ_TTTerrain_ReferencedTextureCount(const bzTTTerrain_t *terrain,
                                              bzTTTerrainTextureKind_t kind);
 bool BZ_TTTerrain_ReferencedTexture(const bzTTTerrain_t *terrain,

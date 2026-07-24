@@ -76,13 +76,18 @@ static bool wc3_path(char *out, size_t cap, const char *format, const char *dir,
     return count > 0 && (size_t)count < cap && wc3_tta_path_is_confined(out);
 }
 
-/* Terrain FourCC translation stays behind the game callback so Swift never knows SLK paths. */
+/* Terrain identity translation stays behind the game callback so Swift never knows Warcraft paths. */
 static bzTTAResult_t wc3_resolve_terrain_identity(bzTTTerrainTextureKind_t kind, uint32_t type_id,
                                                   uint8_t tileset, char *identity, size_t cap) {
     char row[5];
     const char *dir, *file;
     wc3_fourcc_name(type_id, row);
     if (!identity || !cap) return BZ_TTA_ERR_INVALID_ARGUMENT;
+    if (kind == BZ_TTA_TERRAIN_TEXTURE_WATER) {
+        if (type_id) return BZ_TTA_ERR_INVALID_ARGUMENT;
+        return wc3_path(identity, cap, "%s\\%s.blp", "ReplaceableTextures\\Water", 0, "Water12")
+            ? BZ_TTA_OK : BZ_TTA_ERR_PATH_CONFINEMENT;
+    }
     if (kind == BZ_TTA_TERRAIN_TEXTURE_GROUND) {
         pthread_mutex_lock(&terrain_sheet_lock);
         if (!ground_sheet) {
@@ -365,6 +370,7 @@ static bzTTTerrain_t *wc3_copy_terrain(uintptr_t *source_token, bzTTAResult_t *s
                      (src->cliff == 0x0f ? BZ_TTA_TERRAIN_NO_CLIFF : 0);
         grounds[src->ground].corner_count++;
         if (src->cliff != 0x0f) cliffs[src->cliff].corner_count++;
+        if (src->water) terrain->water_corner_count++;
     }
     pthread_mutex_lock(&terrain_sheet_lock);
     ground_sheet = FS_ParseSLK("TerrainArt\\Terrain.slk");

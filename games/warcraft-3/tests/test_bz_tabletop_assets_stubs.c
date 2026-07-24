@@ -1,4 +1,5 @@
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,8 @@ static const metadataMapSnapshot_t *metadata_map = metadata_maps;
 static bool test_tft;
 static bool cliff_specific;
 static bool cliff_generic = true;
+static bool water_available = true;
+static atomic_uint water_reads;
 static pthread_mutex_t read_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t read_cond = PTHREAD_COND_INITIALIZER;
 static bool read_blocked;
@@ -30,6 +33,10 @@ static unsigned read_waiters;
 void test_assets_set_tft(bool enabled) { test_tft = enabled; }
 void test_assets_set_cliff_specific(bool enabled) { cliff_specific = enabled; }
 void test_assets_set_cliff_generic(bool enabled) { cliff_generic = enabled; }
+void test_assets_set_water_available(bool available) {
+    water_available = available; atomic_store(&water_reads, 0);
+}
+unsigned test_assets_water_reads(void) { return atomic_load(&water_reads); }
 void test_assets_set_metadata_map(unsigned index) {
     level.mapinfo = index < 2 ? test_mapinfo + index : NULL;
     metadata_map = index < 2 ? metadata_maps + index : NULL;
@@ -237,6 +244,11 @@ HANDLE FS_ReadFile(LPCSTR identity, LPDWORD size) {
         !strcmp(identity, "ReplaceableTextures\\Cliff\\L_Cliff0.blp") ||
         !strcmp(identity, "ReplaceableTextures\\Cliff\\Cliff0.blp"))
         identity = "TestUI/Textures/solid_white.blp";
+    else if (!strcmp(identity, "ReplaceableTextures\\Water\\Water12.blp")) {
+        atomic_fetch_add(&water_reads, 1);
+        if (!water_available) return NULL;
+        identity = "TestUI/Textures/solid_white.blp";
+    }
     else if (!strcmp(identity, "TerrainArt\\TFT\\Dirt.blp"))
         identity = "TestUI/Textures/orientation_2x2.blp";
     else if (!strcmp(identity, "Doodads\\LordaeronSummer\\Plants\\Wheat\\Wheat.mdx") ||

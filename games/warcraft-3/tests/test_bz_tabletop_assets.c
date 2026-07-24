@@ -24,6 +24,8 @@ struct bzTTSnapshot {
 void test_assets_set_tft(bool enabled);
 void test_assets_set_cliff_specific(bool enabled);
 void test_assets_set_cliff_generic(bool enabled);
+void test_assets_set_water_available(bool available);
+unsigned test_assets_water_reads(void);
 void test_assets_set_metadata_map(unsigned index);
 void test_assets_block_reads(bool blocked);
 void test_assets_wait_for_blocked_reads(unsigned count);
@@ -536,6 +538,92 @@ static void test_terrain_texture_resolution_roc_tft_and_fallback(void) {
     free_terrain(); test_assets_set_cliff_generic(true);
 }
 
+typedef struct {
+    const bzTTTerrain_t *terrain;
+    const bzTTAsset_t *asset;
+} waterRegistrationCtx_t;
+
+static void *register_water(void *opaque) {
+    waterRegistrationCtx_t *ctx = opaque;
+    ctx->asset = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, ctx->terrain,
+                                                BZ_TTA_TERRAIN_TEXTURE_WATER, 0);
+    return NULL;
+}
+
+/* Water is one C-authored semantic image, referenced only when W3E corners require it. */
+static void test_water_texture_semantic_success_missing_and_concurrency(void) {
+    enum { THREADS = 8 };
+    const bzTTTerrain_t *terrain;
+    const bzTTAsset_t *water, *again;
+    bzTTTerrainTextureInfo_t texture;
+    waterRegistrationCtx_t ctx[THREADS];
+    pthread_t threads[THREADS];
+
+    for (int tft = 0; tft < 2; tft++) {
+        test_assets_set_tft(tft); test_assets_set_water_available(true);
+        make_terrain(4, 4, 0); reset_assets(); BZ_TTA_PublishTerrainFromGame();
+        terrain = BZ_TTA_LatestTerrain(); ASSERT_NOT_NULL(terrain);
+        ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER), 1);
+        ASSERT(BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER, 0, &texture));
+        ASSERT_EQ_INT(texture.type_index, 0); ASSERT_EQ_INT(texture.type_id, 0);
+        ASSERT_EQ_INT(texture.corner_count, 1);
+        ASSERT(!BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER, 1, &texture));
+        water = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                              BZ_TTA_TERRAIN_TEXTURE_WATER, 0);
+        ASSERT_NOT_NULL(water); ASSERT(!BZ_TTAsset_IsPlaceholder(water));
+        ASSERT_EQ_INT(BZ_TTAsset_Status(water), BZ_TTA_OK);
+        assert_asset_identity(water, "ReplaceableTextures\\Water\\Water12.blp");
+        ASSERT_NULL(BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                                  BZ_TTA_TERRAIN_TEXTURE_WATER, 1));
+        ASSERT_EQ_INT(test_assets_water_reads(), 1);
+        BZ_TTAsset_Release(water); BZ_TTTerrain_Release(terrain); free_terrain();
+    }
+
+    test_assets_set_water_available(false);
+    make_terrain(4, 4, 0);
+    for (uint32_t i = 0; i < world.map->width * world.map->height; i++)
+        ((LPWAR3MAPVERTEX)world.map->vertices)[i].water = false;
+    reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    terrain = BZ_TTA_LatestTerrain(); ASSERT_NOT_NULL(terrain);
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER), 0);
+    ASSERT(!BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER, 0, &texture));
+    ASSERT_NULL(BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                              BZ_TTA_TERRAIN_TEXTURE_WATER, 0));
+    ASSERT_EQ_INT(test_assets_water_reads(), 0); ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 0);
+    ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), 0);
+    BZ_TTTerrain_Release(terrain); free_terrain();
+
+    make_terrain(4, 4, 0); reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    terrain = BZ_TTA_LatestTerrain();
+    water = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                          BZ_TTA_TERRAIN_TEXTURE_WATER, 0);
+    again = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                          BZ_TTA_TERRAIN_TEXTURE_WATER, 0);
+    ASSERT_NOT_NULL(water); ASSERT(water == again); ASSERT(BZ_TTAsset_IsPlaceholder(water));
+    ASSERT_EQ_INT(BZ_TTAsset_Status(water), BZ_TTA_ERR_NOT_FOUND);
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 1); ASSERT_EQ_INT(BZ_TTA_CacheHits(), 1);
+    ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), 1); ASSERT_EQ_INT(test_assets_water_reads(), 1);
+    BZ_TTAsset_Release(water);
+    ASSERT_EQ_INT(BZ_TTAsset_Status(again), BZ_TTA_ERR_NOT_FOUND);
+    BZ_TTAsset_Release(again); BZ_TTTerrain_Release(terrain); free_terrain();
+
+    test_assets_set_water_available(true);
+    make_terrain(4, 4, 0); reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    terrain = BZ_TTA_LatestTerrain();
+    for (int i = 0; i < THREADS; i++) {
+        ctx[i] = (waterRegistrationCtx_t){ .terrain = terrain };
+        ASSERT_EQ_INT(pthread_create(threads + i, NULL, register_water, ctx + i), 0);
+    }
+    for (int i = 0; i < THREADS; i++) {
+        ASSERT_EQ_INT(pthread_join(threads[i], NULL), 0); ASSERT_NOT_NULL(ctx[i].asset);
+        ASSERT(ctx[i].asset == ctx[0].asset); BZ_TTAsset_Release(ctx[i].asset);
+    }
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 1); ASSERT_EQ_INT(BZ_TTA_CacheHits(), THREADS - 1);
+    ASSERT_EQ_INT(test_assets_water_reads(), 1);
+    BZ_TTTerrain_Release(terrain); free_terrain();
+    test_assets_set_tft(false);
+}
+
 static void test_entity_metadata_map_readiness_and_cache_scope(void) {
     bzTTAssetMetadata_t metadata;
     bzTTEntityMetadataInput_t input = { .class_id = FOURCC('h','p','e','a') };
@@ -864,6 +952,7 @@ void run_bz_tabletop_assets_tests(void) {
     RUN_TEST(test_malformed_terrain_type_index);
     RUN_TEST(test_human02_shape_no_cliff_sentinel);
     RUN_TEST(test_terrain_texture_resolution_roc_tft_and_fallback);
+    RUN_TEST(test_water_texture_semantic_success_missing_and_concurrency);
     RUN_TEST(test_entity_metadata_categories_footprints_and_overrides);
     RUN_TEST(test_roc_tft_non_pathing_doodad_metadata);
     RUN_TEST(test_entity_metadata_map_readiness_and_cache_scope);

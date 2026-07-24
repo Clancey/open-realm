@@ -96,7 +96,9 @@ transport:
   variations, cliff levels, and ramp/water/blight/boundary flags.
 - `BZ_TTTerrain_ReferencedTextureCount()` and
   `BZ_TTTerrain_ReferencedTexture()` expose only corner-referenced terrain
-  texture registrations while preserving their original W3E table indices.
+  texture registrations while preserving original W3E ground/cliff indices.
+  The appended water kind is a C-authored singleton at index zero and is absent
+  for maps without water, so Swift never supplies a Warcraft archive path.
 - Handles are opaque and explicitly retained/released. Descriptor accessors copy
   plain C POD values; payloads remain immutable, so concurrent readers require
   no renderer-thread lock.
