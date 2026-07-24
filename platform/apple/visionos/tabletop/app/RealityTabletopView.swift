@@ -1,3 +1,5 @@
+import ImageIO
+import Metal
 import RealityKit
 import SwiftUI
 import UIKit
@@ -23,10 +25,62 @@ final class RealityTabletopReconciler {
     private var opaqueProgram: UnlitMaterial.Program?
     private var alphaProgram: UnlitMaterial.Program?
     private var additiveProgram: UnlitMaterial.Program?
+    private var waterMaterials: [String: ShaderGraphMaterial] = [:]
+    private var waterMaterialOrder: [String] = []
+    private var prepared = false
     private static let resourceLimit = 256
+    private static let waterDiskByteLimit = 8 * 1_024 * 1_024
     private static let overlayNames: Set<String> = [
         "selection", "health-background", "health-fill", "mana-background", "mana-fill",
     ]
+    private static let waterMaterialX = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <materialx version="1.38">
+          <nodegraph name="OpenRealmWaterGraph">
+            <output name="color" type="color3" nodename="rgb" />
+            <output name="opacity" type="float" nodename="alpha" />
+            <image name="image" type="color4">
+              <input name="file" type="filename" value="__WATER_TEXTURE__" />
+              <input name="uaddressmode" type="string" value="periodic" />
+              <input name="vaddressmode" type="string" value="periodic" />
+              <input name="filtertype" type="string" value="linear" />
+            </image>
+            <geomcolor name="vertexColor" type="color4">
+              <input name="index" type="integer" value="0" />
+            </geomcolor>
+            <multiply name="modulated" type="color4">
+              <input name="in1" type="color4" nodename="image" />
+              <input name="in2" type="color4" nodename="vertexColor" />
+            </multiply>
+            <swizzle name="rgb" type="color3">
+              <input name="in" type="color4" nodename="modulated" />
+              <input name="channels" type="string" value="rgb" />
+            </swizzle>
+            <swizzle name="alpha" type="float">
+              <input name="in" type="color4" nodename="modulated" />
+              <input name="channels" type="string" value="a" />
+            </swizzle>
+          </nodegraph>
+          <surface_unlit name="surface" type="surfaceshader">
+            <input name="emission" type="float" value="1" />
+            <input name="emission_color" type="color3"
+                   nodegraph="OpenRealmWaterGraph" output="color" />
+            <input name="transmission" type="float" value="0" />
+            <input name="opacity" type="float"
+                   nodegraph="OpenRealmWaterGraph" output="opacity" />
+          </surface_unlit>
+          <surfacematerial name="OpenRealmWater" type="material">
+            <input name="surfaceshader" type="surfaceshader" nodename="surface" />
+          </surfacematerial>
+        </materialx>
+        """
+
+    private struct ColoredVertex {
+        var position: SIMD3<Float>
+        var normal: SIMD3<Float>
+        var textureCoordinate: SIMD2<Float>
+        var color: SIMD4<Float>
+    }
 
     init() {
         root.name = "open-realm-warcraft-descriptor-scene"
@@ -41,7 +95,8 @@ final class RealityTabletopReconciler {
     }
 
     func prepare() async {
-        guard opaqueProgram == nil || alphaProgram == nil || additiveProgram == nil else { return }
+        guard !prepared else { return }
+        prepared = true
         let opaque = UnlitMaterial.Program.Descriptor()
         var alpha = UnlitMaterial.Program.Descriptor()
         alpha.blendMode = .alpha
@@ -65,13 +120,23 @@ final class RealityTabletopReconciler {
         root.children.removeAll()
     }
 
-    func apply(_ snapshot: TabletopRenderSnapshot) {
+    func apply(_ snapshot: TabletopRenderSnapshot) async {
         if let sessionID, sessionID != snapshot.sessionID { reset() }
         sessionID = snapshot.sessionID
         guard let warcraft = snapshot.warcraft else {
             diagnose("RealityKit renderer received no descriptor snapshot; scene remains empty.")
             return
         }
+        do { try await prepareWaterMaterials(warcraft) }
+        catch is CancellationError {
+            /* A newer snapshot cancels this task while MaterialX imports; only real import failures are diagnostic. */
+            return
+        }
+        catch {
+            diagnose("Authoritative water shader preparation failed: \(error)")
+            return
+        }
+        guard !Task.isCancelled else { return }
         var expiredOverrides = Set<UInt64>()
         if snapshot.authoritative, generation != nil, generation != snapshot.generation {
             expiredOverrides.formUnion(positionOverrides.keys)
@@ -223,7 +288,9 @@ final class RealityTabletopReconciler {
             } ?? ""
             let child = ModelEntity(
                 mesh: try mesh(mapped, key: "\(key)-\(index)\(atlasKey)"),
-                materials: [try material(descriptor, teamColor: teamColor, tint: tint)])
+                materials: [try material(
+                    descriptor, teamColor: teamColor, tint: tint,
+                    usesVertexColors: !mapped.vertexColors.isEmpty)])
             child.name = part.name
             child.scale = simd(scale)
             parent.addChild(child)
@@ -282,8 +349,14 @@ final class RealityTabletopReconciler {
         if let cached = meshCache[key] { return cached }
         guard part.positions.count == part.normals.count,
               part.positions.count == part.textureCoordinates.count,
+              (part.vertexColors.isEmpty || part.positions.count == part.vertexColors.count),
               part.indices.allSatisfy({ Int($0) < part.positions.count }) else {
             throw WarcraftDescriptorError.invalidMesh("mesh buffers have inconsistent counts")
+        }
+        if !part.vertexColors.isEmpty {
+            let resource = try coloredMesh(part)
+            cache(resource, key: key, values: &meshCache, order: &meshOrder)
+            return resource
         }
         var descriptor = MeshDescriptor(name: part.name)
         descriptor.positions = MeshBuffers.Positions(part.positions.map(simd))
@@ -296,11 +369,60 @@ final class RealityTabletopReconciler {
         return resource
     }
 
+    /* Standard RealityKit materials ignore vertex color, so water uses a color-semantic LowLevelMesh. */
+    private func coloredMesh(_ part: WarcraftMeshPartDescriptor) throws -> MeshResource {
+        let vertices = part.positions.indices.map { index in
+            let color = part.vertexColors[index]
+            return ColoredVertex(
+                position: simd(part.positions[index]), normal: simd(part.normals[index]),
+                textureCoordinate: SIMD2(
+                    part.textureCoordinates[index].x, part.textureCoordinates[index].y),
+                color: SIMD4(color.red, color.green, color.blue, color.alpha))
+        }
+        let stride = MemoryLayout<ColoredVertex>.stride
+        let descriptor = LowLevelMesh.Descriptor(
+            vertexCapacity: vertices.count,
+            vertexAttributes: [
+                .init(semantic: .position, format: .float3,
+                      offset: MemoryLayout<ColoredVertex>.offset(of: \.position)!),
+                .init(semantic: .normal, format: .float3,
+                      offset: MemoryLayout<ColoredVertex>.offset(of: \.normal)!),
+                .init(semantic: .uv0, format: .float2,
+                      offset: MemoryLayout<ColoredVertex>.offset(of: \.textureCoordinate)!),
+                .init(semantic: .color, format: .float4,
+                      offset: MemoryLayout<ColoredVertex>.offset(of: \.color)!),
+            ],
+            vertexLayouts: [.init(bufferIndex: 0, bufferStride: stride)],
+            indexCapacity: part.indices.count, indexType: .uint32)
+        let mesh = try LowLevelMesh(descriptor: descriptor)
+        mesh.replaceUnsafeMutableBytes(bufferIndex: 0) { destination in
+            vertices.withUnsafeBytes { destination.copyBytes(from: $0) }
+        }
+        mesh.replaceUnsafeMutableIndices { destination in
+            part.indices.withUnsafeBytes { destination.copyBytes(from: $0) }
+        }
+        let points = vertices.map(\.position), first = points[0]
+        let bounds = points.dropFirst().reduce((min: first, max: first)) {
+            (simd_min($0.min, $1), simd_max($0.max, $1))
+        }
+        mesh.parts.replaceAll([
+            .init(indexCount: part.indices.count, topology: .triangle, materialIndex: 0,
+                  bounds: BoundingBox(min: bounds.min, max: bounds.max)),
+        ])
+        return try MeshResource(from: mesh)
+    }
+
     private func material(_ descriptor: WarcraftMaterialDescriptor,
-                          teamColor: WarcraftColor, tint: WarcraftColor) throws -> any RealityKit.Material {
-        let roleColor = descriptor.role == .teamColor || descriptor.role == .teamGlow ?
-            teamColor : descriptor.color
-        let color = multiply(roleColor, tint)
+                          teamColor: WarcraftColor, tint: WarcraftColor,
+                          usesVertexColors: Bool = false) throws -> any RealityKit.Material {
+        let color = multiply(WarcraftMaterialTint.roleColor(descriptor, teamColor: teamColor), tint)
+        if usesVertexColors, let image = descriptor.texture {
+            let key = WarcraftDescriptorContentKey.image(image)
+            guard let result = waterMaterials[key] else {
+                throw WarcraftDescriptorError.invalidMesh("authoritative water material was not prepared")
+            }
+            return result
+        }
         let texture = try descriptor.texture.map(texture)
         let baseColor = PhysicallyBasedMaterial.BaseColor(
             tint: uiColor(color), texture: texture.map(PhysicallyBasedMaterial.Texture.init))
@@ -308,13 +430,18 @@ final class RealityTabletopReconciler {
         case .litOpaque, .litModulate:
             var result = SimpleMaterial(color: uiColor(color), roughness: 0.82, isMetallic: false)
             result.color = baseColor
+            result.writesDepth = descriptor.writesDepth
+            result.readsDepth = descriptor.readsDepth
+            if descriptor.twoSided { result.faceCulling = .none }
             return result
         case .litAlpha:
             var result = PhysicallyBasedMaterial()
             result.baseColor = baseColor
             result.roughness = 0.82
             result.blending = .transparent(opacity: .init(scale: color.alpha))
-            result.writesDepth = false
+            result.writesDepth = descriptor.writesDepth
+            result.readsDepth = descriptor.readsDepth
+            if descriptor.twoSided { result.faceCulling = .none }
             return result
         case .unlitOpaque, .unlitAlpha, .unlitAdditive:
             let program = switch WarcraftMaterialMapping.kind(descriptor) {
@@ -327,7 +454,9 @@ final class RealityTabletopReconciler {
             }
             var result = UnlitMaterial(program: program)
             result.color = baseColor
-            result.writesDepth = WarcraftMaterialMapping.kind(descriptor) == .unlitOpaque
+            result.writesDepth = descriptor.writesDepth
+            result.readsDepth = descriptor.readsDepth
+            if descriptor.twoSided { result.faceCulling = .none }
             return result
         }
     }
@@ -356,6 +485,96 @@ final class RealityTabletopReconciler {
         let texture = try TextureResource(image: cgImage, options: .init(semantic: .color))
         cache(texture, key: key, values: &textureCache, order: &textureOrder)
         return texture
+    }
+
+    /* MaterialX must resolve its image while importing; cache the copied image as an atomic PNG first. */
+    private func prepareWaterMaterials(_ snapshot: WarcraftRenderSnapshot) async throws {
+        var images: [String: WarcraftImageDescriptor] = [:]
+        for chunk in snapshot.terrainChunks {
+            for part in chunk.mesh.geosets where !part.vertexColors.isEmpty {
+                guard chunk.mesh.materials.indices.contains(part.materialIndex) else {
+                    throw WarcraftDescriptorError.invalidMesh(
+                        "vertex-colored water geometry has no material")
+                }
+                /* Fixture water is intentionally textureless; only production water imports MaterialX. */
+                guard let image = chunk.mesh.materials[part.materialIndex].texture else { continue }
+                images[WarcraftDescriptorContentKey.image(image)] = image
+            }
+        }
+        for key in images.keys.sorted() where waterMaterials[key] == nil {
+            guard !Task.isCancelled, let image = images[key] else { return }
+            let url = try waterImageURL(image, key: key)
+            let escaped = url.path
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
+            let data = Data(Self.waterMaterialX.replacingOccurrences(
+                of: "__WATER_TEXTURE__", with: escaped).utf8)
+            var material = try await ShaderGraphMaterial(materialXLabel: "OpenRealmWater", data: data)
+            material.writesDepth = false
+            waterMaterials[key] = material
+            waterMaterialOrder.append(key)
+            while waterMaterialOrder.count > Self.resourceLimit {
+                waterMaterials.removeValue(forKey: waterMaterialOrder.removeFirst())
+            }
+        }
+    }
+
+    private func waterImageURL(_ image: WarcraftImageDescriptor, key: String) throws -> URL {
+        let normalized = try WarcraftImageNormalizer.topLeft(image)
+        let bytes = Data(normalized.rgba8)
+        guard let provider = CGDataProvider(data: bytes as CFData),
+              let cgImage = CGImage(
+                width: normalized.width, height: normalized.height, bitsPerComponent: 8,
+                bitsPerPixel: 32, bytesPerRow: normalized.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false,
+                intent: .defaultIntent),
+              let png = CFDataCreateMutable(nil, 0),
+              let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil)
+        else { throw WarcraftDescriptorError.invalidImage("could not encode authoritative water image") }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw WarcraftDescriptorError.invalidImage("could not finalize authoritative water image")
+        }
+        let root = try WarcraftCacheRoot.applicationSupport()
+            .appendingPathComponent("OpenRealm/WarcraftRenderer/v\(WarcraftCacheKey.version)/water",
+                                    isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("\(key).png")
+        let data = png as Data
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard try Data(contentsOf: url) == data else {
+                throw WarcraftDescriptorError.cache("water image cache collision for \(key)")
+            }
+        } else {
+            try data.write(to: url, options: .atomic)
+        }
+        try trimWaterImageCache(root, keeping: url)
+        return url
+    }
+
+    /* MaterialX needs files, so retain the current image while bounding all older content revisions. */
+    private func trimWaterImageCache(_ root: URL, keeping current: URL) throws {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        let files = try FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles])
+        var entries: [(url: URL, size: Int, date: Date)] = [], total = 0
+        for url in files where url.pathExtension == "png" {
+            let values = try url.resourceValues(forKeys: keys)
+            guard values.isRegularFile == true else { continue }
+            let size = values.fileSize ?? 0
+            entries.append((url, size, values.contentModificationDate ?? .distantPast))
+            total += size
+        }
+        for entry in entries.sorted(by: { $0.date < $1.date })
+            where total > Self.waterDiskByteLimit && entry.url != current {
+            try FileManager.default.removeItem(at: entry.url)
+            total -= entry.size
+        }
+        guard total <= Self.waterDiskByteLimit else {
+            throw WarcraftDescriptorError.cache("authoritative water image exceeds disk cache limit")
+        }
     }
 
     private func cache<T>(_ value: T, key: String, values: inout [String: T], order: inout [String]) {
@@ -395,9 +614,9 @@ struct TabletopImmersiveView: View {
         RealityView { content in
             await reconciler.prepare()
             content.add(reconciler.root)
-            reconciler.apply(model.renderSnapshot)
-        } update: { _ in
-            reconciler.apply(model.renderSnapshot)
+        }
+        .task(id: "\(model.renderSnapshot.sessionID):\(model.renderSnapshot.generation)") {
+            await reconciler.apply(model.renderSnapshot)
         }
         .simultaneousGesture(SpatialTapGesture().targetedToAnyEntity().onEnded { value in
             if let id = reconciler.fixtureID(for: value.entity) {

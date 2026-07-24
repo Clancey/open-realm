@@ -123,6 +123,15 @@ enum TabletopPureTests {
             expect(first.geometryKey == textureChanged.geometryKey &&
                    first.materialKey != textureChanged.materialKey,
                    "asymmetric texture changes affect material keys without rebuilding geometry keys")
+            var colored = first
+            colored.geosets[0].vertexColors = [
+                WarcraftColor(red: 1, green: 1, blue: 1, alpha: 0.1),
+                WarcraftColor(red: 1, green: 1, blue: 1, alpha: 0.2),
+                WarcraftColor(red: 1, green: 1, blue: 1, alpha: 0.3),
+            ]
+            expect(WarcraftDescriptorContentKey.geometry(first) !=
+                WarcraftDescriptorContentKey.geometry(colored),
+                "per-vertex water opacity participates in geometry cache keys")
             expect(first.geometryKey?.hasPrefix("v2-") == true &&
                    first.materialKey?.hasPrefix("v2-") == true,
                    "descriptor content keys carry an explicit format version")
@@ -571,6 +580,24 @@ enum TabletopPureTests {
         expect(WarcraftTeamPalette.color(0) != WarcraftTeamPalette.color(1) &&
                WarcraftTeamPalette.color(12) == WarcraftTeamPalette.color(0),
                "team colors are deterministic and wrap safely")
+        let authoredTeam = WarcraftMaterialDescriptor(
+            name: "authored-team", color: .white,
+            texture: WarcraftImageDescriptor(
+                width: 1, height: 1, rgba8: [12, 34, 56, 255], orientation: .topLeft),
+            blendMode: .additive, role: .teamGlow, unlit: true)
+        let fixtureTeam = WarcraftMaterialDescriptor(
+            name: "fixture-team", color: .white, texture: nil,
+            blendMode: .additive, role: .teamGlow, unlit: true)
+        expect(WarcraftMaterialTint.roleColor(
+            authoredTeam, teamColor: WarcraftTeamPalette.color(3)) == .white &&
+            WarcraftMaterialTint.roleColor(
+                fixtureTeam, teamColor: WarcraftTeamPalette.color(3)) == WarcraftTeamPalette.color(3),
+            "authored team images are not second-tinted while textureless fixtures retain palette color")
+        var noDepthTeam = authoredTeam
+        noDepthTeam.writesDepth = false
+        expect(WarcraftDescriptorContentKey.materials([authoredTeam]) !=
+               WarcraftDescriptorContentKey.materials([noDepthTeam]),
+               "render-significant MDX depth state participates in material reconciliation identity")
         let unit = WarcraftCategoryScale.scale(
             category: .unit, footprint: WarcraftFootprint(width: 1, depth: 1))
         let building = WarcraftCategoryScale.scale(
@@ -611,8 +638,41 @@ enum TabletopPureTests {
                    model.materials[0].texture?.rgba8.prefix(4) == [255, 0, 0, 255],
                    "exported top-left RGBA8 texture remains upright through descriptor conversion")
             expect(model.materials[1].role == .teamColor &&
+                   model.materials[1].name == source.teamColorImage?.identity &&
+                   model.materials[1].texture?.rgba8 == source.teamColorImage?.rgba8 &&
                    WarcraftMaterialMapping.kind(model.materials[1]) == .unlitAdditive,
-                   "replaceable team textures and additive unshaded layers map explicitly")
+                   "C-authored team textures preserve additive unshaded MDX layer semantics")
+            var glow = source
+            glow.textures[1].replaceableID = 2
+            glow.teamColorImage = nil
+            glow.teamGlowImage = WarcraftExportedImage(
+                identity: "TeamGlow01.blp", placeholder: false, status: 0,
+                width: 2, height: 1, rowBytes: 8,
+                rgba8: [0, 0, 0, 255, 64, 96, 128, 255], orientation: .topLeft)
+            let glowMaterial = try WarcraftAssetDescriptorAdapter.model(glow).model?.materials[1]
+            expect(glowMaterial?.role == .teamGlow &&
+                   glowMaterial?.name == glow.teamGlowImage?.identity &&
+                   glowMaterial?.texture?.rgba8 == glow.teamGlowImage?.rgba8 &&
+                   glowMaterial?.sourceBlendMode == 3 && glowMaterial?.sourceFlags == 1 &&
+                   glowMaterial?.writesDepth == false && glowMaterial?.readsDepth == true &&
+                   glowMaterial.map(WarcraftMaterialMapping.kind) == .unlitAdditive,
+                   "nonuniform team glow preserves MDX additive, flags, alpha, and depth state")
+            let copiedGlow = glowMaterial?.texture?.rgba8
+            glow.teamGlowImage?.rgba8[4] = 255
+            expect(glowMaterial?.texture?.rgba8 == copiedGlow,
+                   "adapted team glow owns copied pixels after the retained C image is released")
+            var absentTeam = source
+            absentTeam.teamColorImage = nil
+            let absentTeamAsset = try WarcraftAssetDescriptorAdapter.model(absentTeam)
+            expect(absentTeamAsset.model?.materials[1] == WarcraftPlaceholder.material &&
+                   absentTeamAsset.diagnostics.contains { $0.contains("authoritative team image") },
+                   "missing team registration becomes an explicit placeholder instead of a solid plane")
+            absentTeam.teamColorImage = replacementImage(
+                "MissingTeamColor.blp", value: 255, placeholder: true)
+            let missingTeamAsset = try WarcraftAssetDescriptorAdapter.model(absentTeam)
+            expect(missingTeamAsset.model?.materials[1] == WarcraftPlaceholder.material &&
+                   missingTeamAsset.diagnostics.contains { $0.contains("status 6") },
+                   "missing C-authored team images preserve status-bearing placeholder accounting")
             expect(model.sequences == [
                 WarcraftSequenceDescriptor(name: "Stand", firstFrame: 0, lastFrame: 999, looping: true),
             ], "MDX millisecond sequences remain available to frame selection")
@@ -668,7 +728,7 @@ enum TabletopPureTests {
                    treeAsset.model?.materials[0].name == tree.overrideImage?.identity,
                    "non-team replaceables consume the authoritative per-entity image")
             expect(treeAsset.model?.materials[1].role == .teamColor &&
-                   treeAsset.model?.materials[1].texture == nil,
+                   treeAsset.model?.materials[1].name == tree.teamColorImage?.identity,
                    "entity skin overrides never replace team-color or team-glow layers")
             var otherTree = tree
             otherTree.overrideImage = replacementImage("OtherTree.blp", value: 39)
@@ -748,6 +808,9 @@ enum TabletopPureTests {
             cliffTextures: [WarcraftExportedTerrainTexture(
                 typeIndex: 0, typeID: cliff, cornerCount: side * side - 4,
                 image: terrainImage("ReplaceableTextures/Cliff/Cliff0.blp", width: 256, height: 256))],
+            waterTexture: WarcraftExportedTerrainTexture(
+                typeIndex: 0, typeID: 0, cornerCount: 4,
+                image: terrainImage("authoritative-water", width: 4, height: 4)),
             corners: corners)
         do {
             let assets = try WarcraftAssetDescriptorAdapter.production(
@@ -768,6 +831,21 @@ enum TabletopPureTests {
                    descriptor.cells[1].features.contains(WarcraftTerrainFeature.ramp) &&
                    descriptor.cells[4].features.contains(WarcraftTerrainFeature.cliff),
                    "published water corners, ramps, and cliff levels survive terrain lowering")
+            let waterUV = descriptor.cells[0].waterTextureCoordinates ?? []
+            let waterOpacity = descriptor.cells[0].waterCornerOpacities ?? []
+            let waterPart = chunks[0].mesh.geosets.first {
+                $0.materialIndex == descriptor.waterMaterialIndex
+            }
+            expect(waterUV == [
+                WarcraftVector2(x: 0, y: 0), WarcraftVector2(x: 1.0 / 3, y: 0),
+                WarcraftVector2(x: 1.0 / 3, y: 1.0 / 3), WarcraftVector2(x: 0, y: 1.0 / 3),
+            ] && waterOpacity.count == 4 &&
+                abs(waterOpacity[0] - 0.32) < 0.00001 &&
+                abs(waterOpacity[1] - 0.4) < 0.00001,
+                "water uses desktop three-tile UVs and depth-clamped per-corner opacity")
+            expect(waterPart?.textureCoordinates.prefix(4).elementsEqual(waterUV) == true &&
+                waterPart?.vertexColors.prefix(4).map(\.alpha).elementsEqual(waterOpacity) == true,
+                "water mesh preserves authoritative UV and opacity values as vertex colors")
             expect(descriptor.cells[6].surfaceLayers.count == 2 &&
                    descriptor.cells[6].surfaceLayers[1].materialIndex == 1 &&
                    !descriptor.cells[8].features.contains(WarcraftTerrainFeature.cliff),
@@ -782,12 +860,75 @@ enum TabletopPureTests {
             expect(assets.counters == WarcraftAssetCacheCounters(
                 hits: 4, misses: 2, placeholderLogs: 0),
                 "C cache hit/miss/placeholder counters are copied into the production snapshot")
-            expect(assets.terrainTextureCount == 3 && assets.terrainNoCliffCount == 4,
+            expect(assets.terrainTextureCount == 4 && assets.terrainNoCliffCount == 4,
                    "terrain image and no-cliff acceptance counters survive pure descriptor lowering")
-            expect(descriptor.materials.dropLast().allSatisfy {
+            expect(descriptor.materials.allSatisfy {
                 $0.texture != nil && $0.role != .placeholder
-            } && assets.diagnostics.contains { $0.contains("authoritative asset ABI") },
-            "production terrain consumes authoritative ground and cliff images without placeholders")
+            } && descriptor.materials[descriptor.waterMaterialIndex].role == .water &&
+                assets.diagnostics.contains { $0.contains("authoritative asset ABI") },
+            "production terrain consumes authoritative ground, cliff, and water images")
+            var edgeWater = terrain
+            edgeWater.corners[0].flags |= 1 << 0
+            let edgeAssets = try WarcraftAssetDescriptorAdapter.production(
+                abiVersion: 1, terrain: edgeWater, models: [:],
+                counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 0))
+            expect(edgeAssets.terrain?.cells[0].waterLevel == nil,
+                   "desktop IsTileWater map-edge suppression prevents edge water geometry")
+            var suppressedWater = terrain
+            suppressedWater.corners = suppressedWater.corners.map {
+                var corner = $0
+                if corner.flags & (1 << 3) != 0 { corner.flags |= 1 << 0 }
+                return corner
+            }
+            suppressedWater.waterTexture = nil
+            let suppressedAssets = try WarcraftAssetDescriptorAdapter.production(
+                abiVersion: 1, terrain: suppressedWater, models: [:],
+                counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 0))
+            expect(suppressedAssets.terrainTextureCount == 3 &&
+                suppressedAssets.terrain?.cells.allSatisfy { $0.waterLevel == nil } == true,
+                "entirely map-edge-suppressed water needs no texture reference or geometry")
+            do {
+                suppressedWater.waterTexture = terrain.waterTexture
+                _ = try WarcraftAssetDescriptorAdapter.production(
+                    abiVersion: 1, terrain: suppressedWater, models: [:],
+                    counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 0))
+                expect(false, "an unexpected edge-only water reference was accepted")
+            } catch WarcraftDescriptorError.invalidTerrain {
+                expect(true, "edge-only water rejects an exporter reference")
+            }
+            var missingWater = terrain
+            missingWater.waterTexture?.image = replacementImage(
+                "missing-water", value: 255, placeholder: true)
+            let missingWaterAssets = try WarcraftAssetDescriptorAdapter.production(
+                abiVersion: 1, terrain: missingWater, models: [:],
+                counters: WarcraftAssetCacheCounters(hits: 0, misses: 1, placeholderLogs: 1))
+            expect(missingWaterAssets.placeholderMaterialCount == 1 &&
+                missingWaterAssets.terrain?.materials[
+                   missingWaterAssets.terrain!.waterMaterialIndex].role == .placeholder,
+                "missing exported water remains an explicit counted placeholder material")
+            var dry = terrain
+            dry.corners = dry.corners.map {
+                var corner = $0
+                corner.flags &= ~(1 << 3)
+                return corner
+            }
+            dry.waterTexture = nil
+            let dryAssets = try WarcraftAssetDescriptorAdapter.production(
+                abiVersion: 1, terrain: dry, models: [:],
+                counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 0))
+            expect(dryAssets.terrain?.cells.allSatisfy { $0.waterLevel == nil } == true &&
+                dryAssets.terrainTextureCount == 3,
+                "a no-water map needs no water texture or water geometry")
+            do {
+                var missingReference = terrain
+                missingReference.waterTexture = nil
+                _ = try WarcraftAssetDescriptorAdapter.production(
+                   abiVersion: 1, terrain: missingReference, models: [:],
+                   counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 0))
+                expect(false, "wet terrain without its C-authored water reference was accepted")
+            } catch WarcraftDescriptorError.invalidTerrain {
+                expect(true, "wet terrain requires its exact C-authored water reference")
+            }
             let rock = fourCC("Lrok")
             var sparse = terrain
             sparse.groundTypes = [ground, dirt, rock]
@@ -924,11 +1065,11 @@ enum TabletopPureTests {
             let firstSkinKey = WarcraftExportedModelCacheKey(
                configStringIndex: 4, identity: first.identity, status: 0, placeholder: false,
                overrideIdentity: firstSkin.identity,
-               overrideContentKey: try WarcraftAssetDescriptorAdapter.overrideContentKey(firstSkin))
+               overrideContentKey: try WarcraftAssetDescriptorAdapter.imageContentKey(firstSkin))
             let secondSkinKey = WarcraftExportedModelCacheKey(
                configStringIndex: 4, identity: first.identity, status: 0, placeholder: false,
                overrideIdentity: secondSkin.identity,
-               overrideContentKey: try WarcraftAssetDescriptorAdapter.overrideContentKey(secondSkin))
+               overrideContentKey: try WarcraftAssetDescriptorAdapter.imageContentKey(secondSkin))
             var firstSkinned = first, secondSkinned = first
             firstSkinned.overrideImage = firstSkin; secondSkinned.overrideImage = secondSkin
             cache.reset()
@@ -940,6 +1081,34 @@ enum TabletopPureTests {
                   cache.model(for: secondSkinKey) == secondSkinned &&
                   firstSkinKey != secondSkinKey && cache.counters.hits == 2,
                   "shared model geometry reuses only the exact identity-and-content skin key")
+            let firstTeam = replacementImage("TeamColor01.blp", value: 64)
+            let secondTeam = replacementImage("TeamColor01.blp", value: 64)
+            var firstTeamKey = firstKey, secondTeamKey = firstKey
+            firstTeamKey.teamColorIndex = 1
+            firstTeamKey.teamColorContentKey = try WarcraftAssetDescriptorAdapter.imageContentKey(firstTeam)
+            secondTeamKey.teamColorIndex = 2
+            secondTeamKey.teamColorContentKey = try WarcraftAssetDescriptorAdapter.imageContentKey(secondTeam)
+            var firstTeamed = first, secondTeamed = first
+            firstTeamed.teamColorImage = firstTeam
+            secondTeamed.teamColorImage = secondTeam
+            cache.insert(firstTeamed, for: firstTeamKey)
+            cache.insert(secondTeamed, for: secondTeamKey)
+            expect(firstTeamKey != secondTeamKey &&
+                  cache.model(for: firstTeamKey)?.teamColorImage == firstTeam &&
+                  cache.model(for: secondTeamKey)?.teamColorImage == secondTeam,
+                  "same model and image bytes remain separated by authoritative team index")
+            expect(WarcraftTeamTextureRequest.resolve(
+                kind: 1, teamColor: 15, count: 16, required: true) ==
+                   .valid(UInt64(1) << 32 | 15) &&
+                WarcraftTeamTextureRequest.resolve(
+                   kind: 2, teamColor: 16, count: 16, required: true) == .invalid &&
+                WarcraftTeamTextureRequest.resolve(
+                   kind: 3, teamColor: 0, count: 16, required: true) == .invalid &&
+                WarcraftTeamTextureRequest.resolve(
+                   kind: 2, teamColor: 0, count: 0, required: true) == .invalid &&
+                WarcraftTeamTextureRequest.resolve(
+                   kind: 99, teamColor: 99, count: 0, required: false) == .absent,
+                "team texture reducer covers both kinds, count bounds, invalid inputs, and absent roles")
         } catch {
             expect(false, "entity skin cache-key setup failed: \(error)")
         }
@@ -993,6 +1162,7 @@ enum TabletopPureTests {
                 WarcraftExportedTexture(identity: image.identity, replaceableID: 0, image: image),
                 WarcraftExportedTexture(identity: "<replaceable:1>", replaceableID: 1, image: nil),
             ],
+            teamColorImage: replacementImage("TeamColor01.blp", value: 48),
             sequences: [
                 WarcraftExportedSequence(
                     name: "Stand", startMilliseconds: 0, endMilliseconds: 999, flags: 0),
@@ -1053,6 +1223,12 @@ enum TabletopPureTests {
             expect(fixture.fog != nil, "fixture scene creates exactly one fog descriptor")
             expect(fixture.entities.allSatisfy { !$0.usedPlaceholder },
                    "fixture test geometry resolves without production placeholders")
+            var otherTeamScene = try FixtureWarcraftRenderProvider().scene(for: snapshot)
+            otherTeamScene.entities[0].teamColor &+= 1
+            let otherTeam = try WarcraftSceneBuilder.build(otherTeamScene)
+            expect(fixture.entities[0].geometryKey == otherTeam.entities[0].geometryKey &&
+                   fixture.entities[0].materialKey != otherTeam.entities[0].materialKey,
+                   "same model geometry with a different team index rebuilds only material state")
             var liveSnapshot = snapshot
             liveSnapshot.coordinateSpace = .world(TabletopBounds2(minX: 0, minZ: 0, maxX: 10, maxZ: 10))
             let production = try WarcraftSceneBuilder.build(

@@ -222,6 +222,11 @@ enum WarcraftDescriptorContentKey {
             for value in part.normals { hash.update(value.x); hash.update(value.y); hash.update(value.z) }
             hash.update(part.textureCoordinates.count)
             for value in part.textureCoordinates { hash.update(value.x); hash.update(value.y) }
+            hash.update(part.vertexColors.count)
+            for value in part.vertexColors {
+                hash.update(value.red); hash.update(value.green)
+                hash.update(value.blue); hash.update(value.alpha)
+            }
             hash.update(part.indices.count)
             for value in part.indices { hash.update(value) }
         }
@@ -246,6 +251,14 @@ enum WarcraftDescriptorContentKey {
             hash.update(material.blendMode.rawValue)
             hash.update(material.role.rawValue)
             hash.update(material.unlit)
+            if let sourceBlendMode = material.sourceBlendMode {
+                hash.update(true); hash.update(sourceBlendMode)
+            } else {
+                hash.update(false)
+            }
+            hash.update(material.sourceFlags)
+            hash.update(material.writesDepth); hash.update(material.readsDepth)
+            hash.update(material.twoSided); hash.update(material.unfogged)
             if let atlas = material.atlasRegion {
                 hash.update(true)
                 hash.update(atlas.x); hash.update(atlas.y)
@@ -336,11 +349,12 @@ enum WarcraftTerrainChunkBuilder {
                   uv: [WarcraftVector2] = [
                     WarcraftVector2(x: 0, y: 0), WarcraftVector2(x: 1, y: 0),
                     WarcraftVector2(x: 1, y: 1), WarcraftVector2(x: 0, y: 1),
-                  ]) {
+                  ], colors: [WarcraftColor] = []) {
             let base = UInt32(parts[material].positions.count)
             parts[material].positions += [a, b, c, d]
             parts[material].normals += [normal, normal, normal, normal]
             parts[material].textureCoordinates += uv
+            parts[material].vertexColors += colors
             let ab = WarcraftVector3(x: b.x - a.x, y: b.y - a.y, z: b.z - a.z)
             let ac = WarcraftVector3(x: c.x - a.x, y: c.y - a.y, z: c.z - a.z)
             let face = WarcraftVector3(x: ab.y * ac.z - ab.z * ac.y,
@@ -375,9 +389,18 @@ enum WarcraftTerrainChunkBuilder {
                 if let water = cell.waterLevel {
                     let levels = cell.waterCornerHeights.flatMap { $0.count == 4 ? $0 : nil } ??
                         [water, water, water, water]
+                    let uv = cell.waterTextureCoordinates.flatMap { $0.count == 4 ? $0 : nil } ?? [
+                        WarcraftVector2(x: 0, y: 0), WarcraftVector2(x: 1, y: 0),
+                        WarcraftVector2(x: 1, y: 1), WarcraftVector2(x: 0, y: 1),
+                    ]
+                    let opacity = cell.waterCornerOpacities.flatMap { $0.count == 4 ? $0 : nil } ??
+                        [Float](repeating: 0.5, count: 4)
                     quad(terrain.waterMaterialIndex, point(x, z, levels[0]), point(x + 1, z, levels[1]),
                          point(x + 1, z + 1, levels[2]), point(x, z + 1, levels[3]),
-                         normal: WarcraftVector3(x: 0, y: 1, z: 0))
+                         normal: WarcraftVector3(x: 0, y: 1, z: 0), uv: uv,
+                         colors: opacity.map {
+                             WarcraftColor(red: 1, green: 1, blue: 1, alpha: $0)
+                         })
                 }
                 guard cell.features.contains(.cliff) else { continue }
                 let bottom = min(h00, h10, h11, h01) - terrain.cellSize
@@ -400,6 +423,7 @@ enum WarcraftTerrainChunkBuilder {
         for part in parts {
             guard part.normals.count == part.positions.count,
                   part.textureCoordinates.count == part.positions.count,
+                  (part.vertexColors.isEmpty || part.vertexColors.count == part.positions.count),
                   part.indices.allSatisfy({ Int($0) < part.positions.count }),
                   part.indices.count.isMultiple(of: 3) else {
                 throw WarcraftDescriptorError.invalidMesh("terrain part topology is invalid")
@@ -463,7 +487,10 @@ enum WarcraftSceneBuilder {
                 position = entity.position
             }
             let geometryKey = model.geometryKey ?? WarcraftDescriptorContentKey.geometry(model)
-            let materialKey = model.materialKey ?? WarcraftDescriptorContentKey.materials(model.materials)
+            var materialHasher = WarcraftContentHasher()
+            materialHasher.update(model.materialKey ?? WarcraftDescriptorContentKey.materials(model.materials))
+            materialHasher.update(UInt32(entity.teamColor))
+            let materialKey = materialHasher.digest()
             let stateData = try JSONEncoder.sorted.encode([
                 String(entity.selected), String(entity.health ?? -1), String(entity.mana ?? -1),
                 String(entity.animation.frame), entity.animation.sequence ?? "",

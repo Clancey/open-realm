@@ -108,6 +108,12 @@ ROC images through normal archive order. Team color 00 is an opaque uniform 8x8
 image, while team glow 00 is an authored opaque 32x32 gradient; substituting a
 solid palette color for glow loses required spatial image data.
 
+Swift deep-copies each retained image once per `(kind, team_color)` while the
+asset lifecycle is valid, then keys per-entity material variants by copied image
+kind, team index, and content. Team images never mutate or key shared geometry templates. Textureless
+fixture roles may use the deterministic Swift palette; production team roles
+always consume the C image and preserve the exported MDX blend/flags/alpha.
+
 ```sh
 build/bin/mpqtool -mpq "$HOME/Downloads/Warcraft III/War3.mpq" \
   ls ReplaceableTextures/TeamColor
@@ -138,14 +144,13 @@ Each corner exports:
 - ground/cliff variations and cliff level;
 - ramp, water, blight, boundary, and map-edge flags.
 
-These values are sufficient for water placement: Swift emits water only for
-flagged cells and uses the four corrected water heights. They do not identify
-the desktop water material. Desktop loads
-`ReplaceableTextures\Water\Water12.blp` directly in `R_InitGame()` and derives
-per-corner opacity from water depth; that image is neither a server
-configstring nor one of ABI v1's ground/cliff texture kinds. The current
-constant-blue RealityKit material is therefore not asset parity even though
-its W3E geometry and heights are authoritative.
+These values drive desktop-equivalent water placement. Swift emits water only
+when at least one corner is wet and no corner is a map edge, uses the four
+corrected water heights, repeats the registered singleton image every three
+tiles, and clamps each corner's opacity to
+`max(0, min(0.5, (water_height - ground_height) / 50))`. RealityKit carries the
+four opacity values as vertex color into a water-only shader graph; it does not
+replace the exported image with a color material.
 
 The W3E cliff nibble reserves value 15 as a no-cliff sentinel rather than a
 cliff-table index. `BZ_TTA_TERRAIN_NO_CLIFF` preserves that state and

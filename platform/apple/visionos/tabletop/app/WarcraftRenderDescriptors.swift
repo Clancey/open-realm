@@ -44,8 +44,10 @@ struct WarcraftAtlasRegion: Codable, Equatable, Hashable, Sendable {
 
 enum WarcraftBlendMode: String, Codable, Equatable, Sendable {
     case opaque
+    case alphaKey
     case alpha
     case additive
+    case addAlpha
     case modulate
     case modulate2x
 }
@@ -61,12 +63,14 @@ enum WarcraftRealityMaterialKind: String, Equatable, Sendable {
 
 enum WarcraftMaterialMapping {
     static func kind(_ material: WarcraftMaterialDescriptor) -> WarcraftRealityMaterialKind {
-        if material.blendMode == .additive { return .unlitAdditive }
+        if material.blendMode == .additive || material.blendMode == .addAlpha {
+            return .unlitAdditive
+        }
         if material.unlit { return material.blendMode == .opaque ? .unlitOpaque : .unlitAlpha }
         switch material.blendMode {
         case .opaque: return .litOpaque
-        case .alpha: return .litAlpha
-        case .additive: return .unlitAdditive
+        case .alphaKey, .alpha: return .litAlpha
+        case .additive, .addAlpha: return .unlitAdditive
         case .modulate, .modulate2x: return .litModulate
         }
     }
@@ -90,6 +94,12 @@ struct WarcraftMaterialDescriptor: Codable, Equatable, Sendable {
     var blendMode: WarcraftBlendMode
     var role: WarcraftMaterialRole = .surface
     var unlit = false
+    var sourceBlendMode: UInt32? = nil
+    var sourceFlags: UInt32 = 0
+    var writesDepth = true
+    var readsDepth = true
+    var twoSided = false
+    var unfogged = false
 }
 
 struct WarcraftMeshPartDescriptor: Codable, Equatable, Sendable {
@@ -99,6 +109,7 @@ struct WarcraftMeshPartDescriptor: Codable, Equatable, Sendable {
     var textureCoordinates: [WarcraftVector2]
     var indices: [UInt32]
     var materialIndex: Int
+    var vertexColors: [WarcraftColor] = []
 }
 
 struct WarcraftModelDescriptor: Codable, Equatable, Sendable {
@@ -169,6 +180,8 @@ struct WarcraftTerrainCellDescriptor: Codable, Equatable, Sendable {
     var waterLevel: Float?
     var features: [WarcraftTerrainFeature] = []
     var waterCornerHeights: [Float]? = nil
+    var waterTextureCoordinates: [WarcraftVector2]? = nil
+    var waterCornerOpacities: [Float]? = nil
     var surfaceLayers: [WarcraftTerrainSurfaceLayer] = []
     var cliffMaterialIndex: Int? = nil
 }
@@ -348,6 +361,14 @@ enum WarcraftTeamPalette {
     ]
 
     static func color(_ index: UInt8) -> WarcraftColor { colors[Int(index) % colors.count] }
+}
+
+enum WarcraftMaterialTint {
+    static func roleColor(_ material: WarcraftMaterialDescriptor,
+                          teamColor: WarcraftColor) -> WarcraftColor {
+        let isTeam = material.role == .teamColor || material.role == .teamGlow
+        return isTeam && material.texture == nil ? teamColor : material.color
+    }
 }
 
 enum WarcraftCategoryScale {

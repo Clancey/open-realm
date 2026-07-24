@@ -2,6 +2,12 @@ import OpenRealmTabletopBridge
 
 private final class LiveWarcraftCopyCache {
     var values = WarcraftExportedAssetCache(modelLimit: 256)
+    var teamImages: [UInt64: (image: WarcraftExportedImage, contentKey: String)] = [:]
+
+    func reset() {
+        values.reset()
+        teamImages.removeAll()
+    }
 }
 
 private struct LiveSnapshotLease: TabletopSnapshotLease {
@@ -240,9 +246,21 @@ private enum LiveWarcraftAssetCopy {
                 entityImages[entity.metadata.image] = copied
                 overrideImage = copied
             }
+            let needsTeamColor = base.1.textures.contains { $0.replaceableID == 1 }
+            let needsTeamGlow = base.1.textures.contains { $0.replaceableID == 2 }
+            let teamColorImage = try copyTeamImage(
+                expected, kind: BZ_TTA_TEAM_TEXTURE_COLOR, teamColor: UInt32(metadata.teamColor),
+                required: needsTeamColor, cache: cache)
+            let teamGlowImage = try copyTeamImage(
+                expected, kind: BZ_TTA_TEAM_TEXTURE_GLOW, teamColor: UInt32(metadata.teamColor),
+                required: needsTeamGlow, cache: cache)
             var key = base.0
             key.overrideIdentity = overrideImage?.identity ?? ""
-            key.overrideContentKey = try WarcraftAssetDescriptorAdapter.overrideContentKey(overrideImage)
+            key.overrideContentKey = try WarcraftAssetDescriptorAdapter.imageContentKey(overrideImage)
+            key.teamColorIndex = needsTeamColor ? UInt32(metadata.teamColor) : .max
+            key.teamColorContentKey = teamColorImage?.contentKey ?? ""
+            key.teamGlowIndex = needsTeamGlow ? UInt32(metadata.teamColor) : .max
+            key.teamGlowContentKey = teamGlowImage?.contentKey ?? ""
             if let descriptor = modelDescriptors[key] {
                 var model = descriptor.0
                 model.metadata = metadata
@@ -252,6 +270,8 @@ private enum LiveWarcraftAssetCopy {
             }
             var copied = base.1
             copied.overrideImage = overrideImage
+            copied.teamColorImage = teamColorImage?.image
+            copied.teamGlowImage = teamGlowImage?.image
             if key != base.0 {
                 if let cached = cache.values.model(for: key) {
                     copied = cached
@@ -293,6 +313,31 @@ private enum LiveWarcraftAssetCopy {
         }
         defer { BZ_TTAsset_Release(asset) }
         return try copyImage(asset)
+    }
+
+    /* Team imagery is entity state, so copy it by semantic kind/team without mutating shared models. */
+    private static func copyTeamImage(
+        _ abiVersion: UInt32, kind: bzTTTeamTextureKind_t, teamColor: UInt32, required: Bool,
+        cache: LiveWarcraftCopyCache
+    ) throws -> (image: WarcraftExportedImage, contentKey: String)? {
+        guard required else { return nil }
+        let count = BZ_TTA_TeamTextureCount(abiVersion, kind)
+        let request = WarcraftTeamTextureRequest.resolve(
+            kind: UInt32(kind.rawValue), teamColor: teamColor, count: count, required: true)
+        guard case let .valid(key) = request else {
+            throw TabletopTransportError.malformedSnapshot(
+                "team texture kind \(kind.rawValue) index \(teamColor) is outside provider count \(count)")
+        }
+        if let cached = cache.teamImages[key] { return cached }
+        guard let asset = BZ_TTA_RegisterTeamTexture(abiVersion, kind, teamColor) else {
+            throw TabletopTransportError.malformedSnapshot(
+                "team texture kind \(kind.rawValue) index \(teamColor) registration failed")
+        }
+        defer { BZ_TTAsset_Release(asset) }
+        let copied = try copyImage(asset)
+        let result = (copied, try WarcraftAssetDescriptorAdapter.imageContentKey(copied))
+        cache.teamImages[key] = result
+        return result
     }
 
     private static func resolveMetadata(_ abiVersion: UInt32, entity: TabletopEntitySnapshot)
@@ -517,6 +562,8 @@ private enum LiveWarcraftAssetCopy {
                 terrain, types: groundTypes, kind: BZ_TTA_TERRAIN_TEXTURE_GROUND),
             cliffTextures: try copyTerrainTextures(
                 terrain, types: cliffTypes, kind: BZ_TTA_TERRAIN_TEXTURE_CLIFF),
+            waterTexture: try copyTerrainTextures(
+                terrain, types: [0], kind: BZ_TTA_TERRAIN_TEXTURE_WATER).first,
             corners: corners)
         cache.values.insert(copied, terrainKey: terrainKey)
         return copied
@@ -627,7 +674,7 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
     func start() async throws {
         guard bridge == nil else { return }
         sessionID &+= 1
-        assetCache.values.reset()
+        assetCache.reset()
         initialAssetCounters = nil
         loggedStableAssetCache = false
         let bridge = BZTabletopBridge(arguments: arguments)
@@ -639,12 +686,13 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
             let message = bridge.lastError ?? "Tabletop engine failed to start"
             bridge.stop()
             self.bridge = nil
-            assetCache.values.reset()
+            assetCache.reset()
             throw TabletopTransportError.runtime(message)
         default:
             let message = "Tabletop engine entered unexpected state \(bridge.state.rawValue)"
             bridge.stop()
             self.bridge = nil
+            assetCache.reset()
             throw TabletopTransportError.runtime(message)
         }
     }
@@ -657,6 +705,7 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
             let message = bridge.lastError ?? "Tabletop engine stopped"
             bridge.stop()
             self.bridge = nil
+            assetCache.reset()
             throw TabletopTransportError.runtime(message)
         default:
             throw TabletopTransportError.runtime("Tabletop engine entered unexpected state \(bridge.state.rawValue)")
@@ -669,11 +718,12 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
     }
 
     func stop() async {
-        guard let bridge else { return }
-        bridge.stop()
+        let active = bridge
         self.bridge = nil
+        assetCache.reset()
         initialAssetCounters = nil
         loggedStableAssetCache = false
+        active?.stop()
     }
 
     func post(_ command: TabletopCommand) async throws {

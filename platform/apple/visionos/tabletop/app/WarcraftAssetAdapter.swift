@@ -93,6 +93,8 @@ struct WarcraftExportedModel: Equatable, Sendable {
     var layers: [WarcraftExportedLayer]
     var textures: [WarcraftExportedTexture]
     var overrideImage: WarcraftExportedImage? = nil
+    var teamColorImage: WarcraftExportedImage? = nil
+    var teamGlowImage: WarcraftExportedImage? = nil
     var sequences: [WarcraftExportedSequence]
     var nodes: [WarcraftExportedNode]
 }
@@ -128,6 +130,7 @@ struct WarcraftExportedTerrain: Equatable, Sendable {
     var cliffTypes: [UInt32]
     var groundTextures: [WarcraftExportedTerrainTexture]
     var cliffTextures: [WarcraftExportedTerrainTexture]
+    var waterTexture: WarcraftExportedTerrainTexture? = nil
     var corners: [WarcraftExportedTerrainCorner]
 }
 
@@ -164,6 +167,23 @@ struct WarcraftExportedModelCacheKey: Equatable, Hashable, Sendable {
     var placeholder: Bool
     var overrideIdentity: String = ""
     var overrideContentKey: String = ""
+    var teamColorIndex: UInt32 = .max
+    var teamColorContentKey: String = ""
+    var teamGlowIndex: UInt32 = .max
+    var teamGlowContentKey: String = ""
+}
+
+enum WarcraftTeamTextureRequest: Equatable {
+    case absent
+    case valid(UInt64)
+    case invalid
+
+    static func resolve(kind: UInt32, teamColor: UInt32, count: UInt32,
+                        required: Bool) -> WarcraftTeamTextureRequest {
+        guard required else { return .absent }
+        guard (kind == 1 || kind == 2), count > 0, teamColor < count else { return .invalid }
+        return .valid(UInt64(kind) << 32 | UInt64(teamColor))
+    }
 }
 
 struct WarcraftExportedAssetCache {
@@ -239,7 +259,9 @@ struct WarcraftProductionAssets: Equatable, Sendable {
 
     var placeholderModelCount: Int { entities.values.filter { $0.model == nil }.count }
     var placeholderMaterialCount: Int {
-        entities.values.compactMap(\.model).flatMap(\.materials).filter { $0.role == .placeholder }.count
+        let entityMaterials = entities.values.compactMap(\.model).flatMap(\.materials)
+        return entityMaterials.filter { $0.role == .placeholder }.count +
+            (terrain?.materials.filter { $0.role == .placeholder }.count ?? 0)
     }
     var placeholderCount: Int { placeholderModelCount + placeholderMaterialCount }
 }
@@ -256,6 +278,11 @@ enum WarcraftAssetDescriptorAdapter {
     static let mdxVersion: UInt32 = 800
     static let terrainChunkTiles = 32
     private static let layerUnshaded: UInt32 = 0x1
+    private static let layerTwoSided: UInt32 = 0x10
+    private static let layerUnfogged: UInt32 = 0x20
+    private static let layerNoDepthTest: UInt32 = 0x40
+    private static let layerNoDepthSet: UInt32 = 0x80
+    private static let terrainMapEdge: UInt8 = 1 << 0
     private static let terrainRamp: UInt8 = 1 << 1
     private static let terrainWater: UInt8 = 1 << 3
     private static let terrainNoCliff: UInt8 = 1 << 5
@@ -271,8 +298,8 @@ enum WarcraftAssetDescriptorAdapter {
             orientation: source.orientation))
     }
 
-    /* Skin identity and copied pixels both participate so shared MDX geometry cannot alias materials. */
-    static func overrideContentKey(_ source: WarcraftExportedImage?) throws -> String {
+    /* Image identity and copied pixels both participate so shared MDX geometry cannot alias materials. */
+    static func imageContentKey(_ source: WarcraftExportedImage?) throws -> String {
         guard let source else { return "" }
         var hash = WarcraftContentHasher()
         hash.update(source.identity); hash.update(source.status); hash.update(source.placeholder)
@@ -445,29 +472,24 @@ enum WarcraftAssetDescriptorAdapter {
         let source = model.textures[layer.textureIndex]
         let role: WarcraftMaterialRole, sourceImage: WarcraftExportedImage?
         switch source.replaceableID {
-        case 1: role = .teamColor; sourceImage = nil
-        case 2: role = .teamGlow; sourceImage = nil
+        case 1: role = .teamColor; sourceImage = model.teamColorImage
+        case 2: role = .teamGlow; sourceImage = model.teamGlowImage
         case 0: role = .surface; sourceImage = source.image
         default:
             role = .surface; sourceImage = model.overrideImage
         }
         if source.replaceableID != 0 {
-            if source.replaceableID != 1 && source.replaceableID != 2 {
-                guard let sourceImage, !sourceImage.placeholder else {
-                    let status = sourceImage.map { " status \($0.status)" } ?? ""
-                    return (WarcraftPlaceholder.material,
-                            "Asset '\(model.identity)' replaceable texture \(source.replaceableID)\(status) " +
-                            "has no authoritative entity image; using explicit placeholder material.")
-                }
-                return try imageMaterial(
-                    model, layer: layer, layerIndex: layerIndex, source: sourceImage,
-                    blend: blend, role: role)
+            guard let sourceImage, !sourceImage.placeholder else {
+                let status = sourceImage.map { " status \($0.status)" } ?? ""
+                let ownership = source.replaceableID == 1 || source.replaceableID == 2 ?
+                    "team image" : "entity image"
+                return (WarcraftPlaceholder.material,
+                        "Asset '\(model.identity)' replaceable texture \(source.replaceableID)\(status) " +
+                        "has no authoritative \(ownership); using explicit placeholder material.")
             }
-            return (WarcraftMaterialDescriptor(
-                name: source.identity, color: WarcraftColor(
-                    red: 1, green: 1, blue: 1, alpha: min(max(layer.alpha, 0), 1)),
-                texture: nil, blendMode: blend, role: role,
-                unlit: layer.flags & layerUnshaded != 0), nil)
+            return try imageMaterial(
+                model, layer: layer, layerIndex: layerIndex, source: sourceImage,
+                blend: blend, role: role)
         }
         guard let sourceImage, !sourceImage.placeholder else {
             let status = source.image.map { " status \($0.status)" } ?? ""
@@ -492,20 +514,33 @@ enum WarcraftAssetDescriptorAdapter {
             return (WarcraftMaterialDescriptor(
                 name: source.identity, color: WarcraftColor(
                     red: 1, green: 1, blue: 1, alpha: min(max(layer.alpha, 0), 1)),
-                texture: image, blendMode: .alpha, role: role, unlit: true), nil)
+                texture: image, blendMode: .alpha, role: role, unlit: true,
+                sourceBlendMode: layer.blendMode, sourceFlags: layer.flags,
+                writesDepth: false, readsDepth: layer.flags & layerNoDepthTest == 0,
+                twoSided: layer.flags & layerTwoSided != 0,
+                unfogged: layer.flags & layerUnfogged != 0), nil)
         }
+        /* Replaceable images alter only TEXS selection; retain the authored layer render state. */
         return (WarcraftMaterialDescriptor(
             name: source.identity, color: WarcraftColor(
                 red: 1, green: 1, blue: 1, alpha: min(max(layer.alpha, 0), 1)),
             texture: try image(source), blendMode: blend, role: role,
-            unlit: layer.flags & layerUnshaded != 0), nil)
+            unlit: layer.flags & layerUnshaded != 0,
+            sourceBlendMode: layer.blendMode, sourceFlags: layer.flags,
+            writesDepth: (layer.blendMode == 0 || layer.blendMode == 1) &&
+                layer.flags & layerNoDepthSet == 0,
+            readsDepth: layer.flags & layerNoDepthTest == 0,
+            twoSided: layer.flags & layerTwoSided != 0,
+            unfogged: layer.flags & layerUnfogged != 0), nil)
     }
 
     private static func blendMode(_ raw: UInt32) throws -> WarcraftBlendMode {
         switch raw {
         case 0: return .opaque
-        case 1, 2: return .alpha
-        case 3, 4: return .additive
+        case 1: return .alphaKey
+        case 2: return .alpha
+        case 3: return .additive
+        case 4: return .addAlpha
         case 5: return .modulate
         case 6: return .modulate2x
         default: throw WarcraftDescriptorError.invalidMesh("unknown MDX blend mode \(raw)")
@@ -577,12 +612,36 @@ enum WarcraftAssetDescriptorAdapter {
             materials.append(WarcraftMaterialDescriptor(
                 name: texture.identity, color: .white, texture: try image(texture), blendMode: .opaque))
         }
-        let waterIndex = materials.count
-        materials.append(WarcraftMaterialDescriptor(
-            name: "warcraft-water", color: WarcraftColor(red: 0.2, green: 0.45, blue: 0.72, alpha: 0.68),
-            texture: nil, blendMode: .alpha, role: .water, unlit: true))
         func corner(_ x: Int, _ z: Int) -> WarcraftExportedTerrainCorner {
             source.corners[z * source.cornerWidth + x]
+        }
+        let wetCornerCount = source.corners.filter { $0.flags & terrainWater != 0 }.count
+        let hasRenderableWater = (0..<(source.cornerHeight - 1)).contains { z in
+            (0..<(source.cornerWidth - 1)).contains { x in
+                let values = [
+                    corner(x, z), corner(x + 1, z), corner(x + 1, z + 1), corner(x, z + 1),
+                ]
+                return values.contains { $0.flags & terrainWater != 0 } &&
+                    !values.contains { $0.flags & terrainMapEdge != 0 }
+            }
+        }
+        let waterIndex: Int
+        if hasRenderableWater {
+            guard let water = source.waterTexture, water.typeIndex == 0, water.typeID == 0,
+                  water.cornerCount == wetCornerCount else {
+                throw WarcraftDescriptorError.invalidTerrain(
+                    "renderable water has no matching authoritative texture reference")
+            }
+            waterIndex = materials.count
+            materials.append(WarcraftMaterialDescriptor(
+                name: water.image.identity, color: .white, texture: try image(water.image),
+                blendMode: .alpha, role: water.image.placeholder ? .placeholder : .water, unlit: true))
+        } else {
+            guard source.waterTexture == nil else {
+                throw WarcraftDescriptorError.invalidTerrain(
+                    "terrain without a renderable water tile unexpectedly exported a water texture")
+            }
+            waterIndex = baseGroundMaterial
         }
         var cells: [WarcraftTerrainCellDescriptor] = []
         cells.reserveCapacity(source.tileWidth * source.tileHeight)
@@ -599,7 +658,11 @@ enum WarcraftAssetDescriptorAdapter {
                 let cliff = !ramp && values.contains { $0.flags & terrainNoCliff == 0 } &&
                     Set(values.map(\.cliffLevel)).count > 1
                 if cliff { features.append(.cliff) }
-                let water = values.contains { $0.flags & terrainWater != 0 }
+                /* Desktop IsTileWater rejects a wet tile when any of its four corners is a map edge. */
+                let water = values.contains { $0.flags & terrainWater != 0 } &&
+                    !values.contains { $0.flags & terrainMapEdge != 0 }
+                let u0 = Float(x % 3) / 3, u1 = Float(x % 3 + 1) / 3
+                let v0 = Float(z % 3) / 3, v1 = Float(z % 3 + 1) / 3
                 let surfaces = try surfaceLayers(
                     values, groundIndices: groundIndices,
                     textures: groundImages, materials: groundMaterials)
@@ -620,6 +683,13 @@ enum WarcraftAssetDescriptorAdapter {
                     waterLevel: water ? values.map(\.waterHeight).reduce(0, +) * scale / 4 : nil,
                     features: features,
                     waterCornerHeights: water ? values.map { $0.waterHeight * scale } : nil,
+                    waterTextureCoordinates: water ? [
+                        WarcraftVector2(x: u0, y: v0), WarcraftVector2(x: u1, y: v0),
+                        WarcraftVector2(x: u1, y: v1), WarcraftVector2(x: u0, y: v1),
+                    ] : nil,
+                    waterCornerOpacities: water ? values.map {
+                        min(0.5, max(0, ($0.waterHeight - $0.height) / 50))
+                    } : nil,
                     surfaceLayers: surfaces, cliffMaterialIndex: cellCliffIndex))
             }
         }
@@ -632,7 +702,8 @@ enum WarcraftAssetDescriptorAdapter {
                 cliffMaterialIndex: cliffMaterials.values.first ?? baseGroundMaterial,
                 rampMaterialIndex: baseGroundMaterial),
             transform: transform,
-            textureCount: source.groundTextures.count + source.cliffTextures.count,
+            textureCount: source.groundTextures.count + source.cliffTextures.count +
+                (source.waterTexture == nil ? 0 : 1),
             noCliffCount: source.corners.filter { $0.flags & terrainNoCliff != 0 }.count,
             diagnostics: ["Terrain geometry and textures use authoritative asset ABI v1 descriptors."])
     }

@@ -123,8 +123,12 @@ for missing textures; the lowest published index is the opaque base even when
 type-table index zero is unused. Layers use the desktop four-corner mask, 64x64 atlas
 tiles, base variation rules, and 5% edge inset. Cliff cells
 select their exported cliff texture, no-cliff sentinel corners remain explicit,
-ramps retain ground layers, and water uses one explicit translucent material
-rather than a missing-texture fallback.
+and ramps retain ground layers. Water registers the C-authored singleton texture,
+repeats it every three tiles with desktop UVs, rejects map-edge cells, and uses
+depth-clamped per-corner opacity through a water-only vertex-color shader.
+Team-color and team-glow layers register C-authored per-team images by semantic
+kind and entity team index. The copied image varies per entity and never enters
+the shared model template; authored MDX blend, flags, and alpha remain unchanged.
 
 Image and fog resource keys include normalized dimensions, orientation, bytes,
 and fog plane bounds. Entity scale changes update model children and collision

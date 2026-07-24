@@ -63,21 +63,15 @@ mkdir -p "$INSTALL_APP"
 cp "$APP/Info.plist" "$APP/OpenRealmTabletop" "$INSTALL_APP/"
 codesign --force --sign - --identifier "$BUNDLE_ID" --timestamp=none "$INSTALL_APP"
 
-SOURCE=$(xcrun simctl list devices available |
-    sed -nE 's/.*Apple Vision Pro \(([0-9A-F-]+)\) \(Shutdown\).*/\1/p' | head -1)
-if [ -n "$SOURCE" ]; then
-    UDID=$(xcrun simctl clone "$SOURCE" "Open Realm Tabletop Acceptance $$")
-else
-    RUNTIME=$(xcrun simctl list runtimes available |
-        sed -nE 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.xrOS[^ ]*)$/\1/p' | tail -1)
-    [ -n "$RUNTIME" ] || {
-        echo "launch-tabletop-simulator.sh: no available xrOS runtime can create an isolated simulator" >&2
-        exit 1
-    }
-    UDID=$(xcrun simctl create "Open Realm Tabletop Acceptance $$" \
-        com.apple.CoreSimulator.SimDeviceType.Apple-Vision-Pro-4K \
-        "$RUNTIME")
-fi
+RUNTIME=$(xcrun simctl list runtimes available |
+    sed -nE 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.xrOS[^ ]*)$/\1/p' | tail -1)
+[ -n "$RUNTIME" ] || {
+    echo "launch-tabletop-simulator.sh: no available xrOS runtime can create an isolated simulator" >&2
+    exit 1
+}
+UDID=$(xcrun simctl create "Open Realm Tabletop Acceptance $$" \
+    com.apple.CoreSimulator.SimDeviceType.Apple-Vision-Pro-4K \
+    "$RUNTIME")
 xcrun simctl boot "$UDID"
 xcrun simctl bootstatus "$UDID" -b >"$BOOT_OUT" 2>"$BOOT_ERR" &
 BOOT_PID=$!
@@ -125,6 +119,7 @@ while [ "$ASSET_WAIT" -lt "$ASSET_WAIT_LIMIT" ]; do
     sleep 1
     ASSET_WAIT=$((ASSET_WAIT + 1))
 done
+sleep 3
 cat "$STDOUT" "$STDERR" > "$LOG_DIR/combined.log"
 if ! grep -Fq "BZTabletopTransport: initialized" "$LOG_DIR/combined.log"; then
     echo "launch-tabletop-simulator.sh: transport initialization evidence is missing" >&2
@@ -146,6 +141,13 @@ if ! grep -Fq 'CL_SendBegin: sending begin world="Maps\Campaign\Human02.w3m"' "$
     cat "$STDERR" >&2
     exit 1
 fi
+if grep -Eq 'water shader preparation failed|authoritative water material is unavailable|'\
+'parameterNameNotFound|incorrectTypeForParameterName|_BindNodeGraph|Terrain chunk .* failed' \
+    "$LOG_DIR/combined.log"; then
+    echo "launch-tabletop-simulator.sh: authoritative water shader failed" >&2
+    cat "$STDERR" >&2
+    exit 1
+fi
 INITIAL_SUMMARY=$(grep -F "OpenRealmTabletopAssets: abi=1 cache_phase=initial" \
     "$LOG_DIR/combined.log" | tail -1 || true)
 STABLE_SUMMARY=$(grep -F "OpenRealmTabletopAssets: abi=1 cache_phase=stable" \
@@ -163,7 +165,7 @@ printf '%s\n' "$STABLE_SUMMARY" | awk '
     }
     split(value["terrain"], terrain, "x")
     if (terrain[1] != 128 || terrain[2] != 128 || value["chunks"] != 16 ||
-        value["terrain_textures"] < 2 || value["no_cliff"] != 2349 ||
+        value["terrain_textures"] != 9 || value["no_cliff"] != 2349 ||
         value["fog"] != 1 || value["entities"] != 1024 || value["active_visible"] != 2397 ||
         value["overflow"] != 1373 || value["models"] < 1 ||
         value["geosets"] < 1 || value["textured_materials"] < 1 ||
