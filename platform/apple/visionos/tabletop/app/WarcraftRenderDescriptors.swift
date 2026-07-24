@@ -47,11 +47,13 @@ enum WarcraftBlendMode: String, Codable, Equatable, Sendable {
     case alpha
     case additive
     case modulate
+    case modulate2x
 }
 
 enum WarcraftRealityMaterialKind: String, Equatable, Sendable {
     case litOpaque
     case litAlpha
+    case unlitOpaque
     case unlitAlpha
     case unlitAdditive
     case litModulate
@@ -60,12 +62,12 @@ enum WarcraftRealityMaterialKind: String, Equatable, Sendable {
 enum WarcraftMaterialMapping {
     static func kind(_ material: WarcraftMaterialDescriptor) -> WarcraftRealityMaterialKind {
         if material.blendMode == .additive { return .unlitAdditive }
-        if material.unlit { return .unlitAlpha }
+        if material.unlit { return material.blendMode == .opaque ? .unlitOpaque : .unlitAlpha }
         switch material.blendMode {
         case .opaque: return .litOpaque
         case .alpha: return .litAlpha
         case .additive: return .unlitAdditive
-        case .modulate: return .litModulate
+        case .modulate, .modulate2x: return .litModulate
         }
     }
 }
@@ -104,6 +106,8 @@ struct WarcraftModelDescriptor: Codable, Equatable, Sendable {
     var geosets: [WarcraftMeshPartDescriptor]
     var materials: [WarcraftMaterialDescriptor]
     var sequences: [WarcraftSequenceDescriptor]
+    var geometryKey: String? = nil
+    var materialKey: String? = nil
 }
 
 struct WarcraftSequenceDescriptor: Codable, Equatable, Sendable {
@@ -114,6 +118,7 @@ struct WarcraftSequenceDescriptor: Codable, Equatable, Sendable {
 }
 
 enum WarcraftEntityCategory: String, Codable, CaseIterable, Equatable, Sendable {
+    case unknown
     case unit
     case building
     case resource
@@ -145,6 +150,8 @@ struct WarcraftEntityDescriptor: Codable, Equatable, Sendable {
     var teamColor: UInt8
     var teamTint: WarcraftColor
     var animation: WarcraftAnimationRequest
+    var renderScale: WarcraftVector3? = nil
+    var overlayScale: WarcraftVector3? = nil
 }
 
 enum WarcraftTerrainFeature: String, Codable, Equatable, Sendable {
@@ -152,10 +159,18 @@ enum WarcraftTerrainFeature: String, Codable, Equatable, Sendable {
     case ramp
 }
 
+struct WarcraftTerrainSurfaceLayer: Codable, Equatable, Sendable {
+    var materialIndex: Int
+    var textureCoordinates: [WarcraftVector2]
+}
+
 struct WarcraftTerrainCellDescriptor: Codable, Equatable, Sendable {
     var materialIndex: Int
     var waterLevel: Float?
     var features: [WarcraftTerrainFeature] = []
+    var waterCornerHeights: [Float]? = nil
+    var surfaceLayers: [WarcraftTerrainSurfaceLayer] = []
+    var cliffMaterialIndex: Int? = nil
 }
 
 struct WarcraftTerrainDescriptor: Codable, Equatable, Sendable {
@@ -203,6 +218,53 @@ protocol WarcraftRenderDescriptorProvider: Sendable {
 struct WarcraftPreparedSnapshot: Sendable {
     var snapshot: TabletopSnapshot
     var render: WarcraftRenderSnapshot
+}
+
+actor TabletopPreparedSnapshotMailbox {
+    private var latest: WarcraftPreparedSnapshot?
+    private var scheduled = false
+
+    func submit(_ value: WarcraftPreparedSnapshot) -> Bool {
+        latest = value
+        guard !scheduled else { return false }
+        scheduled = true
+        return true
+    }
+
+    func take() -> WarcraftPreparedSnapshot? {
+        let value = latest
+        latest = nil
+        scheduled = false
+        return value
+    }
+
+    func reset() { latest = nil; scheduled = false }
+}
+
+actor TabletopSnapshotMailbox {
+    private var latest: TabletopSnapshot?
+    private var processing = false
+
+    func submit(_ value: TabletopSnapshot) -> Bool {
+        latest = value
+        guard !processing else { return false }
+        processing = true
+        return true
+    }
+
+    func take() -> TabletopSnapshot? {
+        let value = latest
+        latest = nil
+        return value
+    }
+
+    func finish() -> Bool {
+        guard latest == nil else { return true }
+        processing = false
+        return false
+    }
+
+    func reset() { latest = nil; processing = false }
 }
 
 actor WarcraftRenderPipeline {
@@ -292,6 +354,7 @@ enum WarcraftCategoryScale {
     static func scale(category: WarcraftEntityCategory, footprint: WarcraftFootprint) -> WarcraftVector3 {
         let categoryScale: Float
         switch category {
+        case .unknown: categoryScale = 0.72
         case .unit: categoryScale = 0.72
         case .building: categoryScale = 1
         case .resource: categoryScale = 0.9

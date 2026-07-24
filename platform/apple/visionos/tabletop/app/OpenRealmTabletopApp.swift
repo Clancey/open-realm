@@ -21,7 +21,7 @@ struct OpenRealmTabletopApp: App {
                 _model = StateObject(wrappedValue: TabletopSessionModel(
                     modeName: "Fixture / \(providerName)", transport: fixture,
                     renderProvider: provider, commands: fixture))
-            case .live(let dataPath, let map, let connect):
+            case .live(let dataPath, let map, let connect, let tft):
                 guard TabletopDataPreflight.isUsable(
                     entries: try Self.dataEntries(dataPath), localMapRequired: map != nil) else {
                     throw TabletopTransportError.configuration(
@@ -29,6 +29,7 @@ struct OpenRealmTabletopApp: App {
                         "run the production bundle staging target or set BZ_TABLETOP_DATA_PATH")
                 }
                 var arguments = [TabletopProduct.executable, "-data", dataPath]
+                if tft { arguments.append("-tft") }
                 if let map { arguments += ["+map", map] }
                 if let connect { arguments += ["+connect", connect] }
                 let live = LiveTabletopTransport(arguments: arguments)

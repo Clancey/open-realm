@@ -20,9 +20,13 @@ final class RealityTabletopReconciler {
     private var logOnce = WarcraftLogOnce()
     private var generation: UInt64?
     private var sessionID: UInt64?
+    private var opaqueProgram: UnlitMaterial.Program?
     private var alphaProgram: UnlitMaterial.Program?
     private var additiveProgram: UnlitMaterial.Program?
     private static let resourceLimit = 256
+    private static let overlayNames: Set<String> = [
+        "selection", "health-background", "health-fill", "mana-background", "mana-fill",
+    ]
 
     init() {
         root.name = "open-realm-warcraft-descriptor-scene"
@@ -37,11 +41,13 @@ final class RealityTabletopReconciler {
     }
 
     func prepare() async {
-        guard alphaProgram == nil || additiveProgram == nil else { return }
+        guard opaqueProgram == nil || alphaProgram == nil || additiveProgram == nil else { return }
+        let opaque = UnlitMaterial.Program.Descriptor()
         var alpha = UnlitMaterial.Program.Descriptor()
         alpha.blendMode = .alpha
         var additive = UnlitMaterial.Program.Descriptor()
         additive.blendMode = .add
+        opaqueProgram = await UnlitMaterial.Program(descriptor: opaque)
         alphaProgram = await UnlitMaterial.Program(descriptor: alpha)
         additiveProgram = await UnlitMaterial.Program(descriptor: additive)
     }
@@ -92,7 +98,7 @@ final class RealityTabletopReconciler {
             if let entity = warcraft.entities.first(where: { $0.descriptor.id == id }) {
                 upsert(WarcraftEntityUpdate(entity: entity, geometryChanged: false,
                                             materialChanged: false, transformChanged: true,
-                                            stateChanged: true))
+                                            scaleChanged: false, stateChanged: true))
             }
         }
     }
@@ -154,21 +160,27 @@ final class RealityTabletopReconciler {
             entity.children.removeAll()
             do {
                 try addModel(item.model, key: item.geometryKey, teamColor: item.teamColor,
-                             tint: item.descriptor.teamTint, to: entity)
+                             tint: item.descriptor.teamTint, scale: item.scale, to: entity)
                 try addOverlays(item, to: entity)
             } catch {
                 diagnose("Object '\(item.descriptor.assetName)' failed: \(error)")
                 entity.children.removeAll()
                 do {
                     try addModel(WarcraftPlaceholder.model, key: "placeholder",
-                                 teamColor: .placeholder, tint: .white, to: entity)
+                                 teamColor: .placeholder, tint: .white, scale: item.scale, to: entity)
                 } catch { diagnose("Explicit placeholder construction failed: \(error)") }
             }
         }
         if update.transformChanged || entities[id] == nil {
             entity.position = positionOverrides[id] ?? simd(item.position)
             entity.orientation = simd_quatf(angle: item.descriptor.heading, axis: [0, 1, 0])
-            entity.scale = simd(item.scale)
+            entity.scale = .one
+        }
+        if rebuilt || update.transformChanged || entities[id] == nil { updateOverlayTransforms(item, in: entity) }
+        if update.scaleChanged && !rebuilt {
+            for child in entity.children where !Self.overlayNames.contains(child.name) {
+                child.scale = simd(item.scale)
+            }
         }
         if rebuilt || update.stateChanged {
             entity.findEntity(named: "selection")?.isEnabled =
@@ -179,10 +191,16 @@ final class RealityTabletopReconciler {
                 entity.name = "object-\(id)-\(animation.sequence)-\(animation.frame)"
             }
         }
-        if update.geometryChanged || entities[id] == nil, let bounds = WarcraftMeshMath.bounds(item.model) {
-            let size = SIMD3(max(bounds.size.x, 0.01), max(bounds.size.y, 0.01), max(bounds.size.z, 0.01))
+        if update.geometryChanged || update.scaleChanged || entities[id] == nil,
+           let bounds = WarcraftMeshMath.bounds(item.model) {
+            let size = SIMD3(
+                max(bounds.size.x * item.scale.x, 0.01), max(bounds.size.y * item.scale.y, 0.01),
+                max(bounds.size.z * item.scale.z, 0.01))
+            let center = SIMD3(
+                bounds.center.x * item.scale.x, bounds.center.y * item.scale.y,
+                bounds.center.z * item.scale.z)
             entity.components.set(CollisionComponent(shapes: [
-                ShapeResource.generateBox(size: size).offsetBy(translation: simd(bounds.center)),
+                ShapeResource.generateBox(size: size).offsetBy(translation: center),
             ]))
         }
         entity.components.set(InputTargetComponent())
@@ -191,7 +209,9 @@ final class RealityTabletopReconciler {
     }
 
     private func addModel(_ model: WarcraftModelDescriptor, key: String,
-                          teamColor: WarcraftColor, tint: WarcraftColor, to parent: Entity) throws {
+                          teamColor: WarcraftColor, tint: WarcraftColor,
+                          scale: WarcraftVector3 = WarcraftVector3(x: 1, y: 1, z: 1),
+                          to parent: Entity) throws {
         for (index, part) in model.geosets.enumerated() {
             guard model.materials.indices.contains(part.materialIndex) else {
                 throw WarcraftDescriptorError.invalidMesh("geoset material index is out of bounds")
@@ -205,6 +225,7 @@ final class RealityTabletopReconciler {
                 mesh: try mesh(mapped, key: "\(key)-\(index)\(atlasKey)"),
                 materials: [try material(descriptor, teamColor: teamColor, tint: tint)])
             child.name = part.name
+            child.scale = simd(scale)
             parent.addChild(child)
         }
     }
@@ -215,11 +236,25 @@ final class RealityTabletopReconciler {
             mesh: try mesh(ringPart, key: "selection-ring"),
             materials: [SimpleMaterial(color: .yellow, isMetallic: false)])
         selection.name = "selection"
-        selection.position.y = 0.02
         selection.isEnabled = item.descriptor.selected
         parent.addChild(selection)
         addBar(name: "health", color: .green, y: 1.12, to: parent)
         addBar(name: "mana", color: .blue, y: 1.02, to: parent)
+    }
+
+    private func updateOverlayTransforms(_ item: WarcraftRenderEntityDescriptor, in parent: Entity) {
+        if let selection = parent.findEntity(named: "selection") {
+            selection.position.y = 0.001
+            selection.scale = [item.overlayScale.x, 1, item.overlayScale.z]
+        }
+        let top = WarcraftMeshMath.bounds(item.model).map {
+            ($0.center.y + $0.size.y * 0.5) * item.scale.y
+        } ?? item.overlayScale.y
+        for (name, offset) in [("health-background", Float(0.008)), ("mana-background", Float(0.004))] {
+            guard let bar = parent.findEntity(named: name) else { continue }
+            bar.position = [0, top + offset, 0]
+            bar.scale.x = max(item.overlayScale.x / 0.8, 0.01)
+        }
     }
 
     private func addBar(name: String, color: UIColor, y: Float, to parent: Entity) {
@@ -281,24 +316,27 @@ final class RealityTabletopReconciler {
             result.blending = .transparent(opacity: .init(scale: color.alpha))
             result.writesDepth = false
             return result
-        case .unlitAlpha, .unlitAdditive:
-            let program = WarcraftMaterialMapping.kind(descriptor) == .unlitAdditive ?
-                additiveProgram : alphaProgram
+        case .unlitOpaque, .unlitAlpha, .unlitAdditive:
+            let program = switch WarcraftMaterialMapping.kind(descriptor) {
+            case .unlitOpaque: opaqueProgram
+            case .unlitAdditive: additiveProgram
+            default: alphaProgram
+            }
             guard let program else {
                 throw WarcraftDescriptorError.invalidMesh("unlit material program was not prepared")
             }
             var result = UnlitMaterial(program: program)
             result.color = baseColor
-            result.writesDepth = false
+            result.writesDepth = WarcraftMaterialMapping.kind(descriptor) == .unlitOpaque
             return result
         }
     }
 
     private func texture(_ image: WarcraftImageDescriptor) throws -> TextureResource {
         let normalized = try WarcraftImageNormalizer.topLeft(image)
-        let data = Data(normalized.rgba8), key = WarcraftContentHash.hash(data)
+        let data = Data(normalized.rgba8), key = WarcraftDescriptorContentKey.image(normalized)
         if let cached = textureCache[key] { return cached }
-        let cacheKey = try WarcraftCacheKey.content(namespace: "texture", data: data)
+        let cacheKey = try WarcraftCacheKey.content(namespace: "texture", data: Data(key.utf8))
         let bytes: Data
         if let cached = try diskCache?.value(for: cacheKey, fingerprint: key) { bytes = cached }
         else {

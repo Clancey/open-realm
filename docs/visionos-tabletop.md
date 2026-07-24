@@ -33,17 +33,18 @@ RealityTabletopReconciler (RealityKit ownership)
 
 ### Layer 5 descriptor renderer
 
-The Swift renderer is intentionally independent of the in-progress C asset
-export ABI. `WarcraftRenderDescriptorProvider` is the framework-free seam:
+The Swift renderer keeps the frozen C asset ABI behind copied framework-free
+values. `WarcraftRenderDescriptorProvider` remains the framework-free seam:
 
 ```text
 TabletopSnapshot (copied Swift value)
+        +-- WarcraftProductionAssets (copied ABI v1 values)
         |
 WarcraftRenderPipeline actor (generation dedupe)
         |
 WarcraftRenderDescriptorProvider
         +-- FixtureWarcraftRenderProvider
-        +-- ProductionWarcraftRenderProvider (explicit placeholders until adapter)
+        +-- ProductionWarcraftRenderProvider (copied MDX/BLP/terrain descriptors)
         |
 WarcraftSceneBuilder / chunk, fog, UV, cache and reconciliation math
         |
@@ -54,12 +55,21 @@ RealityTabletopReconciler
 
 `BZ_TABLETOP_RENDER_PROVIDER=fixture|production` selects the provider
 explicitly. It defaults to `fixture` only when `BZ_TABLETOP_MODE=fixture`; live
-transport defaults to `production`. The production provider does not guess the
-unfinished exporter ABI or synthesize retail art. Every unresolved visible
+transport defaults to `production`. The production provider calls only `bz_tabletop_assets.h` ABI v1 while the
+retained transport snapshot is alive, deep-copies terrain, MDX 800
+geosets/material layers/textures/sequences/nodes/bounds and top-left RGBA8 BLP
+pixels, then releases every asset and terrain handle before RealityKit work.
+Every unresolved visible
 model receives the magenta `WarcraftPlaceholder` mesh/material and a log-once
 diagnostic. The fixture provider's geometry and asymmetric 2x2 orientation
 texture are named `fixture-only` and must never be treated as real-art
 validation.
+
+RealityKit has opaque, alpha, and additive blend programs but no destination
+multiply state. For grayscale MDX filter modes 5/6, Swift uses the equivalent
+black alpha composition (`alpha = 1 - luminance`, doubled for mode 6); colored
+multiply remains an explicit placeholder diagnostic rather than silently
+rendering opaque.
 
 Terrain uses fixed 32x32-cell meshes. A 128x128 map therefore produces exactly
 16 terrain entities; partial edge chunks remain bounded to 32 cells per axis.
@@ -71,13 +81,13 @@ health/mana bars, and sequence/frame state. No capsule or pill primitive is a
 production asset fallback.
 
 Pure files under `tabletop/app/WarcraftRender*.swift` own descriptor conversion,
-chunk/index math, image normalization, atlas UVs, content keys, bounded caches,
+chunk/index math, image normalization, atlas UVs, versioned SHA-256 content keys, bounded caches,
 animation selection, and generation reconciliation. RealityKit only consumes
 `WarcraftPreparedSnapshot` values. Texture cache misses may read/write the
 versioned cache under:
 
 ```text
-<Application Support>/OpenRealm/WarcraftRenderer/v1/
+<Application Support>/OpenRealm/WarcraftRenderer/v2/
 ```
 
 Writes are atomic. Reloads validate the versioned key, full fingerprint, and
@@ -85,10 +95,48 @@ payload hash; unsafe paths and collisions fail explicitly. Memory/RealityKit
 resource caches are bounded, expose hit/miss/eviction counters where applicable,
 and unchanged generations perform no decode or disk access.
 
-The future exporter integration must implement a thin
-`WarcraftRenderDescriptorProvider` adapter, then rebase this layer onto that
-branch. Real-art completion requires ROC and TFT MPQ validation after that
-adapter exists.
+Asset registration uses `CS_MODELS + entity.model` from the retained snapshot;
+embedded `TEXS` identities use `BZ_TTA_RegisterModelTexture` and are never
+reconstructed in Swift. C cache counters are copied into each production
+snapshot, and the live actor emits at most one pre-hit and one post-hit summary
+per lifecycle. Repeated C registrations hit immutable descriptors, so polling
+does not decode or read MPQs per frame. A lifecycle-scoped copied-value cache
+retains one terrain snapshot and at most 256 immutable model and pre-lowered
+render templates; later
+polls still resolve current entity metadata but do not re-copy unchanged terrain
+corners, geosets, or RGBA8 buffers across the C boundary.
+
+Transport polling, pure provider conversion, and main-actor presentation use
+bounded one-slot latest-value mailboxes. Engine publication and cache accounting
+therefore continue while RealityKit consumes a previous copied generation, with
+intermediate generations coalesced instead of queued without bound. A mapless
+transport generation never consumes an independently published latest terrain.
+The session owns and cancels the one conversion worker, awaits it during stop,
+and rejects old-epoch results so a restarted pipeline cannot receive stale work.
+
+Swift iterates `BZ_TTTerrain_ReferencedTexture*`, validates each dense entry
+against the retained complete type table, and passes its authoritative
+`type_index` to `BZ_TTA_RegisterTerrainTexture`; it never reconstructs an SLK
+path or infers reference use. Ground surfaces iterate only those C-published
+original indices, so gaps for unreferenced type-table entries are not mistaken
+for missing textures; the lowest published index is the opaque base even when
+type-table index zero is unused. Layers use the desktop four-corner mask, 64x64 atlas
+tiles, base variation rules, and 5% edge inset. Cliff cells
+select their exported cliff texture, no-cliff sentinel corners remain explicit,
+ramps retain ground layers, and water uses one explicit translucent material
+rather than a missing-texture fallback.
+
+Image and fog resource keys include normalized dimensions, orientation, bytes,
+and fog plane bounds. Entity scale changes update model children and collision
+bounds independently of geometry/material cache keys. The engine-to-RealityKit
+Y/Z swap negates yaw to preserve heading, and unshaded opaque MDX layers use an
+opaque depth-writing material program rather than the alpha path.
+
+`BZ_TTA_ResolveEntityMetadata` supplies category, class, team, tint, and
+footprint values with Doodad -> Destructable -> Unit precedence. The live
+player value is passed only through the team-color override bit; Swift does not
+invent a tint override or derive category/footprint from transport radius.
+Resolution errors remain `unknown` with explicit placeholder diagnostics.
 
 - Snapshot/model/reducer/placement/reconciliation/gesture files do not import
   SwiftUI or RealityKit.
@@ -98,12 +146,16 @@ adapter exists.
 - `FixtureSnapshotTransport` emits at most 49 terrain tiles and three entities.
   It advances generation every six polls so both deduplication paths run.
 - `LiveTabletopTransport` starts/stops `BZTabletopBridge`, retains with
-  `BZ_TT_Latest()`, validates `BZ_TABLETOP_ABI_VERSION`, and copies connection,
+  `BZ_TT_Latest()`, validates both ABI versions, and copies connection,
   map, player/resource, selection, every entity POD field, fog planes, and
   nested unit-layout/button/inventory/queue strings and arrays into
   framework-free Swift values. It records ABI overflow and duplicate slot IDs,
   surfaces their current values as a non-fatal diagnostic, and a tested lease
-  helper always releases before returning or throwing.
+  helper always releases before returning or throwing. During that lease it
+  registers model configstrings, copies every exported array and embedded
+  texture, obtains/releases `BZ_TTA_LatestTerrain()`, registers/copies every
+  ground and cliff image while that terrain remains retained, and releases each
+  retained asset on both success and error paths.
   Typed `TabletopCommand` values call only the five validated `BZ_TT_Post*`
   entry points. Tap selection uses the ABI's documented generation-zero bypass
   because the engine publishes around 60 Hz while rendering polls around 30 Hz;
@@ -120,6 +172,8 @@ adapter exists.
 Live mode is the production default. `BZ_TABLETOP_DATA_PATH` defaults to the
 app's `Resources/Warcraft III` directory and `BZ_TABLETOP_MAP` defaults to
 `Human02`; an explicit `BZ_TABLETOP_CONNECT` without a map selects remote mode.
+`BZ_TABLETOP_TFT=1` passes `-tft` to the embedded engine; omitted or `0` keeps
+ROC archive precedence, and other values fail configuration.
 Set `BZ_TABLETOP_MODE=fixture` only for deterministic tests.
 Preflight follows the engine's real data rules and filesystem metadata: it
 accepts a regular MPQ file, or the exact root-relative loose
@@ -142,8 +196,8 @@ empty Swift entry. The shell never imports or guesses `MAX_CONFIGSTRINGS`.
 
 ## Native asset and terrain ABI
 
-`platform/bridge/bz_tabletop_assets.h` is a separate, versioned C ABI for a
-future RealityKit renderer. It deliberately does not widen the frozen snapshot
+`platform/bridge/bz_tabletop_assets.h` is the separate, versioned C ABI consumed
+by the RealityKit renderer. It deliberately does not widen the frozen snapshot
 transport:
 
 - `BZ_TTA_RegisterConfigString()` resolves immutable image/model assets from a
@@ -206,18 +260,31 @@ SDL scene delegates, missing/extra/symlinked MPQs, embedded or developer-path dy
 frameworks, absolute developer paths, desktop identity collisions, wrong Mach-O
 platform or minimum OS, incorrect signing/identifier binding, and non-arm64
 output. It also requires the linked lifecycle class, snapshot getter,
-configstring-count accessor, and typed select-post symbols. No Xcode project is
-used.
+configstring-count accessor, typed select-post, terrain-texture registration,
+and entity-metadata resolution symbols. No Xcode project is used.
 
-`launch-tabletop-simulator.sh` clones only a shutdown Apple Vision Pro device,
-boots that disposable clone with a 120-second bound, installs identical signed
+`launch-tabletop-simulator.sh` clones only a shutdown Apple Vision Pro device or,
+when none is available, creates a fresh disposable device from the available
+xrOS runtime. It boots that isolated device with a 120-second bound, installs identical signed
 code, and stages the same three real MPQs into the clone's private app-data
 container through `wc3_data.sh`. This avoids an unbounded CoreSimulator import
 of the roughly 717 MB sealed production bundle without weakening either bundle
 gate. It launches with `SIMCTL_CHILD_*`, captures stdout/stderr directly,
-requires five seconds of residency plus transport initialization, first
-snapshot, and `Human02` begin evidence, then terminates the app and deletes the
-clone. It never addresses `booted` or takes over the user's active simulator.
+requires five seconds of residency plus a bounded wait for stable copied assets,
+transport initialization, first snapshot, and `Human02` begin evidence. The real-art gate also requires exactly
+16 chunks for 128x128 tiles, one fog entity, 2,349 no-cliff sentinels, 2,397
+active transport entities before the explicit 1,024 cap (plus the documented
+desktop-only `model2` attachment render entity), authoritative terrain
+and model textures with no placeholders, representative categories, and stable
+misses with increasing cache hits on a subsequent snapshot. Placeholder counts
+include both missing models and explicit placeholder-role materials; C
+placeholder/log-once counters remain separate and must also be zero. The
+production summary contains generic counts only. Canonical fixture identities
+and map-specific thresholds live in tests and this disposable acceptance
+script rather than as proprietary literals in the app binary. The launcher
+then terminates the app and deletes the clone. It never addresses `booted` or
+takes over the user's active simulator.
+Set `OPENREALM_TABLETOP_TFT=1` to run the same gate with TFT archive precedence.
 
 Verify the real ROC map identity with the repository diagnostic tool before
 launch:

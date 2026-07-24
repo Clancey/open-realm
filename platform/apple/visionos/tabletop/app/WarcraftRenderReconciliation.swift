@@ -3,6 +3,7 @@ struct WarcraftEntityUpdate: Equatable {
     var geometryChanged: Bool
     var materialChanged: Bool
     var transformChanged: Bool
+    var scaleChanged: Bool
     var stateChanged: Bool
 }
 
@@ -46,17 +47,19 @@ struct WarcraftRenderSceneState {
         let updates = nextEntities.values.compactMap { next -> WarcraftEntityUpdate? in
             guard let old = entities[next.descriptor.id] else {
                 return WarcraftEntityUpdate(entity: next, geometryChanged: true, materialChanged: true,
-                                            transformChanged: true, stateChanged: true)
+                                            transformChanged: true, scaleChanged: true, stateChanged: true)
             }
             let geometry = old.geometryKey != next.geometryKey
             let material = old.materialKey != next.materialKey ||
                 old.teamColor != next.teamColor || old.descriptor.teamTint != next.descriptor.teamTint
+            let scale = old.scale != next.scale
             let transform = old.position != next.position || old.scale != next.scale ||
+                old.overlayScale != next.overlayScale ||
                 old.descriptor.heading != next.descriptor.heading
             let state = old.stateKey != next.stateKey
             guard geometry || material || transform || state else { return nil }
             return WarcraftEntityUpdate(entity: next, geometryChanged: geometry,
-                                        materialChanged: material, transformChanged: transform,
+                                        materialChanged: material, transformChanged: transform, scaleChanged: scale,
                                         stateChanged: state)
         }.sorted { $0.entity.descriptor.id < $1.entity.descriptor.id }
         chunks = nextChunks

@@ -33,6 +33,7 @@ struct WarcraftRenderEntityDescriptor: Codable, Equatable, Sendable {
     var model: WarcraftModelDescriptor
     var position: WarcraftVector3
     var scale: WarcraftVector3
+    var overlayScale: WarcraftVector3
     var teamColor: WarcraftColor
     var animation: WarcraftResolvedAnimation?
     var geometryKey: String
@@ -169,7 +170,7 @@ enum WarcraftFogBuilder {
         let width = Float(terrain?.width ?? fog.width) * (terrain?.cellSize ?? 0.02)
         let depth = Float(terrain?.height ?? fog.height) * (terrain?.cellSize ?? 0.02)
         return WarcraftFogRenderDescriptor(image: image, width: width, depth: depth,
-            contentKey: WarcraftContentHash.hash(Data(bytes)))
+            contentKey: WarcraftDescriptorContentKey.fog(image, width: width, depth: depth))
     }
 
     static func mesh(_ fog: WarcraftFogRenderDescriptor) -> WarcraftMeshPartDescriptor {
@@ -187,6 +188,99 @@ enum WarcraftFogBuilder {
     }
 }
 
+enum WarcraftDescriptorContentKey {
+    static func image(_ image: WarcraftImageDescriptor) -> String {
+        var hash = WarcraftContentHasher()
+        hash.update("image")
+        hash.update(image.width); hash.update(image.height)
+        hash.update(image.orientation.rawValue)
+        hash.update(image.rgba8)
+        return hash.digest()
+    }
+
+    static func fog(_ image: WarcraftImageDescriptor, width: Float, depth: Float) -> String {
+        var hash = WarcraftContentHasher()
+        hash.update("fog")
+        hash.update(image.width); hash.update(image.height)
+        hash.update(image.orientation.rawValue)
+        hash.update(width); hash.update(depth)
+        hash.update(image.rgba8)
+        return hash.digest()
+    }
+
+    static func geometry(_ model: WarcraftModelDescriptor) -> String {
+        var hash = WarcraftContentHasher()
+        hash.update("model-geometry")
+        hash.update(model.name)
+        hash.update(model.geosets.count)
+        for part in model.geosets {
+            hash.update(part.name)
+            hash.update(part.materialIndex)
+            hash.update(part.positions.count)
+            for value in part.positions { hash.update(value.x); hash.update(value.y); hash.update(value.z) }
+            hash.update(part.normals.count)
+            for value in part.normals { hash.update(value.x); hash.update(value.y); hash.update(value.z) }
+            hash.update(part.textureCoordinates.count)
+            for value in part.textureCoordinates { hash.update(value.x); hash.update(value.y) }
+            hash.update(part.indices.count)
+            for value in part.indices { hash.update(value) }
+        }
+        hash.update(model.sequences.count)
+        for sequence in model.sequences {
+            hash.update(sequence.name)
+            hash.update(sequence.firstFrame)
+            hash.update(sequence.lastFrame)
+            hash.update(sequence.looping)
+        }
+        return hash.digest()
+    }
+
+    static func materials(_ materials: [WarcraftMaterialDescriptor]) -> String {
+        var hash = WarcraftContentHasher()
+        hash.update("model-materials")
+        hash.update(materials.count)
+        for material in materials {
+            hash.update(material.name)
+            hash.update(material.color.red); hash.update(material.color.green)
+            hash.update(material.color.blue); hash.update(material.color.alpha)
+            hash.update(material.blendMode.rawValue)
+            hash.update(material.role.rawValue)
+            hash.update(material.unlit)
+            if let atlas = material.atlasRegion {
+                hash.update(true)
+                hash.update(atlas.x); hash.update(atlas.y)
+                hash.update(atlas.width); hash.update(atlas.height)
+                hash.update(atlas.atlasWidth); hash.update(atlas.atlasHeight)
+            } else {
+                hash.update(false)
+            }
+            if let image = material.texture {
+                hash.update(true)
+                hash.update(image.width); hash.update(image.height)
+                hash.update(image.orientation.rawValue)
+                hash.update(image.rgba8)
+            } else {
+                hash.update(false)
+            }
+        }
+        return hash.digest()
+    }
+
+    static func combined(geometry: String, materials: String) -> String {
+        var hash = WarcraftContentHasher()
+        hash.update(geometry)
+        hash.update(materials)
+        return hash.digest()
+    }
+
+    static func populate(_ model: WarcraftModelDescriptor) -> WarcraftModelDescriptor {
+        var output = model
+        output.geometryKey = geometry(model)
+        output.materialKey = materials(model.materials)
+        return output
+    }
+}
+
 enum WarcraftTerrainChunkBuilder {
     static let chunkSide = 32
 
@@ -200,22 +294,32 @@ enum WarcraftTerrainChunkBuilder {
         guard materialCount > 0,
               [terrain.waterMaterialIndex, terrain.cliffMaterialIndex, terrain.rampMaterialIndex]
                 .allSatisfy({ $0 >= 0 && $0 < materialCount }),
-              terrain.cells.allSatisfy({ $0.materialIndex >= 0 && $0.materialIndex < materialCount }) else {
+              terrain.cells.allSatisfy({
+                  $0.materialIndex >= 0 && $0.materialIndex < materialCount &&
+                      $0.surfaceLayers.allSatisfy {
+                          $0.materialIndex >= 0 && $0.materialIndex < materialCount &&
+                              $0.textureCoordinates.count == 4
+                      } &&
+                      $0.cliffMaterialIndex.map { $0 >= 0 && $0 < materialCount } ?? true
+              }) else {
             throw WarcraftDescriptorError.invalidTerrain("terrain material index is out of bounds")
         }
         var result: [WarcraftTerrainChunkDescriptor] = []
+        let materialKey = WarcraftDescriptorContentKey.materials(terrain.materials)
         for z in stride(from: 0, to: terrain.height, by: chunkSide) {
             for x in stride(from: 0, to: terrain.width, by: chunkSide) {
                 result.append(try chunk(terrain, minX: x, minZ: z,
                                         maxX: min(x + chunkSide, terrain.width),
-                                        maxZ: min(z + chunkSide, terrain.height)))
+                                        maxZ: min(z + chunkSide, terrain.height),
+                                        materialKey: materialKey))
             }
         }
         return result
     }
 
     private static func chunk(_ terrain: WarcraftTerrainDescriptor, minX: Int, minZ: Int,
-                              maxX: Int, maxZ: Int) throws -> WarcraftTerrainChunkDescriptor {
+                              maxX: Int, maxZ: Int, materialKey: String) throws
+        -> WarcraftTerrainChunkDescriptor {
         var parts = terrain.materials.indices.map {
             WarcraftMeshPartDescriptor(name: "terrain-material-\($0)", positions: [], normals: [],
                                        textureCoordinates: [], indices: [], materialIndex: $0)
@@ -253,23 +357,43 @@ enum WarcraftTerrainChunkBuilder {
                 let cell = terrain.cells[z * terrain.width + x]
                 let h00 = height(x, z), h10 = height(x + 1, z)
                 let h11 = height(x + 1, z + 1), h01 = height(x, z + 1)
-                let material = cell.features.contains(.ramp) ? terrain.rampMaterialIndex : cell.materialIndex
-                quad(material, point(x, z, h00), point(x + 1, z, h10),
-                     point(x + 1, z + 1, h11), point(x, z + 1, h01),
-                     normal: normalizedNormal(h00: h00, h10: h10, h01: h01, cellSize: terrain.cellSize))
+                let fallbackMaterial = cell.features.contains(.ramp) ?
+                    terrain.rampMaterialIndex : cell.materialIndex
+                let surface = cell.surfaceLayers.isEmpty ? [
+                    WarcraftTerrainSurfaceLayer(materialIndex: fallbackMaterial, textureCoordinates: [
+                        WarcraftVector2(x: 0, y: 0), WarcraftVector2(x: 1, y: 0),
+                        WarcraftVector2(x: 1, y: 1), WarcraftVector2(x: 0, y: 1),
+                    ]),
+                ] : cell.surfaceLayers
+                for layer in surface {
+                    quad(layer.materialIndex, point(x, z, h00), point(x + 1, z, h10),
+                         point(x + 1, z + 1, h11), point(x, z + 1, h01),
+                         normal: normalizedNormal(h00: h00, h10: h10, h01: h01,
+                                                  cellSize: terrain.cellSize),
+                         uv: layer.textureCoordinates)
+                }
                 if let water = cell.waterLevel {
-                    quad(terrain.waterMaterialIndex, point(x, z, water), point(x + 1, z, water),
-                         point(x + 1, z + 1, water), point(x, z + 1, water),
+                    let levels = cell.waterCornerHeights.flatMap { $0.count == 4 ? $0 : nil } ??
+                        [water, water, water, water]
+                    quad(terrain.waterMaterialIndex, point(x, z, levels[0]), point(x + 1, z, levels[1]),
+                         point(x + 1, z + 1, levels[2]), point(x, z + 1, levels[3]),
                          normal: WarcraftVector3(x: 0, y: 1, z: 0))
                 }
                 guard cell.features.contains(.cliff) else { continue }
                 let bottom = min(h00, h10, h11, h01) - terrain.cellSize
-                quad(terrain.cliffMaterialIndex, point(x, z, bottom), point(x, z + 1, bottom),
+                let cliffMaterial = cell.cliffMaterialIndex ?? terrain.cliffMaterialIndex
+                quad(cliffMaterial, point(x, z, bottom), point(x, z + 1, bottom),
                      point(x, z + 1, h01), point(x, z, h00),
                      normal: WarcraftVector3(x: -1, y: 0, z: 0))
-                quad(terrain.cliffMaterialIndex, point(x + 1, z + 1, bottom), point(x + 1, z, bottom),
+                quad(cliffMaterial, point(x + 1, z + 1, bottom), point(x + 1, z, bottom),
                      point(x + 1, z, h10), point(x + 1, z + 1, h11),
                      normal: WarcraftVector3(x: 1, y: 0, z: 0))
+                quad(cliffMaterial, point(x + 1, z, bottom), point(x, z, bottom),
+                     point(x, z, h00), point(x + 1, z, h10),
+                     normal: WarcraftVector3(x: 0, y: 0, z: -1))
+                quad(cliffMaterial, point(x, z + 1, bottom), point(x + 1, z + 1, bottom),
+                     point(x + 1, z + 1, h11), point(x, z + 1, h01),
+                     normal: WarcraftVector3(x: 0, y: 0, z: 1))
             }
         }
         parts.removeAll { $0.positions.isEmpty }
@@ -281,13 +405,17 @@ enum WarcraftTerrainChunkBuilder {
                 throw WarcraftDescriptorError.invalidMesh("terrain part topology is invalid")
             }
         }
-        let model = WarcraftModelDescriptor(name: "terrain-\(minX)-\(minZ)", geosets: parts,
-                                             materials: terrain.materials, sequences: [])
-        let data = try JSONEncoder.sorted.encode(model)
+        var model = WarcraftModelDescriptor(
+            name: "terrain-\(minX)-\(minZ)", geosets: parts,
+            materials: terrain.materials, sequences: [])
+        let geometryKey = WarcraftDescriptorContentKey.geometry(model)
+        model.geometryKey = geometryKey
+        model.materialKey = materialKey
         return WarcraftTerrainChunkDescriptor(
             id: WarcraftTerrainChunkID(x: minX / chunkSide, z: minZ / chunkSide),
             cellBounds: WarcraftIntBounds(minX: minX, minZ: minZ, maxX: maxX, maxZ: maxZ),
-            mesh: model, contentKey: WarcraftContentHash.hash(data))
+            mesh: model, contentKey: WarcraftDescriptorContentKey.combined(
+                geometry: geometryKey, materials: materialKey))
     }
 
     private static func normalizedNormal(h00: Float, h10: Float, h01: Float,
@@ -334,27 +462,35 @@ enum WarcraftSceneBuilder {
             } else {
                 position = entity.position
             }
-            let modelData = try JSONEncoder.sorted.encode(model)
-            let materialData = try JSONEncoder.sorted.encode(model.materials)
+            let geometryKey = model.geometryKey ?? WarcraftDescriptorContentKey.geometry(model)
+            let materialKey = model.materialKey ?? WarcraftDescriptorContentKey.materials(model.materials)
             let stateData = try JSONEncoder.sorted.encode([
                 String(entity.selected), String(entity.health ?? -1), String(entity.mana ?? -1),
                 String(entity.animation.frame), entity.animation.sequence ?? "",
               ])
-            var scale = WarcraftCategoryScale.scale(category: entity.category, footprint: entity.footprint)
-            if scene.coordinateSpace == .terrainGrid, let terrain = scene.terrain {
-                scale = WarcraftVector3(x: scale.x * terrain.cellSize * 2.5, y: scale.y * 0.08,
-                                        z: scale.z * terrain.cellSize * 2.5)
-            } else {
-                scale = WarcraftVector3(x: min(scale.x, 2) * 0.06, y: scale.y * 0.08,
-                                        z: min(scale.z, 2) * 0.06)
+            var scale = entity.renderScale ??
+                WarcraftCategoryScale.scale(category: entity.category, footprint: entity.footprint)
+            if entity.renderScale == nil {
+                if scene.coordinateSpace == .terrainGrid, let terrain = scene.terrain {
+                    scale = WarcraftVector3(x: scale.x * terrain.cellSize * 2.5, y: scale.y * 0.08,
+                                            z: scale.z * terrain.cellSize * 2.5)
+                } else {
+                    scale = WarcraftVector3(x: min(scale.x, 2) * 0.06, y: scale.y * 0.08,
+                                            z: min(scale.z, 2) * 0.06)
+                }
+            }
+            let overlayScale = entity.overlayScale ?? scale
+            if placeholder {
+                scale = WarcraftVector3(
+                    x: max(overlayScale.x, 0.02), y: max(max(overlayScale.x, overlayScale.z), 0.02),
+                    z: max(overlayScale.z, 0.02))
             }
             return WarcraftRenderEntityDescriptor(
                 descriptor: entity, model: model, position: position,
-                scale: scale,
+                scale: scale, overlayScale: overlayScale,
                 teamColor: WarcraftTeamPalette.color(entity.teamColor),
                 animation: WarcraftAnimationSelector.resolve(entity.animation, sequences: model.sequences),
-                geometryKey: WarcraftContentHash.hash(modelData),
-                materialKey: WarcraftContentHash.hash(materialData),
+                geometryKey: geometryKey, materialKey: materialKey,
                 stateKey: WarcraftContentHash.hash(stateData), usedPlaceholder: placeholder)
         }
 

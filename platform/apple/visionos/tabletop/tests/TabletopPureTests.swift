@@ -22,11 +22,18 @@ enum TabletopPureTests {
         await testUnavailableTransport()
         await testPollingCancellation()
         await testFirstSnapshotTimeout()
+        await testPreparedSnapshotMailbox()
+        await testSnapshotMailbox()
         testSnapshotLeaseRelease()
         testRenderProviderMode()
         testTerrainChunkingAndTopology()
         testFogAndImageOrientation()
+        testDescriptorContentKeys()
         testMaterialsTeamsScalingAndAnimation()
+        testAssetModelAdapter()
+        testAssetTerrainAdapter()
+        testAssetAdapterErrorPaths()
+        testExportedAssetCache()
         testOverlayReduction()
         testDescriptorSceneAndPlaceholder()
         testDescriptorReconciliation()
@@ -38,6 +45,7 @@ enum TabletopPureTests {
             print("TabletopPureTests: \(failures) failure(s)")
             fatalError("TabletopPureTests failed")
         }
+
         print("TabletopPureTests: all tests passed")
     }
 
@@ -71,6 +79,86 @@ enum TabletopPureTests {
         expect(deduplicator.accept(first) == nil, "same generation is suppressed")
         expect(deduplicator.accept(FixtureSnapshotSource.snapshot(generation: 8)) != nil,
                "next generation is accepted")
+    }
+
+    private static func testPreparedSnapshotMailbox() async {
+        let mailbox = TabletopPreparedSnapshotMailbox()
+        let pipeline = WarcraftRenderPipeline(provider: FixtureWarcraftRenderProvider())
+        do {
+            let first = try await pipeline.prepare(FixtureSnapshotSource.snapshot(generation: 1))!
+            let second = try await pipeline.prepare(FixtureSnapshotSource.snapshot(generation: 2))!
+            let scheduledFirst = await mailbox.submit(first)
+            let scheduledSecond = await mailbox.submit(second)
+            let latest = await mailbox.take()
+            expect(scheduledFirst, "first prepared snapshot schedules a main-actor handoff")
+            expect(!scheduledSecond, "newer prepared snapshots coalesce behind one handoff")
+            expect(latest?.snapshot.generation == 2,
+                   "prepared snapshot mailbox hands off only the latest generation")
+            let scheduledAfterTake = await mailbox.submit(first)
+            expect(scheduledAfterTake, "taking a prepared snapshot permits the next handoff")
+            await mailbox.reset()
+            let resetValue = await mailbox.take()
+            expect(resetValue == nil, "prepared snapshot mailbox reset clears pending work")
+        } catch {
+            expect(false, "prepared snapshot mailbox test failed: \(error)")
+        }
+    }
+
+    private static func testDescriptorContentKeys() {
+        let source = exportedModel()
+        do {
+            guard let first = try WarcraftAssetDescriptorAdapter.modelTemplate(source).model,
+                  let second = try WarcraftAssetDescriptorAdapter.modelTemplate(source).model else {
+                expect(false, "model templates unexpectedly produced placeholders")
+                return
+            }
+            expect(first.geometryKey == second.geometryKey && first.materialKey == second.materialKey,
+                   "model content keys are deterministic and precomputed once per immutable template")
+            var changed = source
+            changed.textures[0].image?.rgba8[0] ^= 0xff
+            guard let textureChanged = try WarcraftAssetDescriptorAdapter.modelTemplate(changed).model else {
+                expect(false, "changed model template unexpectedly produced a placeholder")
+                return
+            }
+            expect(first.geometryKey == textureChanged.geometryKey &&
+                   first.materialKey != textureChanged.materialKey,
+                   "asymmetric texture changes affect material keys without rebuilding geometry keys")
+            expect(first.geometryKey?.hasPrefix("v2-") == true &&
+                   first.materialKey?.hasPrefix("v2-") == true,
+                   "descriptor content keys carry an explicit format version")
+            let pixels = [UInt8](repeating: 0x7f, count: 8)
+            let row = WarcraftImageDescriptor(width: 2, height: 1, rgba8: pixels, orientation: .topLeft)
+            let column = WarcraftImageDescriptor(width: 1, height: 2, rgba8: pixels, orientation: .topLeft)
+            expect(WarcraftDescriptorContentKey.image(row) != WarcraftDescriptorContentKey.image(column),
+                   "image cache keys include dimensions rather than hashing pixels alone")
+        } catch {
+            expect(false, "descriptor content-key test failed: \(error)")
+        }
+    }
+
+    private static func testSnapshotMailbox() async {
+        let mailbox = TabletopSnapshotMailbox()
+        let first = FixtureSnapshotSource.snapshot(generation: 1)
+        let second = FixtureSnapshotSource.snapshot(generation: 2)
+        let scheduledFirst = await mailbox.submit(first)
+        let scheduledSecond = await mailbox.submit(second)
+        let latest = await mailbox.take()
+        let finished = await mailbox.finish()
+        expect(scheduledFirst && !scheduledSecond,
+               "raw snapshot mailbox schedules only one provider conversion worker")
+        expect(latest?.generation == 2 && !finished,
+               "raw snapshot mailbox coalesces to the latest generation and finishes when empty")
+        let restarted = await mailbox.submit(first)
+        let retained = await mailbox.submit(second)
+        let hasPending = await mailbox.finish()
+        let pending = await mailbox.take()
+        expect(restarted, "finished raw snapshot mailbox can schedule another worker")
+        expect(!retained, "busy raw snapshot mailbox retains newer work")
+        expect(hasPending, "raw snapshot mailbox keeps its worker while newer work is pending")
+        expect(pending?.generation == 2, "raw snapshot worker receives the pending generation")
+        await mailbox.reset()
+        let resetValue = await mailbox.take()
+        expect(resetValue == nil, "raw snapshot mailbox reset clears pending work")
     }
 
     private static func testPlacement() {
@@ -147,12 +235,19 @@ enum TabletopPureTests {
             let live = try TabletopRuntimeModeResolver.resolve(
                 environment: ["BZ_TABLETOP_MODE": "live", "BZ_TABLETOP_DATA_PATH": "/data",
                               "BZ_TABLETOP_MAP": "map.w3m"], bundlePath: "/app")
+            let tft = try TabletopRuntimeModeResolver.resolve(
+                environment: ["BZ_TABLETOP_TFT": "1"], bundlePath: "/app")
             expect(liveDefault == .live(
-                dataPath: "/app/Resources/Warcraft III", map: "Human02", connect: nil),
+                dataPath: "/app/Resources/Warcraft III", map: "Human02", connect: nil, tft: false),
                 "production defaults to bundled live data and the standard acceptance map")
             expect(fixture == .fixture, "fixture mode requires explicit selection")
-            expect(live == .live(dataPath: "/data", map: "map.w3m", connect: nil),
+            expect(live == .live(dataPath: "/data", map: "map.w3m", connect: nil, tft: false),
                 "live mode lowers environment settings without fixture fallback")
+            expect(TabletopCoordinateConversion.heading(.pi / 2) == -.pi / 2,
+                   "engine yaw is negated when the Y/Z axis swap changes handedness")
+            expect(tft == .live(
+                dataPath: "/app/Resources/Warcraft III", map: "Human02", connect: nil, tft: true),
+                "TFT mode is an explicit live-engine argument")
             expect(TabletopProduct.bundleIdentifier == "org.openrealm.visionos.tabletop" &&
                    TabletopProduct.executable == "OpenRealmTabletop",
                    "framework-free product constants use the production identity")
@@ -163,10 +258,17 @@ enum TabletopPureTests {
             } catch TabletopTransportError.configuration {
                 expect(true, "invalid runtime mode is actionable")
             }
+            do {
+                _ = try TabletopRuntimeModeResolver.resolve(
+                    environment: ["BZ_TABLETOP_TFT": "yes"], bundlePath: "/app")
+                expect(false, "invalid TFT toggle was silently accepted")
+            } catch TabletopTransportError.configuration {
+                expect(true, "invalid TFT toggle is actionable")
+            }
             let remote = try TabletopRuntimeModeResolver.resolve(
                 environment: ["BZ_TABLETOP_CONNECT": "127.0.0.1"], bundlePath: "/app")
             expect(remote == .live(
-                dataPath: "/app/Resources/Warcraft III", map: nil, connect: "127.0.0.1"),
+                dataPath: "/app/Resources/Warcraft III", map: nil, connect: "127.0.0.1", tft: false),
                 "explicit remote mode does not also start the default local map")
         } catch {
             expect(false, "runtime mode selection unexpectedly failed: \(error)")
@@ -361,10 +463,10 @@ enum TabletopPureTests {
             let fixture = try WarcraftRenderProviderModeResolver.resolve(
                 environment: [:], runtimeMode: .fixture)
             let production = try WarcraftRenderProviderModeResolver.resolve(
-                environment: [:], runtimeMode: .live(dataPath: "/data", map: nil, connect: nil))
+                environment: [:], runtimeMode: .live(dataPath: "/data", map: nil, connect: nil, tft: false))
             let explicit = try WarcraftRenderProviderModeResolver.resolve(
                 environment: ["BZ_TABLETOP_RENDER_PROVIDER": "fixture"],
-                runtimeMode: .live(dataPath: "/data", map: nil, connect: nil))
+                runtimeMode: .live(dataPath: "/data", map: nil, connect: nil, tft: false))
             expect(fixture == .fixture,
                 "fixture transport defaults to fixture descriptors")
             expect(production == .production,
@@ -436,6 +538,11 @@ enum TabletopPureTests {
                 0, 0, 0, 235, 18, 24, 36, 145, 255, 255, 255, 0,
             ], "three fog states map to deterministic RGBA values")
             expect(fog.width == 0.06 && fog.depth == 0.02, "fog plane uses descriptor bounds")
+            let reshaped = try WarcraftFogBuilder.build(
+                WarcraftFogDescriptor(width: 1, height: 3, states: [.hidden, .explored, .visible]),
+                terrain: nil)
+            expect(fog.contentKey != reshaped.contentKey,
+                   "fog keys include image and plane dimensions even when RGBA bytes match")
             expect(WarcraftMeshMath.facesMatchNormals(WarcraftFogBuilder.mesh(fog)),
                    "fog plane winding faces the declared upward normal")
         } catch {
@@ -452,6 +559,10 @@ enum TabletopPureTests {
         }, "fixture geosets preserve one UV per vertex")
         expect(WarcraftMaterialMapping.kind(fixtureModel.materials[0]) == .litOpaque,
                "opaque fixture texture maps to lit material")
+        var unlitOpaque = fixtureModel.materials[0]
+        unlitOpaque.unlit = true
+        expect(WarcraftMaterialMapping.kind(unlitOpaque) == .unlitOpaque,
+               "unshaded opaque layers retain opaque depth-writing semantics")
         expect(WarcraftMaterialMapping.kind(fixtureModel.materials[1]) == .litModulate,
                "team-color modulate maps distinctly")
         expect(WarcraftMaterialMapping.kind(
@@ -481,6 +592,439 @@ enum TabletopPureTests {
         expect(fallback?.sequence == "Stand", "missing animation selects Stand deterministically")
     }
 
+    private static func testAssetModelAdapter() {
+        do {
+            let source = exportedModel()
+            let asset = try WarcraftAssetDescriptorAdapter.model(source)
+            guard let model = asset.model else {
+                expect(false, "valid MDX 800 fixture became a placeholder")
+                return
+            }
+            expect(asset.identity == "Units/Human/Footman/Footman.mdx" &&
+                   asset.bounds == source.bounds, "model identity and exported bounds survive value copying")
+            expect(model.geosets.count == 2 && model.materials.count == 2,
+                   "each flattened MDX material layer creates explicit RealityKit geometry/material state")
+            expect(model.geosets[0].indices == [0, 2, 1] &&
+                   WarcraftMeshMath.facesMatchNormals(model.geosets[0]),
+                   "MDX z-up conversion reverses winding while preserving declared normals")
+            expect(model.materials[0].texture?.orientation == .topLeft &&
+                   model.materials[0].texture?.rgba8.prefix(4) == [255, 0, 0, 255],
+                   "exported top-left RGBA8 texture remains upright through descriptor conversion")
+            expect(model.materials[1].role == .teamColor &&
+                   WarcraftMaterialMapping.kind(model.materials[1]) == .unlitAdditive,
+                   "replaceable team textures and additive unshaded layers map explicitly")
+            expect(model.sequences == [
+                WarcraftSequenceDescriptor(name: "Stand", firstFrame: 0, lastFrame: 999, looping: true),
+            ], "MDX millisecond sequences remain available to frame selection")
+            var noUV = source
+            noUV.geosets[0].textureCoordinates = []
+            let noUVModel = try WarcraftAssetDescriptorAdapter.model(noUV).model
+            expect(noUVModel?.geosets[0].textureCoordinates ==
+                Array(repeating: WarcraftVector2(x: 0, y: 0), count: source.geosets[0].positions.count),
+                "valid MDX geosets without UVBS receive deterministic zero coordinates for RealityKit")
+            var modulate = source
+            modulate.layers[0].blendMode = 5
+            modulate.textures[0].image = WarcraftExportedImage(
+                identity: "Textures/Smoke.blp", placeholder: false, status: 0,
+                width: 2, height: 1, rowBytes: 8, rgba8: [
+                    255, 254, 255, 255, 64, 65, 63, 255,
+                ], orientation: .topLeft)
+            let modulateMaterial = try WarcraftAssetDescriptorAdapter.model(modulate).model?.materials[0]
+            expect(modulateMaterial?.blendMode == .alpha && modulateMaterial?.unlit == true &&
+                   modulateMaterial?.texture?.rgba8 == [0, 0, 0, 0, 0, 0, 0, 191],
+                   "grayscale MDX modulate maps exactly to black alpha composition")
+            modulate.layers[0].blendMode = 6
+            let doubledMaterial = try WarcraftAssetDescriptorAdapter.model(modulate).model?.materials[0]
+            expect(doubledMaterial?.texture?.rgba8.suffix(4) == [0, 0, 0, 127],
+                   "grayscale MDX modulate-2x doubles luminance before alpha conversion")
+            modulate.textures[0].image?.rgba8[0...3] = [255, 0, 0, 255]
+            let coloredModulate = try WarcraftAssetDescriptorAdapter.model(modulate)
+            expect(coloredModulate.model?.materials[0] == WarcraftPlaceholder.material &&
+                   coloredModulate.diagnostics.contains { $0.contains("colored modulate") },
+                   "colored destination multiply remains an explicit unsupported material")
+            let missing = try WarcraftAssetDescriptorAdapter.model(exportedModel(placeholder: true))
+            expect(missing.model == nil && missing.diagnostics.count == 1,
+                   "status-bearing C placeholders become repository geometry/material placeholders")
+            var metadataError = source
+            metadataError.metadataStatus = 6
+            let unresolvedClass = try WarcraftAssetDescriptorAdapter.model(metadataError)
+            expect(unresolvedClass.model == nil && unresolvedClass.diagnostics.contains {
+                $0.contains("metadata status 6")
+            }, "metadata resolution failures remain explicit and never invent class or footprint values")
+            var missingTexture = source
+            missingTexture.textures[0].image?.placeholder = true
+            let textureAsset = try WarcraftAssetDescriptorAdapter.model(missingTexture)
+            expect(textureAsset.model?.materials[0] == WarcraftPlaceholder.material &&
+                   textureAsset.diagnostics.contains { $0.contains("texture 'Textures/Footman.blp'") },
+                   "missing visible model textures use the explicit placeholder material")
+            var tree = source
+            tree.identity = "Doodads/Terrain/LordaeronTree/LordaeronTree0.mdx"
+            tree.textures[0] = WarcraftExportedTexture(
+                identity: "<replaceable:31>", replaceableID: 31, image: nil)
+            tree.overrideImage = replacementImage(
+                "ReplaceableTextures/LordaeronTree/LordaeronSummerTree.blp", value: 72)
+            let treeAsset = try WarcraftAssetDescriptorAdapter.model(tree)
+            expect(treeAsset.model?.materials[0].texture?.rgba8.first == 72 &&
+                   treeAsset.model?.materials[0].name == tree.overrideImage?.identity,
+                   "non-team replaceables consume the authoritative per-entity image")
+            expect(treeAsset.model?.materials[1].role == .teamColor &&
+                   treeAsset.model?.materials[1].texture == nil,
+                   "entity skin overrides never replace team-color or team-glow layers")
+            var otherTree = tree
+            otherTree.overrideImage = replacementImage("OtherTree.blp", value: 39)
+            let otherTreeAsset = try WarcraftAssetDescriptorAdapter.model(otherTree)
+            expect(treeAsset.model?.materialKey != otherTreeAsset.model?.materialKey,
+                   "one shared MDX model with different entity images has distinct material keys")
+            var retainedTree = tree
+            let retainedAsset = try WarcraftAssetDescriptorAdapter.model(retainedTree)
+            retainedTree.overrideImage?.rgba8[0] = 0
+            expect(retainedAsset.model?.materials[0].texture?.rgba8.first == 72,
+                   "adapted entity images remain copied values after the retained snapshot is released")
+            tree.overrideImage = nil
+            let absentTree = try WarcraftAssetDescriptorAdapter.model(tree)
+            expect(absentTree.model?.materials[0] == WarcraftPlaceholder.material &&
+                   absentTree.diagnostics.contains { $0.contains("no authoritative entity image") },
+                   "an absent entity image leaves a non-team replaceable explicitly unresolved")
+            tree.overrideImage = replacementImage("MissingTree.blp", value: 255, placeholder: true)
+            let missingTree = try WarcraftAssetDescriptorAdapter.model(tree)
+            expect(missingTree.model?.materials[0] == WarcraftPlaceholder.material &&
+                   missingTree.diagnostics.contains { $0.contains("status 6") },
+                   "a missing entity image preserves its status-bearing explicit placeholder")
+            let placeholderCounts = WarcraftProductionAssets(
+                abiVersion: 1, terrain: nil, worldTransform: nil,
+                entities: [1: missing, 2: missingTree],
+                counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 1),
+                terrainTextureCount: 0, terrainNoCliffCount: 0, diagnostics: [])
+            expect(placeholderCounts.placeholderModelCount == 1 &&
+                   placeholderCounts.placeholderMaterialCount == 1 &&
+                   placeholderCounts.placeholderCount == 2,
+                   "acceptance counters include missing models and explicit placeholder-role materials")
+        } catch {
+            expect(false, "valid exported model fixture failed: \(error)")
+        }
+    }
+
+    private static func testAssetTerrainAdapter() {
+        let side = 129, ground = fourCC("Lgrs"), dirt = fourCC("Ldrt")
+        let cliff = fourCC("CLdi"), noCliff = fourCC("CLno")
+        var corners = Array(repeating: WarcraftExportedTerrainCorner(
+            height: 0, waterHeight: 16, groundID: ground, cliffID: cliff,
+            groundVariation: 0, cliffVariation: 0,
+            cliffLevel: 0, flags: 0), count: side * side)
+        corners[0].groundVariation = 2
+        corners[0].flags = 1 << 3
+        corners[1].flags = 1 << 3
+        corners[side].flags = 1 << 3
+        corners[side + 1].flags = 1 << 3
+        corners[1].waterHeight = 20
+        corners[2].flags = 1 << 1
+        corners[3].flags = 1 << 1
+        corners[side + 2].flags = 1 << 1
+        corners[side + 3].flags = 1 << 1
+        corners[4].cliffLevel = 1
+        corners[6].groundID = dirt
+        corners[7].groundID = dirt
+        corners[side + 7].groundID = dirt
+        for index in [8, 9, side + 8, side + 9] {
+            corners[index].cliffID = 0
+            corners[index].flags = 1 << 5
+        }
+        corners[8].cliffLevel = 2
+        let terrain = WarcraftExportedTerrain(
+            cornerWidth: side, cornerHeight: side, tileWidth: 128, tileHeight: 128,
+            chunkTiles: 32, chunkCountX: 4, chunkCountZ: 4,
+            bounds: TabletopBounds2(minX: 0, minZ: 0, maxX: 16_384, maxZ: 16_384),
+            groundTypes: [ground, dirt], cliffTypes: [cliff, noCliff],
+            groundTextures: [
+                WarcraftExportedTerrainTexture(
+                    typeIndex: 0, typeID: ground, cornerCount: side * side - 3,
+                    image: terrainImage(
+                        "TerrainArt/LordaeronSummer/Lords_Grass.blp", width: 512, height: 256)),
+                WarcraftExportedTerrainTexture(
+                    typeIndex: 1, typeID: dirt, cornerCount: 3,
+                    image: terrainImage(
+                        "TerrainArt/LordaeronSummer/Lords_Dirt.blp", width: 256, height: 256)),
+            ],
+            cliffTextures: [WarcraftExportedTerrainTexture(
+                typeIndex: 0, typeID: cliff, cornerCount: side * side - 4,
+                image: terrainImage("ReplaceableTextures/Cliff/Cliff0.blp", width: 256, height: 256))],
+            corners: corners)
+        do {
+            let assets = try WarcraftAssetDescriptorAdapter.production(
+                abiVersion: 1, terrain: terrain, models: [7: exportedModel()],
+                counters: WarcraftAssetCacheCounters(hits: 4, misses: 2, placeholderLogs: 0))
+            guard let descriptor = assets.terrain else {
+                expect(false, "valid published terrain was omitted")
+                return
+            }
+            let chunks = try WarcraftTerrainChunkBuilder.build(descriptor)
+            let chunksAreBounded = chunks.allSatisfy {
+                $0.cellBounds.maxX - $0.cellBounds.minX <= 32 &&
+                    $0.cellBounds.maxZ - $0.cellBounds.minZ <= 32
+            }
+            expect(chunks.count == 16 && chunksAreBounded,
+                   "authoritative 128x128 terrain remains bounded to sixteen 32x32 entities")
+            expect(descriptor.cells[0].waterCornerHeights?.count == 4 &&
+                   descriptor.cells[1].features.contains(WarcraftTerrainFeature.ramp) &&
+                   descriptor.cells[4].features.contains(WarcraftTerrainFeature.cliff),
+                   "published water corners, ramps, and cliff levels survive terrain lowering")
+            expect(descriptor.cells[6].surfaceLayers.count == 2 &&
+                   descriptor.cells[6].surfaceLayers[1].materialIndex == 1 &&
+                   !descriptor.cells[8].features.contains(WarcraftTerrainFeature.cliff),
+                   "ground bitmask layers survive while the no-cliff sentinel suppresses cliff geometry")
+            let baseUV = descriptor.cells[0].surfaceLayers[0].textureCoordinates
+            expect(abs(baseUV[0].x - 0.753125) < 0.00001 && abs(baseUV[2].x - 0.871875) < 0.00001,
+                   "base terrain variation selects the extended atlas half with a five-percent inset")
+            let transformedHeight = assets.worldTransform?.point(
+                TabletopVector3(x: 8_192, y: 128, z: 8_192)).y ?? 0
+            expect(abs(transformedHeight - 0.0084375) < 0.000001,
+                "terrain bounds provide one shared world-to-tabletop transform")
+            expect(assets.counters == WarcraftAssetCacheCounters(
+                hits: 4, misses: 2, placeholderLogs: 0),
+                "C cache hit/miss/placeholder counters are copied into the production snapshot")
+            expect(assets.terrainTextureCount == 3 && assets.terrainNoCliffCount == 4,
+                   "terrain image and no-cliff acceptance counters survive pure descriptor lowering")
+            expect(descriptor.materials.dropLast().allSatisfy {
+                $0.texture != nil && $0.role != .placeholder
+            } && assets.diagnostics.contains { $0.contains("authoritative asset ABI") },
+            "production terrain consumes authoritative ground and cliff images without placeholders")
+            let rock = fourCC("Lrok")
+            var sparse = terrain
+            sparse.groundTypes = [ground, dirt, rock]
+            sparse.groundTextures = [
+            terrain.groundTextures[0],
+            WarcraftExportedTerrainTexture(
+                typeIndex: 2, typeID: rock, cornerCount: 3,
+                image: terrainImage(
+                    "TerrainArt/LordaeronSummer/Lords_Rock.blp", width: 256, height: 256)),
+            ]
+            sparse.corners = terrain.corners.map {
+            var corner = $0
+            if corner.groundID == dirt { corner.groundID = rock }
+            return corner
+            }
+            let sparseAssets = try WarcraftAssetDescriptorAdapter.production(
+            abiVersion: 1, terrain: sparse, models: [:],
+            counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 0))
+            expect(sparseAssets.terrain?.cells[6].surfaceLayers.count == 2 &&
+               sparseAssets.terrain?.cells[6].surfaceLayers[1].materialIndex == 1,
+               "sparse type tables use only C-published referenced textures without inferring index 1")
+            var noZero = sparse
+            noZero.groundTextures = [sparse.groundTextures[1]]
+            noZero.corners = sparse.corners.map {
+                var corner = $0
+                corner.groundID = rock
+                return corner
+            }
+            let noZeroAssets = try WarcraftAssetDescriptorAdapter.production(
+                abiVersion: 1, terrain: noZero, models: [:],
+                counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 0))
+            expect(noZeroAssets.terrain?.materials.first?.blendMode == .opaque &&
+               noZeroAssets.terrain?.cells.first?.surfaceLayers.first?.materialIndex == 0,
+               "the lowest C-published layer becomes the base when type-table index zero is unused")
+            var snapshot = TabletopSnapshot(
+                generation: 4, terrain: [], entities: [TabletopEntitySnapshot(
+                    id: 7, kind: .unit, position: TabletopVector3(x: 8_192, y: 0, z: 8_192),
+                    heading: 0, selected: false,
+                    metadata: TabletopEntityMetadata(
+                        classID: fourCC("hfoo"), scale: 1, radius: 32, player: 1, model: 1))],
+                coordinateSpace: .world(terrain.bounds))
+            snapshot.warcraftAssets = assets
+            let scene = try WarcraftSceneBuilder.build(
+                ProductionWarcraftRenderProvider().scene(for: snapshot))
+            expect(scene.entities.count == 1 && !scene.entities[0].usedPlaceholder &&
+                   scene.entities[0].position == WarcraftVector3(x: 0, y: 0, z: 0) &&
+                   scene.entities[0].descriptor.teamColor == 1,
+                   "production provider consumes copied model/team/transform values without a fixture path")
+        } catch {
+            expect(false, "valid exported terrain fixture failed: \(error)")
+        }
+    }
+
+    private static func testAssetAdapterErrorPaths() {
+        do {
+            var malformed = exportedModel()
+            malformed.geosets[0].indices = [0, 1, 9]
+            _ = try WarcraftAssetDescriptorAdapter.model(malformed)
+            expect(false, "out-of-range exported MDX index was accepted")
+        } catch WarcraftDescriptorError.invalidMesh {
+            expect(true, "malformed exported geoset fails explicitly")
+        } catch {
+            expect(false, "malformed exported geoset returned wrong error: \(error)")
+        }
+        do {
+            var malformed = exportedModel()
+            malformed.geosets[0].textureCoordinates.removeLast()
+            _ = try WarcraftAssetDescriptorAdapter.model(malformed)
+            expect(false, "partial exported MDX UV buffer was accepted")
+        } catch WarcraftDescriptorError.invalidMesh {
+            expect(true, "nonzero MDX UV count must still match the vertex count")
+        } catch {
+            expect(false, "partial exported UV buffer returned wrong error: \(error)")
+        }
+        do {
+            var malformed = exportedModel()
+            malformed.layers[0].blendMode = 99
+            _ = try WarcraftAssetDescriptorAdapter.model(malformed)
+            expect(false, "unknown exported blend mode was accepted")
+        } catch WarcraftDescriptorError.invalidMesh {
+            expect(true, "unknown exported blend mode fails explicitly")
+        } catch {
+            expect(false, "unknown blend mode returned wrong error: \(error)")
+        }
+        do {
+            let terrain = WarcraftExportedTerrain(
+                cornerWidth: 2, cornerHeight: 2, tileWidth: 1, tileHeight: 1,
+                chunkTiles: 16, chunkCountX: 1, chunkCountZ: 1,
+                bounds: TabletopBounds2(minX: 0, minZ: 0, maxX: 128, maxZ: 128),
+                groundTypes: [fourCC("Lgrs")], cliffTypes: [],
+                groundTextures: [], cliffTextures: [], corners: [])
+            _ = try WarcraftAssetDescriptorAdapter.production(
+                abiVersion: 1, terrain: terrain, models: [:],
+                counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 0))
+            expect(false, "non-authoritative terrain chunk size was accepted")
+        } catch WarcraftDescriptorError.invalidTerrain {
+            expect(true, "terrain ABI/chunk mismatch fails explicitly")
+        } catch {
+            expect(false, "terrain ABI/chunk mismatch returned wrong error: \(error)")
+        }
+    }
+
+    private static func testExportedAssetCache() {
+        var cache = WarcraftExportedAssetCache(modelLimit: 2)
+        let first = exportedModel()
+        var second = exportedModel(), third = exportedModel()
+        second.identity = "second.mdx"
+        third.identity = "third.mdx"
+        let firstKey = WarcraftExportedModelCacheKey(
+            configStringIndex: 1, identity: first.identity, status: 0, placeholder: false)
+        let secondKey = WarcraftExportedModelCacheKey(
+            configStringIndex: 2, identity: second.identity, status: 0, placeholder: false)
+        let thirdKey = WarcraftExportedModelCacheKey(
+            configStringIndex: 3, identity: third.identity, status: 0, placeholder: false)
+        expect(cache.model(for: firstKey) == nil, "copied asset cache records model misses")
+        cache.insert(first, for: firstKey)
+        expect(cache.model(for: firstKey) == first, "copied asset cache reuses immutable model buffers")
+        do {
+            let adapted = try WarcraftAssetDescriptorAdapter.modelTemplate(first)
+            cache.insertAdapted(adapted, for: firstKey)
+            expect(cache.adaptedModel(for: firstKey) == adapted,
+                   "copied asset cache reuses the immutable adapted model template")
+        } catch {
+            expect(false, "adapted model cache setup failed: \(error)")
+        }
+        cache.insert(second, for: secondKey)
+        cache.insert(third, for: thirdKey)
+        expect(cache.model(for: firstKey) == nil && cache.adaptedModel(for: firstKey) == nil &&
+               cache.counters.evictions == 1,
+               "copied asset cache evicts raw and adapted model values together at its fixed bound")
+        do {
+            let firstSkin = replacementImage("TreeA.blp", value: 24)
+            let secondSkin = replacementImage("TreeB.blp", value: 48)
+            let firstSkinKey = WarcraftExportedModelCacheKey(
+               configStringIndex: 4, identity: first.identity, status: 0, placeholder: false,
+               overrideIdentity: firstSkin.identity,
+               overrideContentKey: try WarcraftAssetDescriptorAdapter.overrideContentKey(firstSkin))
+            let secondSkinKey = WarcraftExportedModelCacheKey(
+               configStringIndex: 4, identity: first.identity, status: 0, placeholder: false,
+               overrideIdentity: secondSkin.identity,
+               overrideContentKey: try WarcraftAssetDescriptorAdapter.overrideContentKey(secondSkin))
+            var firstSkinned = first, secondSkinned = first
+            firstSkinned.overrideImage = firstSkin; secondSkinned.overrideImage = secondSkin
+            cache.reset()
+            expect(cache.model(for: firstSkinKey) == nil && cache.model(for: secondSkinKey) == nil,
+                  "different entity skins begin as independent model-cache misses")
+            cache.insert(firstSkinned, for: firstSkinKey)
+            cache.insert(secondSkinned, for: secondSkinKey)
+            expect(cache.model(for: firstSkinKey) == firstSkinned &&
+                  cache.model(for: secondSkinKey) == secondSkinned &&
+                  firstSkinKey != secondSkinKey && cache.counters.hits == 2,
+                  "shared model geometry reuses only the exact identity-and-content skin key")
+        } catch {
+            expect(false, "entity skin cache-key setup failed: \(error)")
+        }
+        let terrain = WarcraftExportedTerrain(
+            cornerWidth: 2, cornerHeight: 2, tileWidth: 1, tileHeight: 1,
+            chunkTiles: 32, chunkCountX: 1, chunkCountZ: 1,
+            bounds: TabletopBounds2(minX: 0, minZ: 0, maxX: 128, maxZ: 128),
+            groundTypes: [], cliffTypes: [], groundTextures: [], cliffTextures: [], corners: [])
+        expect(cache.terrain(for: "map:a") == nil, "copied asset cache records terrain misses")
+        cache.insert(terrain, terrainKey: "map:a")
+        expect(cache.terrain(for: "map:a") == terrain && cache.terrain(for: "map:b") == nil,
+               "copied terrain reloads only for the exact map/source key")
+        cache.reset()
+        expect(cache.model(for: thirdKey) == nil && cache.terrain(for: "map:a") == nil,
+               "copied asset cache resets across transport lifecycles")
+    }
+
+    private static func exportedModel(placeholder: Bool = false) -> WarcraftExportedModel {
+        let image = WarcraftExportedImage(
+            identity: "Textures/Footman.blp", placeholder: false, status: 0,
+            width: 2, height: 2, rowBytes: 8, rgba8: [
+                255, 0, 0, 255, 0, 255, 0, 255,
+                0, 0, 255, 255, 255, 255, 0, 255,
+            ], orientation: .topLeft)
+        return WarcraftExportedModel(
+            identity: "Units/Human/Footman/Footman.mdx", placeholder: placeholder,
+            status: placeholder ? 6 : 0, metadataStatus: 0, version: 800,
+            metadata: WarcraftAssetMetadata(
+                category: .unit, classID: fourCC("hfoo"), teamColor: 1,
+                tint: WarcraftColor(red: 0.8, green: 0.9, blue: 1, alpha: 1),
+                footprint: WarcraftFootprint(width: 32, depth: 32)),
+            bounds: WarcraftExportedBounds(
+                min: WarcraftVector3(x: 0, y: 0, z: 0),
+                max: WarcraftVector3(x: 1, y: 1, z: 1), radius: 1),
+            geosets: [WarcraftExportedGeoset(
+                positions: [
+                    WarcraftVector3(x: 0, y: 0, z: 0),
+                    WarcraftVector3(x: 1, y: 0, z: 0),
+                    WarcraftVector3(x: 0, y: 1, z: 0),
+                ], normals: Array(repeating: WarcraftVector3(x: 0, y: 0, z: 1), count: 3),
+                textureCoordinates: [
+                    WarcraftVector2(x: 0, y: 0), WarcraftVector2(x: 1, y: 0),
+                    WarcraftVector2(x: 0, y: 1),
+                ], indices: [0, 1, 2], materialIndex: 0)],
+            materials: [WarcraftExportedMaterial(firstLayer: 0, layerCount: 2)],
+            layers: [
+                WarcraftExportedLayer(blendMode: 0, flags: 0, textureIndex: 0, alpha: 1),
+                WarcraftExportedLayer(blendMode: 3, flags: 1, textureIndex: 1, alpha: 0.75),
+            ],
+            textures: [
+                WarcraftExportedTexture(identity: image.identity, replaceableID: 0, image: image),
+                WarcraftExportedTexture(identity: "<replaceable:1>", replaceableID: 1, image: nil),
+            ],
+            sequences: [
+                WarcraftExportedSequence(
+                    name: "Stand", startMilliseconds: 0, endMilliseconds: 999, flags: 0),
+            ],
+            nodes: [WarcraftExportedNode(
+                name: "Bone_Root", objectID: 0, parentID: UInt32.max, flags: 0,
+                pivot: WarcraftVector3(x: 0, y: 0, z: 0),
+                initialTranslation: WarcraftVector3(x: 0, y: 0, z: 0),
+                initialRotation: (0, 0, 0, 1),
+                initialScale: WarcraftVector3(x: 1, y: 1, z: 1))])
+    }
+
+    private static func terrainImage(_ identity: String, width: Int, height: Int) -> WarcraftExportedImage {
+        WarcraftExportedImage(
+            identity: identity, placeholder: false, status: 0, width: width, height: height,
+            rowBytes: width * 4, rgba8: [UInt8](repeating: 255, count: width * height * 4),
+            orientation: .topLeft)
+    }
+
+    private static func replacementImage(_ identity: String, value: UInt8,
+                                         placeholder: Bool = false) -> WarcraftExportedImage {
+        WarcraftExportedImage(
+            identity: identity, placeholder: placeholder, status: placeholder ? 6 : 0,
+            width: 1, height: 1, rowBytes: 4, rgba8: [value, value, value, 255], orientation: .topLeft)
+    }
+
+    private static func fourCC(_ text: String) -> UInt32 {
+        text.utf8.enumerated().reduce(0) {
+            $0 | UInt32($1.element) << UInt32($1.offset * 8)
+        }
+    }
+
     private static func testOverlayReduction() {
         expect(WarcraftOverlayReducer.bar(nil) ==
             WarcraftBarState(enabled: false, scale: 0, offset: -0.38),
@@ -503,7 +1047,8 @@ enum TabletopPureTests {
                 FixtureWarcraftRenderProvider().scene(for: snapshot))
             expect(fixture.terrainChunks.count == 4 && fixture.entities.count == 6,
                    "fixture scene stays bounded while covering all render categories")
-            expect(Set(fixture.entities.map(\.descriptor.category)) == Set(WarcraftEntityCategory.allCases),
+            expect(Set(fixture.entities.map(\.descriptor.category)) ==
+                Set([.unit, .building, .resource, .doodad, .destructable]),
                    "fixture descriptors cover units, buildings, resources, doodads, and destructables")
             expect(fixture.fog != nil, "fixture scene creates exactly one fog descriptor")
             expect(fixture.entities.allSatisfy { !$0.usedPlaceholder },
@@ -519,8 +1064,8 @@ enum TabletopPureTests {
                     $0.model.materials == [WarcraftPlaceholder.material]
             }, "missing production assets use the repository placeholder material and geometry")
             expect(production.diagnostics.contains {
-                $0.contains("Production asset descriptors await the C exporter adapter")
-            }, "parallel-lane production gap is visible")
+                $0.contains("no copied asset descriptors")
+            }, "missing live adapter values remain visible")
             var log = WarcraftLogOnce()
             expect(log.record("missing") && !log.record("missing") && log.record("other"),
                    "missing diagnostics log once per unique message")
@@ -560,6 +1105,26 @@ enum TabletopPureTests {
                 $0.entity.descriptor.id == 1
             }.map { $0.materialChanged && !$0.stateChanged } == true,
             "material-only updates remain distinct so rebuilt overlays can reapply current state")
+            var skinOnly = first
+            skinOnly.generation = 4
+            skinOnly.entities[0].materialKey = "entity-skin-content-b"
+            var skinState = WarcraftRenderSceneState()
+            _ = skinState.reconcile(first)
+            let skinUpdate = skinState.reconcile(skinOnly)
+            expect(skinUpdate.entityUpdates.first {
+                $0.entity.descriptor.id == 1
+            }.map { $0.materialChanged && !$0.geometryChanged } == true,
+            "a new per-entity skin generation rebuilds materials without rebuilding shared geometry")
+            var scaleOnly = first
+            scaleOnly.generation = 5
+            scaleOnly.entities[0].scale = WarcraftVector3(x: 2, y: 3, z: 4)
+            var scaleState = WarcraftRenderSceneState()
+            _ = scaleState.reconcile(first)
+            let scaleUpdate = scaleState.reconcile(scaleOnly)
+            expect(scaleUpdate.entityUpdates.first {
+            $0.entity.descriptor.id == 1
+            }.map { $0.scaleChanged && $0.transformChanged && !$0.geometryChanged } == true,
+            "scale-only updates resize model children and collisions without rebuilding geometry")
             state.reset()
             let restarted = state.reconcile(next)
             expect(restarted.upsertedChunks.count == 4 && restarted.entityUpdates.count == 5,
@@ -604,7 +1169,7 @@ enum TabletopPureTests {
             let cache = try WarcraftDiskCache(applicationSupport: root, byteLimit: 2_000)
             let payload = Data(repeating: 7, count: 128)
             let key = try WarcraftCacheKey.content(namespace: "texture", data: payload)
-            expect(key.fileName.hasPrefix("v1-texture-"), "disk keys are versioned and content hashed")
+            expect(key.fileName.hasPrefix("v2-texture-"), "disk keys are versioned and content hashed")
             let miss = try cache.value(for: key, fingerprint: "fixture")
             expect(miss == nil, "disk cache records a miss")
             try cache.insert(payload, for: key, fingerprint: "fixture")

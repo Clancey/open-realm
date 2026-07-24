@@ -3,7 +3,8 @@ import Foundation
 struct FixtureWarcraftRenderProvider: WarcraftRenderDescriptorProvider {
     func scene(for snapshot: TabletopSnapshot) throws -> WarcraftSceneDescriptor {
         let terrain = Self.terrain()
-        let models = Dictionary(uniqueKeysWithValues: WarcraftEntityCategory.allCases.map { ($0, Self.model($0)) })
+        let categories: [WarcraftEntityCategory] = [.unit, .building, .resource, .doodad, .destructable]
+        let models = Dictionary(uniqueKeysWithValues: categories.map { ($0, Self.model($0)) })
         let moving = Dictionary(uniqueKeysWithValues: snapshot.entities.map { ($0.id, $0) })
         let fixtureEntities: [(UInt64, WarcraftEntityCategory, WarcraftVector3, WarcraftFootprint, UInt8)] = [
             (1, .unit, WarcraftVector3(x: moving[1]?.position.x ?? 18, y: 0.05, z: 20),
@@ -159,19 +160,31 @@ struct FixtureWarcraftRenderProvider: WarcraftRenderDescriptorProvider {
 
 struct ProductionWarcraftRenderProvider: WarcraftRenderDescriptorProvider {
     func scene(for snapshot: TabletopSnapshot) throws -> WarcraftSceneDescriptor {
-        let bounds = worldBounds(snapshot.entities)
+        let assets = snapshot.warcraftAssets
+        let transform = assets?.worldTransform ?? worldTransform(snapshot.coordinateSpace)
         let entities = snapshot.entities.map { entity in
-            WarcraftEntityDescriptor(
-                id: entity.id, assetName: assetName(entity, configStrings: snapshot.configStrings),
-                category: entity.kind == .building ? .building : .unit, model: nil,
-                position: normalize(entity.position, bounds: bounds), heading: entity.heading,
-                footprint: WarcraftFootprint(
-                    width: max(entity.metadata.radius * 2, entity.metadata.scale, 1),
-                    depth: max(entity.metadata.radius * 2, entity.metadata.scale, 1)),
+            let asset = assets?.entities[entity.id]
+            let metadata = asset?.metadata ?? WarcraftAssetMetadata(
+                category: .unknown, classID: entity.metadata.classID,
+                teamColor: UInt8(truncatingIfNeeded: entity.metadata.player), tint: .white,
+                footprint: WarcraftFootprint(width: 0, depth: 0))
+            let scale = max(entity.metadata.scale, 0.0001) * (transform?.scale ?? 1)
+            let categoryScale = WarcraftCategoryScale.scale(
+                category: metadata.category, footprint: metadata.footprint)
+            let worldScale = transform?.scale ?? 1
+            let overlay = WarcraftVector3(
+                x: categoryScale.x * worldScale, y: categoryScale.y * worldScale,
+                z: categoryScale.z * worldScale)
+            return WarcraftEntityDescriptor(
+                id: entity.id, assetName: asset?.identity ?? assetName(entity, configStrings: snapshot.configStrings),
+                category: metadata.category, model: asset?.model,
+                position: transform?.point(entity.position) ?? WarcraftVector3(
+                    x: entity.position.x, y: entity.position.y, z: entity.position.z),
+                heading: entity.heading, footprint: metadata.footprint,
                 selected: entity.selected, health: nil, mana: nil,
-                teamColor: UInt8(truncatingIfNeeded: entity.metadata.player),
-                teamTint: .white,
-                animation: WarcraftAnimationRequest(sequence: nil, frame: entity.metadata.frame))
+                teamColor: metadata.teamColor, teamTint: metadata.tint,
+                animation: WarcraftAnimationRequest(sequence: nil, frame: entity.metadata.frame),
+                renderScale: WarcraftVector3(x: scale, y: scale, z: scale), overlayScale: overlay)
         }
         let fog = snapshot.fog.map { source in
             WarcraftFogDescriptor(width: Int(source.width), height: Int(source.height),
@@ -180,33 +193,32 @@ struct ProductionWarcraftRenderProvider: WarcraftRenderDescriptorProvider {
                 })
         }
         return WarcraftSceneDescriptor(
-            generation: snapshot.generation, coordinateSpace: .world, terrain: nil, fog: fog,
+            generation: snapshot.generation, coordinateSpace: .world, terrain: assets?.terrain, fog: fog,
             entities: entities,
-            diagnostics: entities.isEmpty ? [] :
-                ["Production asset descriptors await the C exporter adapter; placeholders are intentional."])
+            diagnostics: (assets?.diagnostics ?? [
+                "Production snapshot has no copied asset descriptors; explicit placeholders are active.",
+            ]) + (assets?.terrain == nil && !entities.isEmpty ? [
+                "Production terrain descriptor is unavailable; entity rendering remains explicit.",
+            ] : []) + (assets?.entities.values.flatMap(\.diagnostics) ?? []) +
+                snapshot.entities.compactMap { entity in
+                    assets?.entities[entity.id] == nil ?
+                        "Entity \(entity.id) lacks authoritative asset metadata; using explicit placeholder." : nil
+                })
     }
 
     private func assetName(_ entity: TabletopEntitySnapshot, configStrings: [UInt32: String]) -> String {
-        if let value = configStrings[entity.metadata.model], !value.isEmpty { return value }
+        let modelConfigStringBase: UInt32 = 32
+        if let value = configStrings[modelConfigStringBase + entity.metadata.model], !value.isEmpty { return value }
         return "model:\(entity.metadata.model)"
     }
 
-    private func worldBounds(_ entities: [TabletopEntitySnapshot]) -> TabletopBounds2? {
-        guard let first = entities.first else { return nil }
-        return entities.dropFirst().reduce(
-            TabletopBounds2(minX: first.position.x, minZ: first.position.z,
-                            maxX: first.position.x, maxZ: first.position.z)) {
-            TabletopBounds2(minX: min($0.minX, $1.position.x), minZ: min($0.minZ, $1.position.z),
-                            maxX: max($0.maxX, $1.position.x), maxZ: max($0.maxZ, $1.position.z))
-        }
-    }
-
-    private func normalize(_ position: TabletopVector3, bounds: TabletopBounds2?) -> WarcraftVector3 {
-        guard let bounds else { return WarcraftVector3(x: 0, y: 0, z: 0) }
-        let width = max(bounds.maxX - bounds.minX, 1), depth = max(bounds.maxZ - bounds.minZ, 1)
-        let scale: Float = 1.08 / max(width, depth)
-        return WarcraftVector3(x: (position.x - (bounds.minX + bounds.maxX) * 0.5) * scale,
-                               y: position.y * scale,
-                               z: (position.z - (bounds.minZ + bounds.maxZ) * 0.5) * scale)
+    private func worldTransform(_ coordinateSpace: TabletopCoordinateSpace) -> WarcraftWorldTransform? {
+        guard case .world(let bounds) = coordinateSpace, let bounds else { return nil }
+        let spanX = bounds.maxX - bounds.minX, spanZ = bounds.maxZ - bounds.minZ
+        guard spanX > 0, spanZ > 0 else { return nil }
+        return WarcraftWorldTransform(
+            centerX: (bounds.minX + bounds.maxX) * 0.5,
+            centerZ: (bounds.minZ + bounds.maxZ) * 0.5,
+            scale: 1.08 / max(spanX, spanZ))
     }
 }

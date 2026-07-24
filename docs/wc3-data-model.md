@@ -18,6 +18,14 @@ The old codes `umpc`, `uagc`, `uinc`, `ustc` are **not registered** in the metad
 
 All reads go through `UnitIntegerField` / `UnitRealField` / `UnitBooleanField` / `UnitStringField` against `UnitsMetaData`. The macros in `games/warcraft-3/game/g_unitdata.h` are the canonical access layer — add new fields there, not inline.
 
+ROC and TFT do not keep every field in the same SLK. Retail ROC maps
+`collision` to `UnitData.slk` and `isbldg` to `UnitUI.slk`; retail TFT maps both
+to `UnitBalance.slk`, as declared by each archive's `UnitMetaData.slk`. TFT
+replaces these whole SLKs rather than extending the ROC tables, so static
+ROC-only table mappings make valid rows such as `hfoo` and `htow` read as
+missing. Treat `UnitMetaData.slk` or an equivalent expansion-aware schema as
+authoritative when selecting a table.
+
 ### Health / Mana
 | Macro | Code | Notes |
 |---|---|---|

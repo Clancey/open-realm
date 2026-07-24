@@ -1,14 +1,34 @@
 import Foundation
+import CryptoKit
 
 enum WarcraftContentHash {
     static func hash(_ data: Data) -> String {
-        var a: UInt64 = 0xcbf29ce484222325, b: UInt64 = 0x84222325cbf29ce4
-        for byte in data {
-            a = (a ^ UInt64(byte)) &* 0x100000001b3
-            b = (b ^ UInt64(byte &+ 0x9d)) &* 0x100000001b3
-        }
-        return String(format: "%016llx%016llx", a, b)
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
+}
+
+struct WarcraftContentHasher {
+    private var data = Data()
+
+    mutating func update(_ bytes: some Sequence<UInt8>) { data.append(contentsOf: bytes) }
+
+    mutating func update(_ value: UInt64) {
+        var encoded = value.littleEndian
+        withUnsafeBytes(of: &encoded) { data.append(contentsOf: $0) }
+    }
+
+    mutating func update(_ value: Int) { update(UInt64(bitPattern: Int64(value))) }
+    mutating func update(_ value: UInt32) { update(UInt64(value)) }
+    mutating func update(_ value: Float) { update(value.bitPattern) }
+    mutating func update(_ value: Bool) { update([value ? 1 : 0]) }
+
+    mutating func update(_ value: String) {
+        let bytes = Array(value.utf8)
+        update(bytes.count)
+        update(bytes)
+    }
+
+    func digest() -> String { "v2-\(WarcraftContentHash.hash(data))" }
 }
 
 enum WarcraftCacheRoot {
@@ -21,7 +41,7 @@ enum WarcraftCacheRoot {
 }
 
 struct WarcraftCacheKey: Codable, Equatable, Hashable, Sendable {
-    static let version = 1
+    static let version = 2
     var namespace: String
     var digest: String
 
