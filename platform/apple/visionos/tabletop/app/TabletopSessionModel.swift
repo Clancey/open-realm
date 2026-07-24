@@ -9,16 +9,18 @@ final class TabletopSessionModel: ObservableObject {
 
     private let transport: any TabletopSnapshotTransport
     private let commandTransport: (any TabletopCommandTransport)?
-    private var deduplicator = TabletopGenerationDeduplicator()
+    private let renderPipeline: WarcraftRenderPipeline
     private var pollingTask: Task<Void, Never>?
     private var commandEpoch: UInt64 = 0
     private var phase = TabletopLifecycleState.idle
     let modeName: String
 
     init(modeName: String, transport: any TabletopSnapshotTransport,
+         renderProvider: any WarcraftRenderDescriptorProvider,
          commands: (any TabletopCommandTransport)? = nil) {
         self.modeName = modeName
         self.transport = transport
+        renderPipeline = WarcraftRenderPipeline(provider: renderProvider)
         self.commandTransport = commands
     }
 
@@ -36,12 +38,15 @@ final class TabletopSessionModel: ObservableObject {
         renderSnapshot = .empty
         errorMessage = nil
         snapshotDiagnostic = nil
-        deduplicator = TabletopGenerationDeduplicator()
+        await renderPipeline.reset()
         do {
             try await transport.start()
             let first = try await TabletopPolling.firstSnapshot(
                 transport: transport, attempts: 90, sleep: { try await Task.sleep(for: .milliseconds(33)) })
-            consume(first)
+            guard let prepared = try await renderPipeline.prepare(first) else {
+                throw TabletopTransportError.runtime("First renderer generation was unexpectedly deduplicated")
+            }
+            consume(prepared)
             FileHandle.standardError.write(Data(
                 "OpenRealmTabletop: first snapshot generation \(first.generation), map \(first.mapName ?? "<none>")\n".utf8))
             phase = .running
@@ -50,12 +55,19 @@ final class TabletopSessionModel: ObservableObject {
             phase = .idle
             throw error
         }
+        let pipeline = renderPipeline
         pollingTask = Task { [weak self] in
             guard let self else { return }
             do {
                 try await TabletopPolling.run(
                     transport: transport, sleep: { try await Task.sleep(for: .milliseconds(33)) },
-                    receive: { [weak self] snapshot in await self?.consume(snapshot) })
+                    receive: { [weak self] snapshot in
+                        do {
+                            if let prepared = try await pipeline.prepare(snapshot) {
+                                await self?.consume(prepared)
+                            }
+                        } catch { await self?.rendererFailed(error) }
+                    })
             } catch is CancellationError {
                 // Cancellation is normal when the immersive scene closes.
             } catch {
@@ -67,13 +79,18 @@ final class TabletopSessionModel: ObservableObject {
         }
     }
 
-    private func consume(_ snapshot: TabletopSnapshot) {
-        guard let fresh = deduplicator.accept(snapshot) else { return }
-        // The transport has already released all C storage before this main-actor conversion.
-        renderSnapshot = TabletopSnapshotConverter.convert(fresh)
-        snapshotDiagnostic = TabletopSnapshotDiagnostics.message(
-            overflow: fresh.entitiesOverflowCount, duplicates: fresh.duplicateEntityCount)
+    private func consume(_ prepared: WarcraftPreparedSnapshot) {
+        // The provider actor has copied and converted all descriptor values before this main-actor handoff.
+        renderSnapshot = TabletopSnapshotConverter.convert(prepared)
+        let transportMessage = TabletopSnapshotDiagnostics.message(
+            overflow: prepared.snapshot.entitiesOverflowCount,
+            duplicates: prepared.snapshot.duplicateEntityCount)
+        snapshotDiagnostic = ([transportMessage].compactMap { $0 } +
+            (renderSnapshot.warcraft?.diagnostics ?? [])).joined(separator: "\n")
+        if snapshotDiagnostic?.isEmpty == true { snapshotDiagnostic = nil }
     }
+
+    private func rendererFailed(_ error: Error) { errorMessage = "Tabletop renderer failed: \(error)" }
 
     func select(entityID: UInt64) {
         guard let commandTransport, let id = UInt32(exactly: entityID), renderSnapshot.sessionID != 0 else { return }

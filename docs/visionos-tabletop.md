@@ -31,6 +31,65 @@ TabletopSceneState (pure reconciliation plan)
 RealityTabletopReconciler (RealityKit ownership)
 ```
 
+### Layer 5 descriptor renderer
+
+The Swift renderer is intentionally independent of the in-progress C asset
+export ABI. `WarcraftRenderDescriptorProvider` is the framework-free seam:
+
+```text
+TabletopSnapshot (copied Swift value)
+        |
+WarcraftRenderPipeline actor (generation dedupe)
+        |
+WarcraftRenderDescriptorProvider
+        +-- FixtureWarcraftRenderProvider
+        +-- ProductionWarcraftRenderProvider (explicit placeholders until adapter)
+        |
+WarcraftSceneBuilder / chunk, fog, UV, cache and reconciliation math
+        |
+WarcraftPreparedSnapshot (copied values only)
+        |
+RealityTabletopReconciler
+```
+
+`BZ_TABLETOP_RENDER_PROVIDER=fixture|production` selects the provider
+explicitly. It defaults to `fixture` only when `BZ_TABLETOP_MODE=fixture`; live
+transport defaults to `production`. The production provider does not guess the
+unfinished exporter ABI or synthesize retail art. Every unresolved visible
+model receives the magenta `WarcraftPlaceholder` mesh/material and a log-once
+diagnostic. The fixture provider's geometry and asymmetric 2x2 orientation
+texture are named `fixture-only` and must never be treated as real-art
+validation.
+
+Terrain uses fixed 32x32-cell meshes. A 128x128 map therefore produces exactly
+16 terrain entities; partial edge chunks remain bounded to 32 cells per axis.
+Water surfaces, cliff walls, and ramp tops are emitted in the same chunk model
+as separate material geosets. Fog is one three-state RGBA texture entity.
+Units, buildings, resources, doodads, and destructables use descriptor geosets,
+footprint/category scaling, team color/tint, selection rings, rectangular
+health/mana bars, and sequence/frame state. No capsule or pill primitive is a
+production asset fallback.
+
+Pure files under `tabletop/app/WarcraftRender*.swift` own descriptor conversion,
+chunk/index math, image normalization, atlas UVs, content keys, bounded caches,
+animation selection, and generation reconciliation. RealityKit only consumes
+`WarcraftPreparedSnapshot` values. Texture cache misses may read/write the
+versioned cache under:
+
+```text
+<Application Support>/OpenRealm/WarcraftRenderer/v1/
+```
+
+Writes are atomic. Reloads validate the versioned key, full fingerprint, and
+payload hash; unsafe paths and collisions fail explicitly. Memory/RealityKit
+resource caches are bounded, expose hit/miss/eviction counters where applicable,
+and unchanged generations perform no decode or disk access.
+
+The future exporter integration must implement a thin
+`WarcraftRenderDescriptorProvider` adapter, then rebase this layer onto that
+branch. Real-art completion requires ROC and TFT MPQ validation after that
+adapter exists.
+
 - Snapshot/model/reducer/placement/reconciliation/gesture files do not import
   SwiftUI or RealityKit.
 - `TabletopSnapshotTransport.poll()` returns copied Swift values. The session

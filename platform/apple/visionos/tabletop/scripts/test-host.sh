@@ -23,6 +23,11 @@ xcrun swiftc -parse-as-library \
     "$TABLETOP/app/TabletopCommand.swift" \
     "$TABLETOP/app/TabletopAdapter.swift" \
     "$TABLETOP/app/TabletopLiveValues.swift" \
+    "$TABLETOP/app/WarcraftRenderDescriptors.swift" \
+    "$TABLETOP/app/WarcraftRenderCache.swift" \
+    "$TABLETOP/app/WarcraftRenderMath.swift" \
+    "$TABLETOP/app/WarcraftRenderReconciliation.swift" \
+    "$TABLETOP/app/FixtureWarcraftRenderProvider.swift" \
     "$TABLETOP/app/FixtureSnapshotTransport.swift" \
     "$TABLETOP/app/TabletopReducer.swift" \
     "$TABLETOP/app/TabletopPlacement.swift" \

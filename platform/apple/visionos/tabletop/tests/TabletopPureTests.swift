@@ -1,3 +1,5 @@
+import Foundation
+
 @main
 enum TabletopPureTests {
     private static var failures = 0
@@ -21,6 +23,17 @@ enum TabletopPureTests {
         await testPollingCancellation()
         await testFirstSnapshotTimeout()
         testSnapshotLeaseRelease()
+        testRenderProviderMode()
+        testTerrainChunkingAndTopology()
+        testFogAndImageOrientation()
+        testMaterialsTeamsScalingAndAnimation()
+        testOverlayReduction()
+        testDescriptorSceneAndPlaceholder()
+        testDescriptorReconciliation()
+        testMemoryCache()
+        testDiskCache()
+        testDescriptorErrorPaths()
+        await testRenderPipeline()
         guard failures == 0 else {
             print("TabletopPureTests: \(failures) failure(s)")
             fatalError("TabletopPureTests failed")
@@ -340,6 +353,357 @@ enum TabletopPureTests {
             expect(false, "snapshot lease copy failure was swallowed")
         } catch {
             expect(failure.releaseCount == 1, "snapshot lease releases after copy failure")
+        }
+    }
+
+    private static func testRenderProviderMode() {
+        do {
+            let fixture = try WarcraftRenderProviderModeResolver.resolve(
+                environment: [:], runtimeMode: .fixture)
+            let production = try WarcraftRenderProviderModeResolver.resolve(
+                environment: [:], runtimeMode: .live(dataPath: "/data", map: nil, connect: nil))
+            let explicit = try WarcraftRenderProviderModeResolver.resolve(
+                environment: ["BZ_TABLETOP_RENDER_PROVIDER": "fixture"],
+                runtimeMode: .live(dataPath: "/data", map: nil, connect: nil))
+            expect(fixture == .fixture,
+                "fixture transport defaults to fixture descriptors")
+            expect(production == .production,
+                "live transport defaults to production descriptors")
+            expect(explicit == .fixture,
+                "descriptor provider can be selected explicitly")
+            do {
+                _ = try WarcraftRenderProviderModeResolver.resolve(
+                    environment: ["BZ_TABLETOP_RENDER_PROVIDER": "procedural"], runtimeMode: .fixture)
+                expect(false, "obsolete procedural renderer mode was accepted")
+            } catch TabletopTransportError.configuration {
+                expect(true, "unknown renderer provider is explicit")
+            }
+        } catch {
+            expect(false, "valid renderer provider mode failed: \(error)")
+        }
+    }
+
+    private static func testTerrainChunkingAndTopology() {
+        do {
+            let terrain = FixtureWarcraftRenderProvider.terrain(width: 128, height: 128)
+            let chunks = try WarcraftTerrainChunkBuilder.build(terrain)
+            expect(chunks.count == 16, "128x128 terrain is bounded to sixteen 32x32 entities")
+            expect(chunks.allSatisfy {
+                $0.cellBounds.maxX - $0.cellBounds.minX <= 32 &&
+                    $0.cellBounds.maxZ - $0.cellBounds.minZ <= 32
+            }, "terrain chunk bounds never exceed 32x32")
+            expect(chunks.flatMap(\.mesh.geosets).allSatisfy { part in
+                part.positions.count == part.normals.count &&
+                    part.positions.count == part.textureCoordinates.count &&
+                    part.indices.count.isMultiple(of: 3) &&
+                    part.indices.allSatisfy { Int($0) < part.positions.count }
+            }, "terrain indices and vertex buffers have valid triangle topology")
+            expect(chunks.flatMap(\.mesh.geosets).allSatisfy(WarcraftMeshMath.facesMatchNormals),
+                   "terrain triangle winding faces the declared surface normals")
+            let materials = Set(chunks.flatMap(\.mesh.geosets).map(\.materialIndex))
+            expect(materials.contains(terrain.waterMaterialIndex), "water produces dedicated geometry")
+            expect(materials.contains(terrain.cliffMaterialIndex), "cliffs produce side-wall geometry")
+            expect(materials.contains(terrain.rampMaterialIndex), "ramps produce sloped surface geometry")
+            let elevated = chunks.flatMap(\.mesh.geosets).flatMap(\.positions).map(\.y).max() ?? 0
+            expect(elevated > 0.07, "terrain mesh preserves fixture height fields")
+        } catch {
+            expect(false, "valid 128x128 terrain failed: \(error)")
+        }
+    }
+
+    private static func testFogAndImageOrientation() {
+        do {
+            let normalized = try WarcraftImageNormalizer.topLeft(
+                FixtureWarcraftRenderProvider.asymmetricTexture())
+            expect(normalized.orientation == .topLeft, "texture orientation is normalized explicitly")
+            expect(Array(normalized.rgba8[0..<8]) == [255, 0, 0, 255, 0, 255, 0, 255],
+                   "asymmetric top row remains red then green rather than vertically inverted")
+            expect(Array(normalized.rgba8[8..<16]) == [0, 0, 255, 255, 255, 255, 0, 255],
+                   "asymmetric bottom row remains blue then yellow")
+            let source = WarcraftMeshPartDescriptor(
+                name: "atlas", positions: [], normals: [],
+                textureCoordinates: [WarcraftVector2(x: 0, y: 0), WarcraftVector2(x: 1, y: 1)],
+                indices: [], materialIndex: 0)
+            let mapped = try WarcraftAtlasMapper.map(source, region: WarcraftAtlasRegion(
+                x: 1, y: 2, width: 2, height: 4, atlasWidth: 8, atlasHeight: 8))
+            expect(mapped.textureCoordinates == [
+                WarcraftVector2(x: 0.125, y: 0.25), WarcraftVector2(x: 0.375, y: 0.75),
+            ], "atlas UV mapping uses normalized top-left pixel bounds")
+            let fog = try WarcraftFogBuilder.build(
+                WarcraftFogDescriptor(width: 3, height: 1, states: [.hidden, .explored, .visible]),
+                terrain: nil)
+            expect(fog.image.rgba8 == [
+                0, 0, 0, 235, 18, 24, 36, 145, 255, 255, 255, 0,
+            ], "three fog states map to deterministic RGBA values")
+            expect(fog.width == 0.06 && fog.depth == 0.02, "fog plane uses descriptor bounds")
+            expect(WarcraftMeshMath.facesMatchNormals(WarcraftFogBuilder.mesh(fog)),
+                   "fog plane winding faces the declared upward normal")
+        } catch {
+            expect(false, "valid fog/orientation fixture failed: \(error)")
+        }
+    }
+
+    private static func testMaterialsTeamsScalingAndAnimation() {
+        let fixtureModel = FixtureWarcraftRenderProvider.model(.unit)
+        expect(fixtureModel.geosets.count == 2 && fixtureModel.materials.count == 2,
+               "fixture model exercises real geoset-to-material construction")
+        expect(fixtureModel.geosets.allSatisfy {
+            $0.textureCoordinates.count == $0.positions.count
+        }, "fixture geosets preserve one UV per vertex")
+        expect(WarcraftMaterialMapping.kind(fixtureModel.materials[0]) == .litOpaque,
+               "opaque fixture texture maps to lit material")
+        expect(WarcraftMaterialMapping.kind(fixtureModel.materials[1]) == .litModulate,
+               "team-color modulate maps distinctly")
+        expect(WarcraftMaterialMapping.kind(
+            FixtureWarcraftRenderProvider.model(.resource).materials[1]) == .unlitAdditive,
+            "team glow additive material maps distinctly")
+        expect(WarcraftTeamPalette.color(0) != WarcraftTeamPalette.color(1) &&
+               WarcraftTeamPalette.color(12) == WarcraftTeamPalette.color(0),
+               "team colors are deterministic and wrap safely")
+        let unit = WarcraftCategoryScale.scale(
+            category: .unit, footprint: WarcraftFootprint(width: 1, depth: 1))
+        let building = WarcraftCategoryScale.scale(
+            category: .building, footprint: WarcraftFootprint(width: 4, depth: 3))
+        expect(building.x > unit.x && building.z > unit.z,
+               "building footprints scale beyond unit footprints")
+        let bounds = WarcraftMeshMath.bounds(fixtureModel)
+        expect(bounds?.center.y == 0.49 && bounds?.size.y == 0.98,
+               "model bounds preserve the visual center and size used by hit testing")
+        let looping = WarcraftAnimationSelector.resolve(
+            WarcraftAnimationRequest(sequence: "walk", frame: 85), sequences: fixtureModel.sequences)
+        let clamped = WarcraftAnimationSelector.resolve(
+            WarcraftAnimationRequest(sequence: "Death", frame: 150), sequences: fixtureModel.sequences)
+        let fallback = WarcraftAnimationSelector.resolve(
+            WarcraftAnimationRequest(sequence: "missing", frame: 2), sequences: fixtureModel.sequences)
+        expect(looping?.sequence == "Walk" && looping?.frame == 45,
+               "looping animation wraps into its sequence range")
+        expect(clamped?.frame == 99, "non-looping animation clamps to its final frame")
+        expect(fallback?.sequence == "Stand", "missing animation selects Stand deterministically")
+    }
+
+    private static func testOverlayReduction() {
+        expect(WarcraftOverlayReducer.bar(nil) ==
+            WarcraftBarState(enabled: false, scale: 0, offset: -0.38),
+            "nil overlay values hide their complete rectangular bar")
+        expect(WarcraftOverlayReducer.bar(0.25) ==
+            WarcraftBarState(enabled: true, scale: 0.25, offset: -0.285),
+            "overlay values scale and left-anchor their fill")
+        expect(WarcraftOverlayReducer.bar(2) ==
+            WarcraftBarState(enabled: true, scale: 1, offset: 0),
+            "overlay values clamp above one")
+        expect(WarcraftOverlayReducer.bar(-1) ==
+            WarcraftBarState(enabled: true, scale: 0, offset: -0.38),
+            "overlay values clamp below zero without disappearing")
+    }
+
+    private static func testDescriptorSceneAndPlaceholder() {
+        do {
+            let snapshot = FixtureSnapshotSource.snapshot(generation: 3)
+            let fixture = try WarcraftSceneBuilder.build(
+                FixtureWarcraftRenderProvider().scene(for: snapshot))
+            expect(fixture.terrainChunks.count == 4 && fixture.entities.count == 6,
+                   "fixture scene stays bounded while covering all render categories")
+            expect(Set(fixture.entities.map(\.descriptor.category)) == Set(WarcraftEntityCategory.allCases),
+                   "fixture descriptors cover units, buildings, resources, doodads, and destructables")
+            expect(fixture.fog != nil, "fixture scene creates exactly one fog descriptor")
+            expect(fixture.entities.allSatisfy { !$0.usedPlaceholder },
+                   "fixture test geometry resolves without production placeholders")
+            var liveSnapshot = snapshot
+            liveSnapshot.coordinateSpace = .world(TabletopBounds2(minX: 0, minZ: 0, maxX: 10, maxZ: 10))
+            let production = try WarcraftSceneBuilder.build(
+                ProductionWarcraftRenderProvider().scene(for: liveSnapshot))
+            expect(production.entities.count == 3 && production.entities.allSatisfy(\.usedPlaceholder),
+                   "missing production descriptors use explicit geometry")
+            expect(production.entities.allSatisfy {
+                $0.model == WarcraftPlaceholder.model &&
+                    $0.model.materials == [WarcraftPlaceholder.material]
+            }, "missing production assets use the repository placeholder material and geometry")
+            expect(production.diagnostics.contains {
+                $0.contains("Production asset descriptors await the C exporter adapter")
+            }, "parallel-lane production gap is visible")
+            var log = WarcraftLogOnce()
+            expect(log.record("missing") && !log.record("missing") && log.record("other"),
+                   "missing diagnostics log once per unique message")
+        } catch {
+            expect(false, "descriptor scene construction failed: \(error)")
+        }
+    }
+
+    private static func testDescriptorReconciliation() {
+        do {
+            let provider = FixtureWarcraftRenderProvider()
+            let first = try WarcraftSceneBuilder.build(
+                provider.scene(for: FixtureSnapshotSource.snapshot(generation: 1)))
+            var state = WarcraftRenderSceneState()
+            let initial = state.reconcile(first)
+            expect(initial.upsertedChunks.count == 4 && initial.entityUpdates.count == 6 &&
+                   initial.fog != nil, "first descriptor generation inserts all bounded resources")
+            expect(state.reconcile(first) == .empty,
+                   "same generation causes no chunk, fog, entity, material, or animation work")
+            var next = try WarcraftSceneBuilder.build(
+                provider.scene(for: FixtureSnapshotSource.snapshot(generation: 2)))
+            next.entities.removeLast()
+            let update = state.reconcile(next)
+            expect(update.removedEntityIDs == [6], "new generation removes absent descriptor entities")
+            expect(update.upsertedChunks.isEmpty, "unchanged terrain chunks are not rebuilt")
+            expect(update.entityUpdates.contains {
+                $0.entity.descriptor.id == 2 && $0.transformChanged && $0.stateChanged
+            }, "changed heading and animation update only object state")
+            var materialOnly = first
+            materialOnly.generation = 3
+            materialOnly.entities[0].descriptor.teamTint =
+                WarcraftColor(red: 0.5, green: 1, blue: 1, alpha: 1)
+            var materialState = WarcraftRenderSceneState()
+            _ = materialState.reconcile(first)
+            let materialUpdate = materialState.reconcile(materialOnly)
+            expect(materialUpdate.entityUpdates.first {
+                $0.entity.descriptor.id == 1
+            }.map { $0.materialChanged && !$0.stateChanged } == true,
+            "material-only updates remain distinct so rebuilt overlays can reapply current state")
+            state.reset()
+            let restarted = state.reconcile(next)
+            expect(restarted.upsertedChunks.count == 4 && restarted.entityUpdates.count == 5,
+                   "scene reset accepts a reused generation from a new session")
+        } catch {
+            expect(false, "descriptor reconciliation failed: \(error)")
+        }
+    }
+
+    private static func testMemoryCache() {
+        do {
+            var cache = WarcraftMemoryCache(byteLimit: 6)
+            let a = Data([1, 2, 3, 4]), b = Data([5, 6, 7, 8])
+            let keyA = try WarcraftCacheKey.content(namespace: "mesh", data: a)
+            let keyB = try WarcraftCacheKey.content(namespace: "mesh", data: b)
+            let miss = try cache.value(for: keyA, fingerprint: "a")
+            expect(miss == nil, "memory cache records a miss")
+            try cache.insert(a, for: keyA, fingerprint: "a")
+            let hit = try cache.value(for: keyA, fingerprint: "a")
+            expect(hit == a, "memory cache records a hit")
+            try cache.insert(b, for: keyB, fingerprint: "b")
+            let evicted = try cache.value(for: keyA, fingerprint: "a")
+            expect(evicted == nil, "memory cache evicts least-recently-used bytes at its bound")
+            expect(cache.counters.hits == 1 && cache.counters.misses == 2 &&
+                   cache.counters.evictions == 1, "memory cache counters expose hits, misses, and eviction")
+            do {
+                try cache.insert(b, for: keyB, fingerprint: "collision")
+                expect(false, "memory cache accepted a key collision")
+            } catch WarcraftDescriptorError.cache {
+                expect(true, "memory cache collision is explicit")
+            }
+        } catch {
+            expect(false, "memory cache test failed: \(error)")
+        }
+    }
+
+    private static func testDiskCache() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("openrealm-render-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            let cache = try WarcraftDiskCache(applicationSupport: root, byteLimit: 2_000)
+            let payload = Data(repeating: 7, count: 128)
+            let key = try WarcraftCacheKey.content(namespace: "texture", data: payload)
+            expect(key.fileName.hasPrefix("v1-texture-"), "disk keys are versioned and content hashed")
+            let miss = try cache.value(for: key, fingerprint: "fixture")
+            expect(miss == nil, "disk cache records a miss")
+            try cache.insert(payload, for: key, fingerprint: "fixture")
+            let hit = try cache.value(for: key, fingerprint: "fixture")
+            expect(hit == payload, "disk cache atomically reloads validated payload")
+            let reload = try WarcraftDiskCache(applicationSupport: root, byteLimit: 2_000)
+            let reloaded = try reload.value(for: key, fingerprint: "fixture")
+            expect(reloaded == payload, "disk cache survives process-style reload")
+            do {
+                try cache.insert(payload, for: key, fingerprint: "collision")
+                expect(false, "disk cache accepted a content-key collision")
+            } catch WarcraftDescriptorError.cache {
+                expect(true, "disk collision protection rejects mismatched fingerprints")
+            }
+            do {
+                _ = try cache.confinedURL(for: WarcraftCacheKey(namespace: "../escape", digest: "abc"))
+                expect(false, "disk cache allowed path traversal")
+            } catch WarcraftDescriptorError.cache {
+                expect(true, "disk cache confines paths beneath Application Support")
+            }
+            let small = try WarcraftDiskCache(
+                applicationSupport: root.appendingPathComponent("small"), byteLimit: 500)
+            for index in 0..<3 {
+                let value = Data(repeating: UInt8(index), count: 220)
+                try small.insert(value, for: WarcraftCacheKey(
+                    namespace: "mesh", digest: String(format: "%032x", index)), fingerprint: "\(index)")
+            }
+            expect(small.counters.evictions > 0, "disk cache evicts files beyond its byte bound")
+        } catch {
+            expect(false, "disk cache test failed: \(error)")
+        }
+    }
+
+    private static func testDescriptorErrorPaths() {
+        do {
+            _ = try WarcraftImageNormalizer.topLeft(
+                WarcraftImageDescriptor(width: 2, height: 2, rgba8: [0], orientation: .topLeft))
+            expect(false, "invalid image byte count was accepted")
+        } catch WarcraftDescriptorError.invalidImage {
+            expect(true, "invalid image byte count is explicit")
+        } catch {
+            expect(false, "invalid image returned wrong error: \(error)")
+        }
+        do {
+            var terrain = FixtureWarcraftRenderProvider.terrain(width: 4, height: 4)
+            terrain.heights.removeLast()
+            _ = try WarcraftTerrainChunkBuilder.build(terrain)
+            expect(false, "invalid terrain heights were accepted")
+        } catch WarcraftDescriptorError.invalidTerrain {
+            expect(true, "invalid terrain dimensions are explicit")
+        } catch {
+            expect(false, "invalid terrain returned wrong error: \(error)")
+        }
+        do {
+            _ = try WarcraftFogBuilder.build(
+                WarcraftFogDescriptor(width: 2, height: 2, states: [.visible]), terrain: nil)
+            expect(false, "invalid fog state count was accepted")
+        } catch WarcraftDescriptorError.invalidFog {
+            expect(true, "invalid fog state count is explicit")
+        } catch {
+            expect(false, "invalid fog returned wrong error: \(error)")
+        }
+        do {
+            _ = try WarcraftOverlayMesh.selectionRing(segments: 2)
+            expect(false, "invalid selection topology was accepted")
+        } catch WarcraftDescriptorError.invalidMesh {
+            expect(true, "invalid selection topology is explicit")
+        } catch {
+            expect(false, "invalid selection topology returned wrong error: \(error)")
+        }
+        do {
+            _ = try WarcraftAtlasMapper.map(
+                WarcraftMeshPartDescriptor(name: "bad-atlas", positions: [], normals: [],
+                    textureCoordinates: [], indices: [], materialIndex: 0),
+                region: WarcraftAtlasRegion(
+                    x: 7, y: 0, width: 2, height: 1, atlasWidth: 8, atlasHeight: 8))
+            expect(false, "out-of-bounds atlas region was accepted")
+        } catch WarcraftDescriptorError.invalidImage {
+            expect(true, "out-of-bounds atlas region is explicit")
+        } catch {
+            expect(false, "invalid atlas returned wrong error: \(error)")
+        }
+    }
+
+    private static func testRenderPipeline() async {
+        let pipeline = WarcraftRenderPipeline(provider: FixtureWarcraftRenderProvider())
+        do {
+            let snapshot = FixtureSnapshotSource.snapshot(generation: 9)
+            let first = try await pipeline.prepare(snapshot)
+            let duplicate = try await pipeline.prepare(snapshot)
+            let next = try await pipeline.prepare(FixtureSnapshotSource.snapshot(generation: 10))
+            expect(first?.render.generation == 9 && duplicate == nil && next?.render.generation == 10,
+                   "provider actor deduplicates generations before descriptor conversion")
+            await pipeline.reset()
+            let reset = try await pipeline.prepare(snapshot)
+            expect(reset != nil,
+                   "provider actor reset accepts the first generation of a new session")
+        } catch {
+            expect(false, "render pipeline actor failed: \(error)")
         }
     }
 }
