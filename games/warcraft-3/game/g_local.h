@@ -986,6 +986,7 @@ void G_RunEvents(void);
 
 // g_items.c
 void SP_SpawnItem(LPEDICT);
+BOOL G_ParseItemScale(LPCSTR text, LPFLOAT value);
 
 // ui_init
 void UI_Init(void);
@@ -1006,6 +1007,7 @@ LPCSTR UnitStringFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR nam
 LONG UnitIntegerFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name);
 BOOL UnitBooleanFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name);
 FLOAT UnitRealFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name);
+void G_ApplyItemDataSchema(sheetMetaData_t *metadatas, sheetRow_t *table);
 extern struct edict_s *g_edicts;
 
 extern sheetMetaData_t UnitsMetaData[];

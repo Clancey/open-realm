@@ -32,7 +32,8 @@ struct OpenRealmTabletopApp: App {
                 if tft { arguments.append("-tft") }
                 if let map { arguments += ["+map", map] }
                 if let connect { arguments += ["+connect", connect] }
-                let live = LiveTabletopTransport(arguments: arguments)
+                let live = LiveTabletopTransport(
+                    arguments: arguments, logItemPublication: environment["BZ_TABLETOP_ACCEPTANCE"] == "1")
                 _model = StateObject(wrappedValue: TabletopSessionModel(
                     modeName: "Live / \(providerName)", transport: live,
                     renderProvider: provider, commands: live))

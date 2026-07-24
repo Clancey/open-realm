@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define BZ_TABLETOP_ASSETS_ABI_VERSION 1u
+#define BZ_TABLETOP_ASSETS_ABI_VERSION 2u
 
 enum {
     BZ_TTA_MAX_IDENTITY = 260, /* MDX texture records carry a fixed 260-byte path */
@@ -55,6 +55,7 @@ typedef enum {
     BZ_TTA_CATEGORY_RESOURCE,
     BZ_TTA_CATEGORY_DOODAD,
     BZ_TTA_CATEGORY_DESTRUCTABLE,
+    BZ_TTA_CATEGORY_ITEM,
 } bzTTAssetCategory_t;
 
 typedef enum {

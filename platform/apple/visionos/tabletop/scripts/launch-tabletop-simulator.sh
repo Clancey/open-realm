@@ -2,6 +2,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/tabletop-acceptance-patterns.sh"
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../.." && pwd)
 APP="$ROOT/build/visionos/tabletop/xrsimulator/OpenRealmTabletop.app"
 BUNDLE_ID=org.openrealm.visionos.tabletop
@@ -91,6 +92,7 @@ APP_CONTAINER=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" app)
 SIMCTL_CHILD_BZ_TABLETOP_MODE=live \
 SIMCTL_CHILD_BZ_TABLETOP_MAP=Human02 \
 SIMCTL_CHILD_BZ_TABLETOP_TFT="${OPENREALM_TABLETOP_TFT:-0}" \
+SIMCTL_CHILD_BZ_TABLETOP_ACCEPTANCE=1 \
 xcrun simctl launch --console --terminate-running-process "$UDID" "$BUNDLE_ID" >"$STDOUT" 2>"$STDERR" &
 LAUNCH_PID=$!
 RESIDENT=0
@@ -109,7 +111,7 @@ ASSET_WAIT=0
 ASSET_WAIT_LIMIT="${OPENREALM_TABLETOP_ASSET_WAIT_LIMIT:-180}"
 while [ "$ASSET_WAIT" -lt "$ASSET_WAIT_LIMIT" ]; do
     cat "$STDOUT" "$STDERR" > "$LOG_DIR/combined.log"
-    if grep -Fq "OpenRealmTabletopAssets: abi=1 cache_phase=stable" "$LOG_DIR/combined.log"; then break; fi
+    if grep -Fq "OpenRealmTabletopAssets: abi=2 cache_phase=stable" "$LOG_DIR/combined.log"; then break; fi
     if ! kill -0 "$LAUNCH_PID" 2>/dev/null; then
         wait "$LAUNCH_PID" || true
         echo "launch-tabletop-simulator.sh: app exited before stable asset publication" >&2
@@ -119,14 +121,14 @@ while [ "$ASSET_WAIT" -lt "$ASSET_WAIT_LIMIT" ]; do
     sleep 1
     ASSET_WAIT=$((ASSET_WAIT + 1))
 done
-sleep 3
+sleep "${OPENREALM_TABLETOP_POST_STABLE_WAIT:-240}"
 cat "$STDOUT" "$STDERR" > "$LOG_DIR/combined.log"
 if ! grep -Fq "BZTabletopTransport: initialized" "$LOG_DIR/combined.log"; then
     echo "launch-tabletop-simulator.sh: transport initialization evidence is missing" >&2
     cat "$STDERR" >&2
     exit 1
 fi
-if ! grep -Fq "BZTabletopAssets: initialized, abi_version=1" "$LOG_DIR/combined.log"; then
+if ! grep -Fq "BZTabletopAssets: initialized, abi_version=2" "$LOG_DIR/combined.log"; then
     echo "launch-tabletop-simulator.sh: asset ABI initialization evidence is missing" >&2
     cat "$STDERR" >&2
     exit 1
@@ -148,11 +150,18 @@ if grep -Eq 'water shader preparation failed|authoritative water material is una
     cat "$STDERR" >&2
     exit 1
 fi
-INITIAL_SUMMARY=$(grep -F "OpenRealmTabletopAssets: abi=1 cache_phase=initial" \
+if grep -Eq "$BZ_TABLETOP_METADATA_FAILURE_RE" "$LOG_DIR/combined.log"; then
+    echo "launch-tabletop-simulator.sh: late production metadata placeholder detected" >&2
+    grep -E 'metadata unavailable|metadata status|Missing production descriptor' "$LOG_DIR/combined.log" >&2
+    exit 1
+fi
+INITIAL_SUMMARY=$(grep -F "OpenRealmTabletopAssets: abi=2 cache_phase=initial" \
     "$LOG_DIR/combined.log" | tail -1 || true)
-STABLE_SUMMARY=$(grep -F "OpenRealmTabletopAssets: abi=1 cache_phase=stable" \
+STABLE_SUMMARY=$(grep -F "OpenRealmTabletopAssets: abi=2 cache_phase=stable" \
     "$LOG_DIR/combined.log" | tail -1 || true)
-if [ -z "$INITIAL_SUMMARY" ] || [ -z "$STABLE_SUMMARY" ]; then
+ITEM_SUMMARY=$(grep -F "OpenRealmTabletopAssets: abi=2 cache_phase=item" \
+    "$LOG_DIR/combined.log" | tail -1 || true)
+if [ -z "$INITIAL_SUMMARY" ] || [ -z "$STABLE_SUMMARY" ] || [ -z "$ITEM_SUMMARY" ]; then
     echo "launch-tabletop-simulator.sh: copied asset/terrain summary is missing" >&2
     cat "$STDERR" >&2
     exit 1
@@ -182,6 +191,23 @@ for CATEGORY in unit building resource doodad destructable; do
         *) echo "launch-tabletop-simulator.sh: category $CATEGORY is missing" >&2; exit 1 ;;
     esac
 done
+ITEM_CLASSES=$(printf '%s\n' "$ITEM_SUMMARY" | sed -nE 's/.* item_classes=([^ ]+).*/\1/p')
+if ! bz_tabletop_exact_item_classes "$ITEM_CLASSES"; then
+    echo "launch-tabletop-simulator.sh: late item class set is incorrect: $ITEM_SUMMARY" >&2
+    exit 1
+fi
+printf '%s\n' "$ITEM_SUMMARY" | awk '
+{
+    for (i = 1; i <= NF; i++) {
+        split($i, pair, "=")
+        value[pair[1]] = pair[2]
+    }
+    if (value["placeholders"] != 0 || value["placeholder_logs"] != 0 ||
+        value["metadata_logs"] != 0) exit 1
+}' || {
+    echo "launch-tabletop-simulator.sh: late item publication counters failed: $ITEM_SUMMARY" >&2
+    exit 1
+}
 INITIAL_MISSES=$(printf '%s\n' "$INITIAL_SUMMARY" | sed -nE 's/.* misses=([0-9]+).*/\1/p')
 STABLE_MISSES=$(printf '%s\n' "$STABLE_SUMMARY" | sed -nE 's/.* misses=([0-9]+).*/\1/p')
 INITIAL_HITS=$(printf '%s\n' "$INITIAL_SUMMARY" | sed -nE 's/.* hits=([0-9]+).*/\1/p')

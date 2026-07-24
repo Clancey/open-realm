@@ -5,9 +5,10 @@ renderers without exposing engine or desktop renderer internals.
 
 ## ABI contract
 
-`platform/bridge/bz_tabletop_assets.h` defines ABI version 1. Public values are
+`platform/bridge/bz_tabletop_assets.h` defines ABI version 2. Public values are
 fixed-width C PODs or opaque retained `bzTTAsset_t`/`bzTTTerrain_t` handles.
-All payloads are immutable after publication.
+All payloads are immutable after publication. Version 2 appends
+`BZ_TTA_CATEGORY_ITEM`; the metadata POD remains 36 bytes.
 
 Asset identity comes from a retained tabletop snapshot and a configstring slot:
 
@@ -214,7 +215,7 @@ order.
 ## Entity metadata
 
 Class IDs are resolved with the game spawn-table precedence: Doodad,
-Destructable, then Unit. No network struct is widened and no server edict is
+Destructable, Unit, then Item. No network struct is widened and no server edict is
 read. Unit `buffType=resource` identifies gold-mine resources without hardcoded
 unit IDs; destructable `targType=tree` identifies lumber resources. Buildings,
 resources, destructables, and pathing doodads derive footprint dimensions from
@@ -223,6 +224,23 @@ Mobile units use twice the authentic `ucol` collision radius as their
 world-unit footprint diameter. Missing required
 path/collision data returns an explicit cached/log-once error instead of
 guessing from selection radius or model bounds.
+
+Items resolve from the active whole-file `Units\ItemData.slk` replacement.
+ROC names the classification column `itemClass` and has no scale/tint columns;
+TFT names it `class` and adds `scale` plus `colorR/G/B`. Initialization detects
+that table schema before binding `ItemsMetaData`, so toggling TFT never combines
+rows or column names from ROC. The retail IDs `rde4`, `ratf`, `rlif`, `rwiz`,
+`prvt`, and `ckng` are the little-endian values `0x34656472`, `0x66746172`,
+`0x66696c72`, `0x7a697772`, `0x74767270`, and `0x676e6b63`.
+
+ItemData authors no pathing texture or collision field. Items therefore export
+the distinct item category with a zero footprint; selection size is never used
+as a collision proxy. ROC preserves the placed/JASS entity scale because it has
+no table scale. TFT item spawn applies its authored scale (all 273 retail rows
+use `1`), and the transport already carries that server-authored entity scale.
+Missing rows and malformed model identities remain cached/log-once metadata
+errors; a confined identity whose model file is absent uses the normal cached
+model placeholder.
 
 `Doodads.slk` uses the literal `pathTex=none` for authored non-pathing rows.
 This is an absent optional footprint, not an archive identity. ROC and TFT
@@ -320,7 +338,7 @@ ground/cliff images as production terrain.
 Entity classes pass through `BZ_TTA_ResolveEntityMetadata`. The transport
 player is an explicit team-color override; no runtime tint override is supplied
 because the transport has no authoritative tint field. Successful results
-drive mobile/building/resource/doodad/destructable categories and WC3 table
+drive mobile/building/resource/doodad/destructable/item categories and WC3 table
 footprints. Failed results remain explicit placeholders rather than Swift
 radius/category guesses.
 
@@ -348,6 +366,7 @@ Retail ROC/TFT checks use the existing diagnostic tool without extracting data:
 build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep Ldrt TerrainArt
 build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep pathTex Doodads
 build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep ngol Units
+build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep rde4 Units
 build/bin/mpqtool -mpq "/Users/clancey/Downloads/Warcraft III/War3.mpq" \
   info "Maps/Campaign/Human02.w3m"
 ```
@@ -358,6 +377,12 @@ The retail rows confirm ROC `Ldrt` as
 `PathTextures\16x16Goldmine.tga` with `buffType=resource`. The final command
 confirms the campaign-map archive identity without copying the map from
 `War3.mpq`.
+
+Simulator acceptance keeps the disposable Human02 process alive for 240 seconds
+after the first stable summary. This is required because the six campaign items
+enter the capped visible-entity publication later; the gate rejects any late
+metadata error, explicit metadata placeholder, or missing production descriptor
+rather than trusting the earlier zero-placeholder summary.
 
 `make run-sc2` currently hardcodes `-data data/StarCraft2` and exposes no
 external-data variable. Validation with a legal install outside the repository

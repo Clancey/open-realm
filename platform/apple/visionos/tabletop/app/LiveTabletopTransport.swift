@@ -664,6 +664,7 @@ private enum LiveWarcraftAssetCopy {
         case UInt32(BZ_TTA_CATEGORY_RESOURCE.rawValue): category = .resource
         case UInt32(BZ_TTA_CATEGORY_DOODAD.rawValue): category = .doodad
         case UInt32(BZ_TTA_CATEGORY_DESTRUCTABLE.rawValue): category = .destructable
+        case UInt32(BZ_TTA_CATEGORY_ITEM.rawValue): category = .item
         default: category = .unknown
         }
         return WarcraftAssetMetadata(
@@ -692,14 +693,18 @@ private enum LiveWarcraftAssetCopy {
 
 actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport {
     private let arguments: [String]
+    private let logItemPublication: Bool
     private var bridge: BZTabletopBridge?
     private var sessionID: UInt64 = 0
     private let assetCache = LiveWarcraftCopyCache()
     private var initialAssetCounters: WarcraftAssetCacheCounters?
     private var loggedStableAssetCache = false
+    private var observedItemClasses = Set<UInt32>()
+    private var loggedItemClassCount = 0
 
-    init(arguments: [String]) {
+    init(arguments: [String], logItemPublication: Bool = false) {
         self.arguments = arguments
+        self.logItemPublication = logItemPublication
     }
 
     func start() async throws {
@@ -708,6 +713,8 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
         assetCache.reset()
         initialAssetCounters = nil
         loggedStableAssetCache = false
+        observedItemClasses.removeAll()
+        loggedItemClassCount = 0
         let bridge = BZTabletopBridge(arguments: arguments)
         self.bridge = bridge
         bridge.start()
@@ -754,6 +761,8 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
         assetCache.reset()
         initialAssetCounters = nil
         loggedStableAssetCache = false
+        observedItemClasses.removeAll()
+        loggedItemClassCount = 0
         active?.stop()
     }
 
@@ -792,12 +801,17 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
     private func logAssetSummary(_ snapshot: TabletopSnapshot) {
         guard let assets = snapshot.warcraftAssets, let terrain = assets.terrain,
               !assets.entities.isEmpty else { return }
+        observedItemClasses.formUnion(WarcraftItemPublication.classIDs(
+            assets.entities.values.map(\.metadata)))
         let cachePhase: String
-        if let initial = initialAssetCounters {
-            guard !loggedStableAssetCache, assets.counters.hits > initial.hits,
-                  assets.counters.misses == initial.misses else { return }
+        if let initial = initialAssetCounters, !loggedStableAssetCache {
+            guard assets.counters.hits > initial.hits, assets.counters.misses == initial.misses else { return }
             loggedStableAssetCache = true
             cachePhase = "stable"
+        } else if loggedStableAssetCache {
+            guard logItemPublication, observedItemClasses.count > loggedItemClassCount else { return }
+            loggedItemClassCount = observedItemClasses.count
+            cachePhase = "item"
         } else {
             initialAssetCounters = assets.counters
             cachePhase = "initial"
@@ -810,6 +824,7 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
         let categories = Set(assets.entities.values.map(\.metadata.category.rawValue)).sorted()
             .joined(separator: ",")
         let uniqueModels = Set(assets.entities.values.map(\.identity)).count
+        let itemClasses = WarcraftItemPublication.classList(observedItemClasses.sorted())
         let chunks = ((terrain.width + WarcraftAssetDescriptorAdapter.terrainChunkTiles - 1) /
             WarcraftAssetDescriptorAdapter.terrainChunkTiles) *
             ((terrain.height + WarcraftAssetDescriptorAdapter.terrainChunkTiles - 1) /
@@ -825,7 +840,7 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
         let cache = "hits=\(assets.counters.hits) misses=\(assets.counters.misses) " +
             "placeholder_logs=\(assets.counters.placeholderLogs) metadata_logs=\(assets.counters.metadataLogs)"
         let message = "OpenRealmTabletopAssets: abi=\(assets.abiVersion) cache_phase=\(cachePhase) " +
-            "\(geometry) \(model) categories=\(categories) \(cache)\n"
+            "\(geometry) \(model) categories=\(categories) item_classes=\(itemClasses) \(cache)\n"
         FileHandle.standardError.write(Data(message.utf8))
     }
 }

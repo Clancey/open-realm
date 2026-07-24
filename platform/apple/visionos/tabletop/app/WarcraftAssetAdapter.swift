@@ -8,6 +8,16 @@ struct WarcraftAssetMetadata: Equatable, Sendable {
     var footprint: WarcraftFootprint
 }
 
+enum WarcraftItemPublication {
+    static func classIDs(_ metadata: [WarcraftAssetMetadata]) -> [UInt32] {
+        Array(Set(metadata.filter { $0.category == .item }.map(\.classID))).sorted()
+    }
+
+    static func classList(_ classIDs: [UInt32]) -> String {
+        classIDs.map { String(format: "%08x", $0) }.joined(separator: ",")
+    }
+}
+
 struct WarcraftExportedImage: Equatable, Sendable {
     var identity: String
     var placeholder: Bool
@@ -705,7 +715,7 @@ enum WarcraftAssetDescriptorAdapter {
             textureCount: source.groundTextures.count + source.cliffTextures.count +
                 (source.waterTexture == nil ? 0 : 1),
             noCliffCount: source.corners.filter { $0.flags & terrainNoCliff != 0 }.count,
-            diagnostics: ["Terrain geometry and textures use authoritative asset ABI v1 descriptors."])
+            diagnostics: ["Terrain geometry and textures use authoritative asset ABI v2 descriptors."])
     }
 
     private static func surfaceLayers(

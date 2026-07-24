@@ -32,6 +32,7 @@ enum TabletopPureTests {
         testFogAndImageOrientation()
         testDescriptorContentKeys()
         testMaterialsTeamsScalingAndAnimation()
+        testWarcraftItemPublicationClassList()
         testAssetModelAdapter()
         testAssetTerrainAdapter()
         testAssetAdapterErrorPaths()
@@ -789,8 +790,12 @@ enum TabletopPureTests {
             category: .unit, footprint: WarcraftFootprint(width: 1, depth: 1))
         let building = WarcraftCategoryScale.scale(
             category: .building, footprint: WarcraftFootprint(width: 4, depth: 3))
+        let item = WarcraftCategoryScale.scale(
+            category: .item, footprint: WarcraftFootprint(width: 0, depth: 0))
         expect(building.x > unit.x && building.z > unit.z,
                "building footprints scale beyond unit footprints")
+        expect(item.x > 0 && item.z > 0 && item.x < unit.x && item.z < unit.z,
+               "zero-footprint items retain their distinct small overlay scale")
         let bounds = WarcraftMeshMath.bounds(fixtureModel)
         expect(bounds?.center.y == 0.49 && bounds?.size.y == 0.98,
                "model bounds preserve the visual center and size used by hit testing")
@@ -806,6 +811,26 @@ enum TabletopPureTests {
         expect(fallback?.sequence == "Stand", "missing animation selects Stand deterministically")
     }
 
+    private static func testWarcraftItemPublicationClassList() {
+        let metadata = [
+            WarcraftAssetMetadata(category: .item, classID: 0x66746172, teamColor: 0,
+                                  tint: WarcraftColor(red: 1, green: 1, blue: 1, alpha: 1),
+                                  footprint: WarcraftFootprint(width: 0, depth: 0)),
+            WarcraftAssetMetadata(category: .unit, classID: 0x12345678, teamColor: 0,
+                                  tint: WarcraftColor(red: 1, green: 1, blue: 1, alpha: 1),
+                                  footprint: WarcraftFootprint(width: 1, depth: 1)),
+            WarcraftAssetMetadata(category: .item, classID: 0x34656472, teamColor: 0,
+                                  tint: WarcraftColor(red: 1, green: 1, blue: 1, alpha: 1),
+                                  footprint: WarcraftFootprint(width: 0, depth: 0)),
+            WarcraftAssetMetadata(category: .item, classID: 0x66746172, teamColor: 0,
+                                  tint: WarcraftColor(red: 1, green: 1, blue: 1, alpha: 1),
+                                  footprint: WarcraftFootprint(width: 0, depth: 0)),
+        ]
+        expect(WarcraftItemPublication.classList(WarcraftItemPublication.classIDs(metadata)) ==
+               "34656472,66746172",
+               "item publication classes are filtered, unique, sorted, and byte-exact")
+    }
+
     private static func testAssetModelAdapter() {
         do {
             let source = exportedModel()
@@ -814,6 +839,7 @@ enum TabletopPureTests {
                 expect(false, "valid MDX 800 fixture became a placeholder")
                 return
             }
+
             expect(asset.identity == "Units/Human/Footman/Footman.mdx" &&
                    asset.bounds == source.bounds, "model identity and exported bounds survive value copying")
             expect(model.geosets.count == 2 && model.materials.count == 2,

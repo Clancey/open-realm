@@ -135,6 +135,7 @@ enum WarcraftEntityCategory: String, Codable, CaseIterable, Equatable, Sendable 
     case resource
     case doodad
     case destructable
+    case item
 }
 
 struct WarcraftFootprint: Codable, Equatable, Sendable {
@@ -381,6 +382,7 @@ enum WarcraftCategoryScale {
         case .resource: categoryScale = 0.9
         case .doodad: categoryScale = 0.8
         case .destructable: categoryScale = 0.86
+        case .item: categoryScale = 0.72
         }
         return WarcraftVector3(x: max(footprint.width, 0.25) * categoryScale,
                                y: categoryScale,

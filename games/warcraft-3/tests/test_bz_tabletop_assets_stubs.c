@@ -53,8 +53,11 @@ const metadataMapSnapshot_t *G_MetadataMapAcquire(void) { return metadata_map; }
 void G_MetadataMapRelease(const metadataMapSnapshot_t *snapshot) { (void)snapshot; }
 uint64_t G_MetadataMapToken(const metadataMapSnapshot_t *snapshot) { return snapshot ? snapshot->token : 0; }
 DWORD G_MetadataMapClass(const metadataMapSnapshot_t *snapshot, DWORD class_id) {
-    return snapshot && snapshot->map == 1 && class_id == FOURCC('h','p','e','a')
-        ? FOURCC('h','p','e','2') : class_id;
+    if (snapshot && snapshot->map == 1) {
+        if (class_id == FOURCC('h','p','e','a')) return FOURCC('h','p','e','2');
+        if (class_id == FOURCC('i','0','0','0')) return FOURCC('r','d','e','4');
+    }
+    return class_id;
 }
 void test_assets_block_reads(bool blocked) {
     pthread_mutex_lock(&read_lock);
@@ -179,9 +182,32 @@ static LPCSTR destructable_field(DWORD class_id, LPCSTR name) {
     return NULL;
 }
 
+static LPCSTR item_field(DWORD class_id, LPCSTR name) {
+    static const DWORD retail_ids[] = {
+        FOURCC('r','d','e','4'), FOURCC('r','a','t','f'), FOURCC('r','l','i','f'),
+        FOURCC('r','w','i','z'), FOURCC('p','r','v','t'), FOURCC('c','k','n','g'),
+    };
+    bool retail = false;
+    for (size_t i = 0; i < sizeof(retail_ids) / sizeof(*retail_ids); i++)
+        if (class_id == retail_ids[i]) retail = true;
+    if (retail || class_id == FOURCC('i','t','s','t') || class_id == FOURCC('i','m','i','s')) {
+        if (!strcmp(name, "ifil"))
+            return class_id == FOURCC('i','t','s','t') ? "TestUI\\Models\\quad_sprite.mdl" :
+                   class_id == FOURCC('i','m','i','s') ? "TestUI\\Models\\missing_item.mdx" :
+                                                        "Objects\\InventoryItems\\TreasureChest\\treasurechest.mdl";
+        if (!strcmp(name, "isca")) return test_tft ? "1" : NULL;
+        if (!strcmp(name, "iclr")) return test_tft && class_id == FOURCC('i','t','s','t') ? "100" : NULL;
+        if (!strcmp(name, "iclg")) return test_tft && class_id == FOURCC('i','t','s','t') ? "140" : NULL;
+        if (!strcmp(name, "iclb")) return test_tft && class_id == FOURCC('i','t','s','t') ? "255" : NULL;
+    }
+    if (class_id == FOURCC('i','b','a','d') && !strcmp(name, "ifil")) return "..\\outside.mdl";
+    return NULL;
+}
+
 LPCSTR UnitStringField(sheetMetaData_t *metadata, DWORD class_id, LPCSTR name) {
     return metadata == DestructableMetaData ? destructable_field(class_id, name) :
-           metadata == UnitsMetaData ? unit_field(class_id, name) : NULL;
+           metadata == UnitsMetaData ? unit_field(class_id, name) :
+           metadata == ItemsMetaData ? item_field(class_id, name) : NULL;
 }
 
 LPCSTR UnitStringFieldBase(sheetMetaData_t *metadata, DWORD class_id, LPCSTR name) {
