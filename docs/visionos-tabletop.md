@@ -81,10 +81,49 @@ after that required stage.
 range, `BZ_TTSnapshot_ConfigString()` returning `false` becomes an explicit
 empty Swift entry. The shell never imports or guesses `MAX_CONFIGSTRINGS`.
 
+## Native asset and terrain ABI
+
+`platform/bridge/bz_tabletop_assets.h` is a separate, versioned C ABI for a
+future RealityKit renderer. It deliberately does not widen the frozen snapshot
+transport:
+
+- `BZ_TTA_RegisterConfigString()` resolves immutable image/model assets from a
+  retained snapshot's configstring identity through the engine filesystem and
+  MPQ search order. Callers never submit guessed archive paths.
+- `BZ_TTA_RegisterTeamTexture()` resolves MDX team color/glow semantics for a
+  provider-authored team index, keeping team selection out of shared model
+  templates and Warcraft archive paths out of Swift.
+- `BZ_TTA_LatestTerrain()` returns a retained deep copy of authoritative
+  `world.map` terrain. The descriptor includes bounds, corner/tile/chunk
+  dimensions, corrected ground and water heights, ground/cliff IDs and
+  variations, cliff levels, and ramp/water/blight/boundary flags.
+- `BZ_TTTerrain_ReferencedTextureCount()` and
+  `BZ_TTTerrain_ReferencedTexture()` expose only corner-referenced terrain
+  texture registrations while preserving original W3E ground/cliff indices.
+  The appended water kind is a C-authored singleton at index zero and is absent
+  for maps without water, so Swift never supplies a Warcraft archive path.
+- Handles are opaque and explicitly retained/released. Descriptor accessors copy
+  plain C POD values; payloads remain immutable, so concurrent readers require
+  no renderer-thread lock.
+- Missing or malformed registrations return cached, valid placeholder
+  descriptors with an explicit status. Only the winning cache insertion logs,
+  which keeps concurrent first-time misses log-once.
+- The public header includes no engine, Objective-C, Swift, SDL, OpenGL, or
+  RealityKit types. Generic ownership/cache publication lives in
+  `platform/bridge/`; Warcraft W3E/BLP/MDX translation lives in
+  `games/warcraft-3/visionos/`.
+- `OpenRealmTabletopBridge` re-exports the asset header, so Swift can import the
+  ABI without a second bridging module.
+
+The engine archive builds the Warcraft translation as a separate unity object
+from the game object. See [wc3-visionos-assets.md](wc3-visionos-assets.md) for
+the descriptor contract, format facts, tests, and known export gaps.
+
 ### Production shell build and tests
 
 ```sh
 make test-visionos-tabletop-host       # pure Swift executable tests on macOS
+make test-bz-tabletop-assets           # C ABI, W3E, BLP, MDX, ownership/race tests
 make visionos-tabletop-xrsimulator     # arm64 xrsimulator 2.0 app, ad-hoc signed
 make visionos-tabletop-xros            # arm64 xros 2.0 app, unsigned
 make visionos-tabletop                 # all three gates
@@ -120,6 +159,21 @@ gate. It launches with `SIMCTL_CHILD_*`, captures stdout/stderr directly,
 requires five seconds of residency plus transport initialization, first
 snapshot, and `Human02` begin evidence, then terminates the app and deletes the
 clone. It never addresses `booted` or takes over the user's active simulator.
+
+Verify the real ROC map identity with the repository diagnostic tool before
+launch:
+
+```sh
+make mpqtool
+build/bin/mpqtool -mpq "${BZ_WC3_DATA_DIR:-$HOME/Downloads/Warcraft III}/War3.mpq" \
+  ls Maps/Campaign | grep -F 'Human02.w3m'
+build/bin/mpqtool -mpq "${BZ_WC3_DATA_DIR:-$HOME/Downloads/Warcraft III}/War3.mpq" \
+  info Maps/Campaign/Human02.w3m
+```
+
+The local ROC archive check enumerated `Maps\Campaign\Human02.w3m` as a regular,
+uncompressed, unencrypted 236,299-byte entry. This confirms the archive-relative
+identity without extracting or committing the map.
 
 The direct linker embeds the generated plist in `__TEXT,__info_plist` before
 signing. The verifier requires that section, an exact signing identifier, and
@@ -512,7 +566,9 @@ exposed, a documented gap rather than fabricated data); the local player
 (`bzTTPlayer_t` — number/team/color/race/uiflags/resources); selected entity
 ids; visible entities (`bzTTEntity_t`, deep-copied subset of
 `entityState_t`, capped at `BZ_TT_MAX_ENTITIES` = 1024 with an explicit
-`EntitiesOverflowCount()` rather than silent truncation); fog-of-war
+`EntitiesOverflowCount()` rather than silent truncation). Visibility matches
+desktop `CL_AddEntities()`: only slots with `ce->current.model != 0` count
+toward the cap; empty parser slots and model2/image-only slots are excluded. Fog-of-war
 dimensions plus visible/explored planes; configstrings by index
 (`BZ_TTSnapshot_ConfigStringCount()` returns the number of captured slots so
 callers can iterate `[0, count)` without importing the engine-private
@@ -631,11 +687,16 @@ configurations, plus the plain build).
   pre-existing protocol characteristic, not a bug.
 - `CL_ReadPacketEntities()` always sets `cl.num_entities =
   MAX_CLIENT_ENTITIES` (16384) regardless of how many entities a packet
-  actually touched. This means any real `svc_packetentities` parse makes
-  `BZ_TTSnapshot_EntityCount()` report exactly `BZ_TT_MAX_ENTITIES` (1024)
-  and `EntitiesOverflowCount()` report exactly `MAX_CLIENT_ENTITIES -
-  BZ_TT_MAX_ENTITIES` (15360) — a pre-existing real-parser characteristic,
-  asserted exactly in the test rather than treated as a bug.
+  actually touched. Most are zero-model slots. Snapshot construction applies
+  the established desktop predicate `ce->current.model != 0` before copy/cap
+  accounting, so overflow reports only active entities beyond 1024.
+  - One active client slot is one transport entity even when `model2` makes the
+    desktop renderer emit a second attached render entity. Human02 therefore
+    stabilizes at 2,397 transport entities (`1024 + overflow 1373`) while the text
+    renderer reports 2,398 render entities; the one-entity difference is the
+    attachment, not a dropped active slot. Three bounded equivalent-lifecycle
+    runs identified the same source each time: client slot 67, class `hC02`,
+    `model=28`, `model2=121`, connection state 3.
 - `Netchan_Transmit()` resets `netchan->message.cursize` to 0 after handing
   off to `NET_SendPacket()`, and is a no-op if `cursize == 0` — useful for
   asserting both that a real send actually ran, and that draining an empty

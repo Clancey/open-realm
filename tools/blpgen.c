@@ -11,6 +11,7 @@
  *   blpgen alpha_ring   <w> <h>            <out.blp>
  *   blpgen panel_border <w> <h> <border>   <out.blp>
  *   blpgen paletted     <w> <h> <cell>     <out.blp>
+ *   blpgen orientation                       <out.blp>
  *
  * All non-paletted presets use BLP2 BGRA (encoding=3, alphaDepth=8).
  * The "paletted" preset uses BLP2 paletted+alpha8 (encoding=1, alphaDepth=8)
@@ -299,6 +300,20 @@ static int gen_paletted(int argc, char **argv) {
     return ok ? 0 : 1;
 }
 
+/* orientation <out.blp>
+ * Asymmetric 2x2 fixture: red/green top row, blue/white bottom row. */
+static int gen_orientation(int argc, char **argv) {
+    bgra_t pixels[] = {
+        { .r = 255, .a = 255 }, { .g = 255, .a = 255 },
+        { .b = 255, .a = 255 }, { .r = 255, .g = 255, .b = 255, .a = 255 },
+    };
+    if (argc < 2) {
+        fprintf(stderr, "usage: blpgen orientation <out.blp>\n");
+        return 1;
+    }
+    return write_bgra_blp(argv[1], 2, 2, pixels) ? 0 : 1;
+}
+
 /* =========================================================================
  * main
  * =========================================================================*/
@@ -312,6 +327,7 @@ static void usage(void) {
         "  blpgen alpha_ring   <w> <h>             <out.blp>\n"
         "  blpgen panel_border <w> <h> <border>    <out.blp>\n"
         "  blpgen paletted     <w> <h> <cell>      <out.blp>\n"
+        "  blpgen orientation                       <out.blp>\n"
         "\n"
         "Examples:\n"
         "  blpgen solid        1  1  ffffffff  solid_white.blp\n"
@@ -335,6 +351,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "alpha_ring")   == 0) return gen_alpha_ring(sub_argc, sub_argv);
     if (strcmp(cmd, "panel_border") == 0) return gen_panel_border(sub_argc, sub_argv);
     if (strcmp(cmd, "paletted")     == 0) return gen_paletted(sub_argc, sub_argv);
+    if (strcmp(cmd, "orientation")  == 0) return gen_orientation(sub_argc, sub_argv);
 
     fprintf(stderr, "blpgen: unknown command '%s'\n\n", cmd);
     usage();

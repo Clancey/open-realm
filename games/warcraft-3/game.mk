@@ -129,6 +129,9 @@ TEST_SRCS := \
 	! -name 'test_bz_runtime_main.c' \
 	! -name 'test_bz_tabletop_lifecycle.c' \
 	! -name 'test_bz_tabletop_lifecycle_main.c' \
+	! -name 'test_bz_tabletop_assets.c' \
+	! -name 'test_bz_tabletop_assets_main.c' \
+	! -name 'test_bz_tabletop_assets_stubs.c' \
 	! -name 'test_bz_tabletop_transport.c' \
 	! -name 'test_bz_tabletop_transport_client.c' \
 	! -name 'test_bz_tabletop_transport_main.c' \
@@ -163,6 +166,7 @@ test: test-assets $(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB) | $(BIN_DIR)
 	@$(MAKE) test-bz-runtime
 	@$(MAKE) test-bz-tabletop-lifecycle
 	@$(MAKE) test-bz-tabletop-transport
+	@$(MAKE) test-bz-tabletop-assets
 	@$(MAKE) test-sc2
 	@$(MAKE) test-wow-appearance
 	@$(MAKE) test-wow-combat
@@ -183,6 +187,7 @@ $(eval $(call test_schema,test-bz-tabletop-lifecycle,test-assets $(SHARED_LIB) $
 # linking the full cvar/cmd subsystem or the real same-thread UI cache - see
 # that file's header comment for why.
 $(eval $(call test_schema,test-bz-tabletop-transport,,$(TEST_CFLAGS) -Iplatform/bridge -Iplatform/apple/visionos/tabletop/client,$(BIN_DIR)/test_bz_tabletop_transport$(EXE_EXT),$(WC3_TEST_DIR)/test_bz_tabletop_transport_main.c $(WC3_TEST_DIR)/test_bz_tabletop_transport.c $(WC3_TEST_DIR)/test_bz_tabletop_transport_client.c $(WC3_TEST_DIR)/test_bz_tabletop_transport_stubs.c platform/bridge/bz_tabletop_transport.c client/cl_parse.c platform/apple/visionos/tabletop/client/cl_scrn_tabletop_null.c common/net.c common/msg.c,-lm -lpthread,))
+$(eval $(call test_schema,test-bz-tabletop-assets,test-assets,$(TEST_CFLAGS) -Iplatform/bridge -I$(WC3_DIR)/visionos,$(BIN_DIR)/test_bz_tabletop_assets$(EXE_EXT),$(WC3_TEST_DIR)/test_bz_tabletop_assets_main.c $(WC3_TEST_DIR)/test_bz_tabletop_assets.c $(WC3_TEST_DIR)/test_bz_tabletop_assets_stubs.c platform/bridge/bz_tabletop_assets.c $(WC3_DIR)/visionos/wc3_tabletop_assets.c $(WC3_DIR)/visionos/wc3_blp_decode.c $(WC3_DIR)/visionos/wc3_mdx_decode.c,-lm -lpthread,))
 $(eval $(call test_schema,test-jass,$(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB),$(TEST_CFLAGS),$(BIN_DIR)/test_jass$(EXE_EXT),$(WC3_TEST_DIR)/test_jass_main.c $(WC3_TEST_DIR)/test_jass.c $(WC3_TEST_DIR)/test_harness.c $(WC3_TEST_DIR)/test_client_stubs.c $(WC3_DIR)/game/g_metadata.c common/msg.c,-lsheet -lshared -ljass -lm,))
 $(eval $(call test_schema,test-ui,test-assets $(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB),$(TEST_UI_CFLAGS),$(BIN_DIR)/test_openwarcraft3_ui$(EXE_EXT),$(TEST_UI_SRCS) $(TEST_GAME_SRCS) common/mpq.c $(call CSRC,$(WC3_DIR)/ui),-lsheet -lshared -ljass -lm -lz,))
 
@@ -214,6 +219,7 @@ test-assets: blpgen mdxgen mpqtool mdxtool | $(TESTS_DIR)
 		"paletted 8 8 2 $(TESTS_RES_DIR)/TestUI/Textures/paletted_checker_8x8.blp"; do \
 		$(BIN_DIR)/blpgen$(EXE_EXT) $$tex; \
 	done
+	@$(BIN_DIR)/blpgen$(EXE_EXT) orientation $(TESTS_RES_DIR)/TestUI/Textures/orientation_2x2.blp
 	@echo "[test-assets] generating models"
 	@mkdir -p $(TESTS_RES_DIR)/TestUI/Models
 	@for model in \
@@ -244,4 +250,4 @@ test-assets: blpgen mdxgen mpqtool mdxtool | $(TESTS_DIR)
 $(TESTS_DIR):
 	@mkdir -p $@
 
-WC3_PHONY := wc3-build jass-tool jass sheet renderer game ui openwarcraft3 run run-demo run-map run-ui-text test test-jass test-commands test-bz-runtime test-bz-tabletop-lifecycle test-bz-tabletop-transport test-ui test-mpq-compat test-assets test-render-golden update-render-golden
+WC3_PHONY := wc3-build jass-tool jass sheet renderer game ui openwarcraft3 run run-demo run-map run-ui-text test test-jass test-commands test-bz-runtime test-bz-tabletop-lifecycle test-bz-tabletop-transport test-bz-tabletop-assets test-ui test-mpq-compat test-assets test-render-golden update-render-golden

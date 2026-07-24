@@ -25,6 +25,9 @@
 #include "test_framework.h"
 
 void test_transport_stubs_reset(void);
+void test_transport_block_asset_init(bool block);
+void test_transport_wait_for_asset_init(void);
+bool test_transport_asset_terminal(void);
 void test_transport_set_world_bounds(BOX2 bounds);
 void test_transport_set_unit_layouts(const bzTTUnitLayout_t *layouts, uint32_t count);
 
@@ -79,6 +82,32 @@ static void test_init_after_shutdown_is_idempotent_restart(void) {
     BZ_TT_Shutdown();
     BZ_TT_Init(); /* restart: Latest() must be NULL again until a fresh publish */
     ASSERT_NULL(BZ_TT_Latest());
+}
+
+static void *transport_init_thread(void *opaque) { (void)opaque; BZ_TT_Init(); return NULL; }
+static void *transport_shutdown_thread(void *opaque) {
+    atomic_bool *done = opaque;
+    BZ_TT_Shutdown(); atomic_store(done, true); return NULL;
+}
+
+static void test_asset_and_transport_lifecycle_are_atomic(void) {
+    pthread_t initializer, shutdowner;
+    atomic_bool shutdown_done = false;
+    uint32_t id = 1;
+    BZ_TT_Shutdown();
+    test_transport_block_asset_init(true);
+    ASSERT_EQ_INT(pthread_create(&initializer, NULL, transport_init_thread, NULL), 0);
+    test_transport_wait_for_asset_init();
+    ASSERT_EQ_INT(pthread_create(&shutdowner, NULL, transport_shutdown_thread, &shutdown_done), 0);
+    struct timespec tiny = { 0, 2L * 1000L * 1000L };
+    nanosleep(&tiny, NULL);
+    ASSERT(!atomic_load(&shutdown_done));
+    test_transport_block_asset_init(false);
+    ASSERT_EQ_INT(pthread_join(initializer, NULL), 0);
+    ASSERT_EQ_INT(pthread_join(shutdowner, NULL), 0);
+    ASSERT(test_transport_asset_terminal());
+    ASSERT_EQ_INT(BZ_TT_PostSelect(BZ_TABLETOP_ABI_VERSION, 0, &id, 1), BZ_TT_ERR_TERMINAL);
+    BZ_TT_Init();
 }
 
 /* --- Snapshot generation / immutability / ownership ---------------------- */
@@ -268,7 +297,9 @@ static void test_map_bounds_only_valid_when_refresh_prepped(void) {
 static void test_snapshot_reflects_entities_and_selection(void) {
     reset_all();
     cl.num_entities = 3;
-    cl.ents[0].current.number = 0; /* world/none entity; still copied verbatim */
+    cl.ents[0].current.number = 0; /* Empty model slot is not desktop-visible. */
+    cl.ents[0].current.model2 = 9;
+    cl.ents[0].current.image = 10;
     cl.ents[1].current.number = 1;
     cl.ents[1].current.class_id = 42;
     cl.ents[1].current.origin.x = 100.0f;
@@ -276,9 +307,11 @@ static void test_snapshot_reflects_entities_and_selection(void) {
     cl.ents[1].current.origin.z = 0.0f;
     cl.ents[1].current.player = 2;
     cl.ents[1].current.model = 7;
+    cl.ents[1].current.model2 = 12; /* One active slot remains one transport entity despite its render attachment. */
     cl.ents[1].selected = true;
     cl.ents[2].current.number = 2;
     cl.ents[2].current.class_id = 43;
+    cl.ents[2].current.model2 = 11; /* Attachments do not activate an empty base-model slot. */
 
     cl.selection.num_selected = 1;
     cl.selection.entity_nums[0] = 1;
@@ -286,11 +319,11 @@ static void test_snapshot_reflects_entities_and_selection(void) {
     BZ_TT_PublishSnapshotFromClient();
     const bzTTSnapshot_t *snap = BZ_TT_Latest();
     ASSERT_NOT_NULL(snap);
-    ASSERT_EQ_INT(BZ_TTSnapshot_EntityCount(snap), 3);
+    ASSERT_EQ_INT(BZ_TTSnapshot_EntityCount(snap), 1);
     ASSERT_EQ_INT(BZ_TTSnapshot_EntitiesOverflowCount(snap), 0);
 
     bzTTEntity_t ent;
-    ASSERT(BZ_TTSnapshot_EntityAt(snap, 1, &ent));
+    ASSERT(BZ_TTSnapshot_EntityAt(snap, 0, &ent));
     ASSERT_EQ_INT(ent.number, 1);
     ASSERT_EQ_INT(ent.class_id, 42);
     ASSERT_EQ_FLOAT(ent.origin_x, 100.0f, 0.01f);
@@ -298,7 +331,7 @@ static void test_snapshot_reflects_entities_and_selection(void) {
     ASSERT_EQ_INT(ent.player, 2);
     ASSERT_EQ_INT(ent.model, 7);
     ASSERT(ent.selected);
-    ASSERT(!BZ_TTSnapshot_EntityAt(snap, 3, &ent)); /* out of range */
+    ASSERT(!BZ_TTSnapshot_EntityAt(snap, 1, &ent)); /* Empty slots were excluded. */
 
     uint32_t selected_ids[BZ_TT_MAX_SELECTED_ENTITIES];
     uint32_t n = BZ_TTSnapshot_SelectedEntityIds(snap, selected_ids, BZ_TT_MAX_SELECTED_ENTITIES);
@@ -313,9 +346,14 @@ static void test_entity_overflow_is_reported_not_truncated_silently(void) {
     /* cl.num_entities can legitimately be as large as MAX_CLIENT_ENTITIES;
      * exceed the transport's BZ_TT_MAX_ENTITIES cap and confirm the excess
      * is reported via EntitiesOverflowCount(), not silently dropped. */
-    cl.num_entities = BZ_TT_MAX_ENTITIES + 5;
-    FOR_LOOP(i, cl.num_entities) {
+    cl.num_entities = MAX_CLIENT_ENTITIES;
+    FOR_LOOP(i, BZ_TT_MAX_ENTITIES) {
         cl.ents[i].current.number = (DWORD)i;
+        cl.ents[i].current.model = 1;
+    }
+    for (DWORD i = BZ_TT_MAX_ENTITIES + 100; i < BZ_TT_MAX_ENTITIES + 105; i++) {
+        cl.ents[i].current.number = i;
+        cl.ents[i].current.model = 1;
     }
 
     BZ_TT_PublishSnapshotFromClient();
@@ -671,6 +709,7 @@ void run_bz_tabletop_transport_tests(void) {
     RUN_TEST(test_post_before_init_is_rejected);
     RUN_TEST(test_shutdown_rejects_further_posts_but_keeps_outstanding_snapshots);
     RUN_TEST(test_init_after_shutdown_is_idempotent_restart);
+    RUN_TEST(test_asset_and_transport_lifecycle_are_atomic);
     RUN_TEST(test_generation_increments_monotonically_per_publish);
     RUN_TEST(test_retained_snapshot_is_immutable_across_a_later_publish);
     RUN_TEST(test_retain_and_release_are_reference_counted);

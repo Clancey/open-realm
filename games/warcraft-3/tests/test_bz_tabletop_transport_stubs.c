@@ -13,6 +13,7 @@
  * games/warcraft-3/tests/test_client_stubs.c's role for client/cl_scrn.c in
  * the desktop test-ui target).
  */
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,6 +35,9 @@ typedef struct {
 
 static mockCvar_t mock_cvars[32];
 #define MOCK_CVAR_COUNT (sizeof(mock_cvars) / sizeof(mock_cvars[0]))
+static pthread_mutex_t asset_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t asset_cond = PTHREAD_COND_INITIALIZER;
+static bool asset_block_init, asset_init_waiting, asset_terminal = true;
 
 void test_transport_stubs_set_cvar(LPCSTR name, LPCSTR value) {
     FOR_LOOP(i, MOCK_CVAR_COUNT) {
@@ -121,6 +125,41 @@ void test_transport_stubs_reset(void) {
     memset(mock_cvars, 0, sizeof(mock_cvars));
     memset(&g_test_world_bounds, 0, sizeof(g_test_world_bounds));
     g_test_unit_layout_count = 0;
+    pthread_mutex_lock(&asset_lock);
+    asset_block_init = asset_init_waiting = false; asset_terminal = true;
+    pthread_mutex_unlock(&asset_lock);
     cls.netchan.message.data = cls.netchan.message_buf;
     cls.netchan.message.maxsize = sizeof(cls.netchan.message_buf);
 }
+
+void test_transport_block_asset_init(bool block) {
+    pthread_mutex_lock(&asset_lock);
+    asset_block_init = block;
+    if (!block) pthread_cond_broadcast(&asset_cond);
+    pthread_mutex_unlock(&asset_lock);
+}
+void test_transport_wait_for_asset_init(void) {
+    pthread_mutex_lock(&asset_lock);
+    while (!asset_init_waiting) pthread_cond_wait(&asset_cond, &asset_lock);
+    pthread_mutex_unlock(&asset_lock);
+}
+bool test_transport_asset_terminal(void) {
+    bool terminal;
+    pthread_mutex_lock(&asset_lock); terminal = asset_terminal; pthread_mutex_unlock(&asset_lock);
+    return terminal;
+}
+
+/* Asset export has its own focused suite; these synchronized lifecycle stubs
+ * prove transport and asset transitions share one serialization boundary. */
+void BZ_TTA_Init(void) {
+    pthread_mutex_lock(&asset_lock);
+    asset_init_waiting = true;
+    pthread_cond_broadcast(&asset_cond);
+    while (asset_block_init) pthread_cond_wait(&asset_cond, &asset_lock);
+    asset_init_waiting = false; asset_terminal = false;
+    pthread_mutex_unlock(&asset_lock);
+}
+void BZ_TTA_Shutdown(void) {
+    pthread_mutex_lock(&asset_lock); asset_terminal = true; pthread_mutex_unlock(&asset_lock);
+}
+void BZ_TTA_PublishTerrainFromGame(void) {}

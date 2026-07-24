@@ -17,6 +17,7 @@
  * before doing anything that would be unsafe post-shutdown.
  */
 #include "bz_tabletop_transport.h"
+#include "bz_tabletop_assets.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -139,6 +140,8 @@ void BZ_TT_Init(void) {
     g_generation = 0;
     g_initialized = true;
     g_terminal = false;
+    /* One lock makes transport and asset lifecycle state externally atomic. */
+    BZ_TTA_Init();
     pthread_mutex_unlock(&g_lock);
     fprintf(stderr, "BZTabletopTransport: initialized, abi_version=%u\n", BZ_TABLETOP_ABI_VERSION);
 }
@@ -146,6 +149,7 @@ void BZ_TT_Init(void) {
 void BZ_TT_Shutdown(void) {
     pthread_mutex_lock(&g_lock);
     g_terminal = true;
+    BZ_TTA_Shutdown();
     pthread_mutex_unlock(&g_lock);
     fprintf(stderr, "BZTabletopTransport: shutdown (terminal)\n");
 }
@@ -478,6 +482,9 @@ static void BuildEntity(bzTTEntity_t *out, centity_t const *ce) {
 static void BuildEntities(bzTTSnapshot_t *snap) {
     uint32_t written = 0, overflow = 0;
     for (DWORD i = 0; i < cl.num_entities && i < MAX_CLIENT_ENTITIES; i++) {
+        /* Match CL_AddEntities: zero-model slots are inactive, not dropped entities. */
+        if (!cl.ents[i].current.model)
+            continue;
         if (written < BZ_TT_MAX_ENTITIES) {
             BuildEntity(&snap->entities[written], &cl.ents[i]);
             written++;
@@ -596,4 +603,5 @@ void BZ_TT_PublishSnapshotFromClient(void) {
         SnapshotReleaseLocked(old);
     }
     pthread_mutex_unlock(&g_lock);
+    BZ_TTA_PublishTerrainFromGame();
 }
