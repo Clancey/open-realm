@@ -1,12 +1,131 @@
-# visionOS tabletop runtime
+# visionOS tabletop runtime and native shell
 
 Layer 1 establishes a callable, statically-linked, visionOS-compatible
 Warcraft III engine runtime that a later layer can host from Swift/RealityKit
 without disturbing the desktop `openwarcraft3`/`opensc2` executables. This
-layer does **not** implement the SwiftUI/RealityKit tabletop UI, gameplay
-controls, multiplayer, or a later "snapshot bridge" — those are separate,
-later layers. A parallel data lane supplies the local-only build contract for
-staging legally owned Warcraft III MPQs; no retail data is committed.
+layer does **not** implement asset export/MPQ bundling, gameplay controls,
+multiplayer, or a snapshot bridge. The data layer supplies the local-only build
+contract for staging legally owned Warcraft III MPQs; no retail data is
+committed.
+
+The native shell under `platform/apple/visionos/tabletop/app/` adds a SwiftUI
+launcher and RealityKit mixed immersive board. Its pure Swift transport seam
+supports deterministic procedural fixtures and a thin live actor over the
+frozen Layer-2 C ABI plus the existing Objective-C++ lifecycle host. Live mode
+copies retained C snapshots into Swift values, releases the C snapshot, then
+publishes to RealityKit; it never exposes engine-owned pointers to the UI.
+
+## Native Swift shell seam
+
+```
+TabletopSnapshotTransport (pure Swift protocol)
+        +-- FixtureSnapshotTransport (deterministic actor)
+        +-- LiveTabletopTransport (Layer-2 C ABI + lifecycle host)
+                         |
+TabletopGenerationDeduplicator (~30 Hz poll)
+        |
+TabletopSnapshotConverter (value copy + placement)
+        |
+TabletopSceneState (pure reconciliation plan)
+        |
+RealityTabletopReconciler (RealityKit ownership)
+```
+
+- Snapshot/model/reducer/placement/reconciliation/gesture files do not import
+  SwiftUI or RealityKit.
+- `TabletopSnapshotTransport.poll()` returns copied Swift values. The session
+  polls at approximately 30 Hz, deduplicates by generation, and converts into
+  a separate render snapshot before publication on the main actor.
+- `FixtureSnapshotTransport` emits at most 49 terrain tiles and three entities.
+  It advances generation every six polls so both deduplication paths run.
+- `LiveTabletopTransport` starts/stops `BZTabletopBridge`, retains with
+  `BZ_TT_Latest()`, validates `BZ_TABLETOP_ABI_VERSION`, and copies connection,
+  map, player/resource, selection, every entity POD field, fog planes, and
+  nested unit-layout/button/inventory/queue strings and arrays into
+  framework-free Swift values. It records ABI overflow and duplicate slot IDs,
+  surfaces their current values as a non-fatal diagnostic, and a tested lease
+  helper always releases before returning or throwing.
+  Typed `TabletopCommand` values call only the five validated `BZ_TT_Post*`
+  entry points. Tap selection uses the ABI's documented generation-zero bypass
+  because the engine publishes around 60 Hz while rendering polls around 30 Hz;
+  the Swift session ID still rejects commands crossing lifecycle restarts.
+- The launcher opens the `tabletop` mixed `ImmersiveSpace` automatically. It
+  first starts the selected transport and waits up to three cancellable seconds
+  for an ABI-validated snapshot, then opens the space. It dismisses its window
+  only after `.opened`; missing data, startup, ABI, timeout, cancellation, and
+  open failures retain an actionable Retry UI. Runtime/queue failures offer a
+  return to that launcher from the immersive error panel.
+- RealityKit owns the visible surface. SDL is neither a visible surface nor a
+  scene delegate on this lane.
+
+Live mode is the production default. `BZ_TABLETOP_DATA_PATH` defaults to the
+app's `Resources/Warcraft III` directory and `BZ_TABLETOP_MAP` defaults to
+`Human02`; an explicit `BZ_TABLETOP_CONNECT` without a map selects remote mode.
+Set `BZ_TABLETOP_MODE=fixture` only for deterministic tests.
+Preflight follows the engine's real data rules and filesystem metadata: it
+accepts a regular MPQ file, or the exact root-relative loose
+`Scripts/common.j` plus a regular `.w3m`/`.w3x` for local-map startup
+(`common.j` alone is sufficient for a remote connect). Arbitrary nonempty
+directories are rejected in the launcher rather than producing a fake empty
+live session. An unknown mode is surfaced as an error, never silently demoted
+to fixtures. Production builds invoke `wc3_data.sh stage` and fail unless
+`${BZ_WC3_DATA_DIR:-$HOME/Downloads/Warcraft III}` contains exactly
+`War3.mpq`, `War3x.mpq`, and `War3xLocal.mpq`; the bundle verifier requires
+exactly those three files under `Resources/Warcraft III`. An optional
+`BZ_TABLETOP_RESOURCE_HOOK` remains available for non-MPQ future resources
+after that required stage.
+
+`LiveTabletopTransport` uses the append-only
+`BZ_TTSnapshot_ConfigStringCount()` accessor and copies every slot in
+`[0, count)` before releasing the retained snapshot. Within that documented
+range, `BZ_TTSnapshot_ConfigString()` returning `false` becomes an explicit
+empty Swift entry. The shell never imports or guesses `MAX_CONFIGSTRINGS`.
+
+### Production shell build and tests
+
+```sh
+make test-visionos-tabletop-host       # pure Swift executable tests on macOS
+make visionos-tabletop-xrsimulator     # arm64 xrsimulator 2.0 app, ad-hoc signed
+make visionos-tabletop-xros            # arm64 xros 2.0 app, unsigned
+make visionos-tabletop                 # all three gates
+make visionos-tabletop-simulator-acceptance # disposable-clone live MPQ gate
+```
+
+Host coverage includes launcher reduction, mode selection, lifecycle mapping,
+generation deduplication, fixture queue hit/full/stale-session paths, command
+lowering/error mapping, world bounds/overflow, duplicate-safe reconciliation,
+gesture terminal suppression, polling cancellation, first-snapshot timeout
+plumbing, complete configstring-slot copying, product identity, and snapshot
+release on copy success/failure. `test-visionos-wc3-data` separately covers the
+seven source/staging/missing-data/symlink/interruption contracts.
+
+The app bundle is
+`build/visionos/tabletop/<platform>/OpenRealmTabletop.app` with bundle ID
+`org.openrealm.visionos.tabletop` and executable `OpenRealmTabletop`.
+`verify-bundle.sh` rejects wrong deployment/device
+metadata, missing indirect-input/multiple-scene/hand/world-sensing declarations,
+SDL scene delegates, missing/extra/symlinked MPQs, embedded or developer-path dynamic
+frameworks, absolute developer paths, desktop identity collisions, wrong Mach-O
+platform or minimum OS, incorrect signing/identifier binding, and non-arm64
+output. It also requires the linked lifecycle class, snapshot getter,
+configstring-count accessor, and typed select-post symbols. No Xcode project is
+used.
+
+`launch-tabletop-simulator.sh` clones only a shutdown Apple Vision Pro device,
+boots that disposable clone with a 120-second bound, installs identical signed
+code, and stages the same three real MPQs into the clone's private app-data
+container through `wc3_data.sh`. This avoids an unbounded CoreSimulator import
+of the roughly 717 MB sealed production bundle without weakening either bundle
+gate. It launches with `SIMCTL_CHILD_*`, captures stdout/stderr directly,
+requires five seconds of residency plus transport initialization, first
+snapshot, and `Human02` begin evidence, then terminates the app and deletes the
+clone. It never addresses `booted` or takes over the user's active simulator.
+
+The direct linker embeds the generated plist in `__TEXT,__info_plist` before
+signing. The verifier requires that section, an exact signing identifier, and
+`codesign --verify --deep --strict`; modifying the external plist after signing
+then makes strict verification fail even though current `codesign -d` output
+describes this direct-toolchain bundle as `Info.plist=not bound`.
 
 ## Architecture summary
 
@@ -298,39 +417,34 @@ output, or eventually running a built binary):
   cancellable — never an unbounded blocking wait — and must capture that
   process's `stderr` directly (e.g. explicit `2>` redirection to a file, or
   inheriting the caller's own stream) rather than discarding it, so a
-  failure is diagnosable instead of silent. No such process-launch
-  verification exists yet in this layer (`bridge-link-smoke` is built but
-  intentionally never run — see above); this note is guidance for the
-  layer that eventually adds one.
+  failure is diagnosable instead of silent. The native shell acceptance
+  harness follows this contract; `bridge-link-smoke` remains a link-only gate.
 
 ## What this layer does not do
 
-- No SwiftUI/RealityKit UI (later layer).
-- No snapshot bridge / entity-state serialization (later layer).
-- No proprietary Warcraft III data in source control. The data helper only
-  stages locally owned MPQs into a caller-owned build directory; this layer
-  still does not create, sign, or launch an app bundle.
-- No gameplay input/controls and no multiplayer/networking beyond what
-  `common/net.c` already provides headlessly.
+- No raw terrain data in the live ABI: fixture mode renders its procedural
+  board, while live mode renders copied entities without inventing terrain.
+- No proprietary Warcraft III data in source control. The data helper stages
+  exactly the required locally owned MPQs into a caller-owned build directory;
+  fixture mode does not silently replace missing production data.
+- Tap selection posts a typed command in both modes. Dragging remains local
+  placement scaffolding until an authoritative world-point interaction design
+  lands; it does not fabricate engine coordinates.
 - No SDL/OpenGL window, no SDL input polling, no Xcode project.
-- No audio: `sound/s_sound.c` is not linked into the tabletop archive at
-  all (see `platform/apple/visionos/tabletop/null/cl_null.c`'s header
-  comment) — not even a null/dummy backend existed yet in Layer 1. *(Layer 2
-  adds an explicit, named, log-once-only no-op audio backend,
-  `platform/apple/visionos/tabletop/client/s_tabletop_null.c` — see the
-  "Layer 2" section below. This bullet describes the original Layer 1-only
-  state.)*
-- No code signing: the `xros` (device) static targets are deliberately
-  unsigned. Producing a signed, installable device build is an external
-  gate (a valid Apple provisioning profile/signing identity) outside this
-  layer's scope — see the `xros`/`xros-bridge` build notes above.
+- No audio output: Layer 2 supplies the explicit, log-once no-op backend
+  `platform/apple/visionos/tabletop/client/s_tabletop_null.c`.
+- No device code signing: the `xros` static targets and production app are
+  deliberately unsigned; the xrsimulator app is ad-hoc signed.
+  Producing an installable device build requires an external provisioning
+  profile/signing identity.
+
 # Layer 2: real headless client + snapshot/command transport
 
 Layer 2 replaces Layer 1's link-smoke-only null client with the **real**
 `client/*.c` networking/parse/state path, and adds
 `platform/bridge/bz_tabletop_transport.{h,c}` — a pure C, versioned,
-Objective-C/Swift/SDL/RealityKit-free ABI that a later native Swift/
-RealityKit host imports directly (or via a bridging header) to read
+Objective-C/Swift/SDL/RealityKit-free ABI that the native shell above imports
+through its local module map to read
 authoritative snapshots and post typed commands. It still does **not**
 implement Swift/SwiftUI/RealityKit, app creation/signing, asset decoding/export,
 visible rendering, audio, menus, or multiplayer — those remain later layers.

@@ -206,3 +206,25 @@ $(foreach t,$(BZ_XR_TARGETS),$(eval $(call bz_xr_bridge_rules,$(t))))
 
 .PHONY: visionos-bridge
 visionos-bridge: xrsimulator-bridge xros-bridge
+
+# Native SwiftUI/RealityKit shell with live production mode, explicit fixture
+# tests, and a thin adapter over the Layer-2 lifecycle/transport archives.
+BZ_XR_TABLETOP_SCRIPTS := platform/apple/visionos/tabletop/scripts
+
+.PHONY: test-visionos-tabletop-host
+test-visionos-tabletop-host:
+	@$(BZ_XR_TABLETOP_SCRIPTS)/test-host.sh
+
+.PHONY: visionos-tabletop-xrsimulator
+visionos-tabletop-xrsimulator: xrsimulator-bridge
+	@$(BZ_XR_TABLETOP_SCRIPTS)/build-tabletop.sh xrsimulator
+
+.PHONY: visionos-tabletop-xros
+visionos-tabletop-xros: xros-bridge
+	@$(BZ_XR_TABLETOP_SCRIPTS)/build-tabletop.sh xros
+.PHONY: visionos-tabletop
+visionos-tabletop: test-visionos-tabletop-host visionos-tabletop-xrsimulator visionos-tabletop-xros
+
+.PHONY: visionos-tabletop-simulator-acceptance
+visionos-tabletop-simulator-acceptance: visionos-tabletop-xrsimulator
+	@$(BZ_XR_TABLETOP_SCRIPTS)/launch-tabletop-simulator.sh
