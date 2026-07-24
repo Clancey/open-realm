@@ -43,7 +43,8 @@ RealityTabletopReconciler (RealityKit ownership)
   map, player/resource, selection, every entity POD field, fog planes, and
   nested unit-layout/button/inventory/queue strings and arrays into
   framework-free Swift values. It records ABI overflow and duplicate slot IDs,
-  and a tested lease helper always releases before returning or throwing.
+  surfaces their current values as a non-fatal diagnostic, and a tested lease
+  helper always releases before returning or throwing.
   Typed `TabletopCommand` values call only the five validated `BZ_TT_Post*`
   entry points. Tap selection uses the ABI's documented generation-zero bypass
   because the engine publishes around 60 Hz while rendering polls around 30 Hz;
@@ -57,59 +58,68 @@ RealityTabletopReconciler (RealityKit ownership)
 - RealityKit owns the visible surface. SDL is neither a visible surface nor a
   scene delegate on this lane.
 
-Fixture mode is the default. Set `BZ_TABLETOP_MODE=live` to start the engine;
-`BZ_TABLETOP_DATA_PATH` defaults to the app's `Resources/` directory, while
-optional `BZ_TABLETOP_MAP` and `BZ_TABLETOP_CONNECT` values become the normal
-engine startup arguments. Live mode requires either a map or connect target.
+Live mode is the production default. `BZ_TABLETOP_DATA_PATH` defaults to the
+app's `Resources/Warcraft III` directory and `BZ_TABLETOP_MAP` defaults to
+`Human02`; an explicit `BZ_TABLETOP_CONNECT` without a map selects remote mode.
+Set `BZ_TABLETOP_MODE=fixture` only for deterministic tests.
 Preflight follows the engine's real data rules and filesystem metadata: it
 accepts a regular MPQ file, or the exact root-relative loose
 `Scripts/common.j` plus a regular `.w3m`/`.w3x` for local-map startup
 (`common.j` alone is sufficient for a remote connect). Arbitrary nonempty
 directories are rejected in the launcher rather than producing a fake empty
 live session. An unknown mode is surfaced as an error, never silently demoted
-to fixtures. The data lane may provide an executable
-`BZ_TABLETOP_RESOURCE_HOOK`; `build-tabletop.sh` calls it with the bundle's
-`Resources/` directory. The default build copies no MPQs or other private game
-data.
+to fixtures. Production builds invoke `wc3_data.sh stage` and fail unless
+`${BZ_WC3_DATA_DIR:-$HOME/Downloads/Warcraft III}` contains exactly
+`War3.mpq`, `War3x.mpq`, and `War3xLocal.mpq`; the bundle verifier requires
+exactly those three files under `Resources/Warcraft III`. An optional
+`BZ_TABLETOP_RESOURCE_HOOK` remains available for non-MPQ future resources
+after that required stage.
 
-### Frozen ABI configstring enumeration gap
+`LiveTabletopTransport` uses the append-only
+`BZ_TTSnapshot_ConfigStringCount()` accessor and copies every slot in
+`[0, count)` before releasing the retained snapshot. Within that documented
+range, `BZ_TTSnapshot_ConfigString()` returning `false` becomes an explicit
+empty Swift entry. The shell never imports or guesses `MAX_CONFIGSTRINGS`.
 
-Layer 3 does not fabricate a configstring bound. The frozen
-`BZ_TTSnapshot_ConfigString(snap, index, out, cap)` accessor exposes neither a
-count nor `MAX_CONFIGSTRINGS`, and `false` means either an empty valid slot or
-an out-of-range index. The shell therefore cannot enumerate all configstrings
-before releasing the retained snapshot without guessing a private engine
-constant. `TabletopSnapshot.configStrings` remains empty until Layer 2 gains an
-authorized append-only count/bound accessor; every other enumerable public
-snapshot field is copied now.
-
-### Fixture-shell build and tests
+### Production shell build and tests
 
 ```sh
 make test-visionos-tabletop-host       # pure Swift executable tests on macOS
 make visionos-tabletop-xrsimulator     # arm64 xrsimulator 2.0 app, ad-hoc signed
 make visionos-tabletop-xros            # arm64 xros 2.0 app, unsigned
 make visionos-tabletop                 # all three gates
+make visionos-tabletop-simulator-acceptance # disposable-clone live MPQ gate
 ```
 
 Host coverage includes launcher reduction, mode selection, lifecycle mapping,
 generation deduplication, fixture queue hit/full/stale-session paths, command
 lowering/error mapping, world bounds/overflow, duplicate-safe reconciliation,
 gesture terminal suppression, polling cancellation, first-snapshot timeout
-plumbing, and snapshot release on copy success/failure.
+plumbing, complete configstring-slot copying, product identity, and snapshot
+release on copy success/failure. `test-visionos-wc3-data` separately covers the
+seven source/staging/missing-data/symlink/interruption contracts.
 
 The app bundle is
-`build/visionos/tabletop/<platform>/OpenRealmTabletopFixture.app` with bundle
-ID `org.openrealm.tabletop.fixture` and executable
-`OpenRealmTabletopFixture`. `verify-bundle.sh` rejects wrong deployment/device
+`build/visionos/tabletop/<platform>/OpenRealmTabletop.app` with bundle ID
+`org.openrealm.visionos.tabletop` and executable `OpenRealmTabletop`.
+`verify-bundle.sh` rejects wrong deployment/device
 metadata, missing indirect-input/multiple-scene/hand/world-sensing declarations,
-SDL scene delegates, private MPQs, embedded or developer-path dynamic
+SDL scene delegates, missing/extra/symlinked MPQs, embedded or developer-path dynamic
 frameworks, absolute developer paths, desktop identity collisions, wrong Mach-O
 platform or minimum OS, incorrect signing/identifier binding, and non-arm64
-output. It also requires the linked lifecycle class, snapshot getter, and typed
-select-post symbols. No Xcode project is used. There is currently no
-simulator launch harness: choosing or booting a Simulator device from a general
-build target cannot guarantee isolation from the user's active simulator.
+output. It also requires the linked lifecycle class, snapshot getter,
+configstring-count accessor, and typed select-post symbols. No Xcode project is
+used.
+
+`launch-tabletop-simulator.sh` clones only a shutdown Apple Vision Pro device,
+boots that disposable clone with a 120-second bound, installs identical signed
+code, and stages the same three real MPQs into the clone's private app-data
+container through `wc3_data.sh`. This avoids an unbounded CoreSimulator import
+of the roughly 717 MB sealed production bundle without weakening either bundle
+gate. It launches with `SIMCTL_CHILD_*`, captures stdout/stderr directly,
+requires five seconds of residency plus transport initialization, first
+snapshot, and `Human02` begin evidence, then terminates the app and deletes the
+clone. It never addresses `booted` or takes over the user's active simulator.
 
 The direct linker embeds the generated plist in `__TEXT,__info_plist` before
 signing. The verifier requires that section, an exact signing identifier, and
@@ -407,10 +417,8 @@ output, or eventually running a built binary):
   cancellable — never an unbounded blocking wait — and must capture that
   process's `stderr` directly (e.g. explicit `2>` redirection to a file, or
   inheriting the caller's own stream) rather than discarding it, so a
-  failure is diagnosable instead of silent. No such process-launch
-  verification exists yet in this layer (`bridge-link-smoke` is built but
-  intentionally never run — see above); this note is guidance for the
-  layer that eventually adds one.
+  failure is diagnosable instead of silent. The native shell acceptance
+  harness follows this contract; `bridge-link-smoke` remains a link-only gate.
 
 ## What this layer does not do
 
@@ -425,8 +433,8 @@ output, or eventually running a built binary):
 - No SDL/OpenGL window, no SDL input polling, no Xcode project.
 - No audio output: Layer 2 supplies the explicit, log-once no-op backend
   `platform/apple/visionos/tabletop/client/s_tabletop_null.c`.
-- No device code signing: the `xros` static targets and fixture app are
-  deliberately unsigned; the xrsimulator fixture app is ad-hoc signed.
+- No device code signing: the `xros` static targets and production app are
+  deliberately unsigned; the xrsimulator app is ad-hoc signed.
   Producing an installable device build requires an external provisioning
   profile/signing identity.
 

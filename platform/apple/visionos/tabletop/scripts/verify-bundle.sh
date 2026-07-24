@@ -3,6 +3,9 @@ set -eu
 
 PLATFORM=${1:-}
 APP=${2:-}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../.." && pwd)
+WC3_DATA_TOOL="$ROOT/platform/apple/visionos/scripts/wc3_data.sh"
 case "$PLATFORM" in
     xrsimulator) EXPECTED_PLATFORM=XRSimulator; EXPECTED_MACHO_PLATFORM=VISIONOSSIMULATOR ;;
     xros) EXPECTED_PLATFORM=XROS; EXPECTED_MACHO_PLATFORM=VISIONOS ;;
@@ -30,8 +33,8 @@ expect_plist() {
     fi
 }
 
-expect_plist CFBundleExecutable OpenRealmTabletopFixture
-expect_plist CFBundleIdentifier org.openrealm.tabletop.fixture
+expect_plist CFBundleExecutable OpenRealmTabletop
+expect_plist CFBundleIdentifier org.openrealm.visionos.tabletop
 expect_plist CFBundlePackageType APPL
 expect_plist MinimumOSVersion 2.0
 expect_plist UIDeviceFamily:0 7
@@ -71,16 +74,14 @@ if find "$APP" -type d -name '*.framework' -print -quit | grep -q .; then
     echo "embedded dynamic frameworks are prohibited" >&2
     exit 1
 fi
-if find "$APP" -type f -iname '*.mpq' -print -quit | grep -q .; then
-    echo "private MPQs are prohibited in the fixture shell bundle" >&2
-    exit 1
-fi
+"$WC3_DATA_TOOL" verify-bundle "$APP"
 if /usr/bin/strings "$BIN" | grep -Eq '/Users/|/Volumes/|/Applications/Xcode'; then
     echo "absolute developer path found in tabletop executable" >&2
     exit 1
 fi
 xcrun nm "$BIN" > "$TMP/symbols"
-for SYMBOL in _BZ_TT_Latest _BZ_TT_PostSelect '_OBJC_CLASS_$_BZTabletopBridge'; do
+for SYMBOL in _BZ_TT_Latest _BZ_TTSnapshot_ConfigStringCount _BZ_TT_PostSelect \
+        '_OBJC_CLASS_$_BZTabletopBridge'; do
     if ! grep -Fq "$SYMBOL" "$TMP/symbols"; then
         echo "live tabletop symbol is not linked: $SYMBOL" >&2
         exit 1
@@ -103,7 +104,7 @@ if [ "$PLATFORM" = xrsimulator ]; then
         exit 1
     fi
 elif codesign -d "$APP" > "$TMP/codesign" 2>&1; then
-    echo "xros fixture bundle must remain unsigned" >&2
+    echo "xros tabletop bundle must remain unsigned" >&2
     exit 1
 fi
 

@@ -3,21 +3,25 @@ enum TabletopRuntimeMode: Equatable, Sendable {
     case live(dataPath: String, map: String?, connect: String?)
 }
 
+enum TabletopProduct {
+    static let bundleIdentifier = "org.openrealm.visionos.tabletop"
+    static let executable = "OpenRealmTabletop"
+    static let bundledDataRelativePath = "Resources/Warcraft III"
+    static let defaultMap = "Human02"
+}
+
 enum TabletopRuntimeModeResolver {
-    static func resolve(environment: [String: String], resourcePath: String?) throws -> TabletopRuntimeMode {
-        switch environment["BZ_TABLETOP_MODE"] ?? "fixture" {
+    static func resolve(environment: [String: String], bundlePath: String?) throws -> TabletopRuntimeMode {
+        switch environment["BZ_TABLETOP_MODE"] ?? "live" {
         case "fixture": return .fixture
         case "live":
-            guard let dataPath = environment["BZ_TABLETOP_DATA_PATH"] ?? resourcePath, !dataPath.isEmpty else {
+            guard let dataPath = nonEmpty(environment["BZ_TABLETOP_DATA_PATH"]) ??
+                    bundlePath.map({ $0 + "/" + TabletopProduct.bundledDataRelativePath }) else {
                 throw TabletopTransportError.configuration(
-                    "Live mode requires BZ_TABLETOP_DATA_PATH or an app Resources directory")
+                    "Live mode requires bundled Warcraft III data or BZ_TABLETOP_DATA_PATH")
             }
-            let map = nonEmpty(environment["BZ_TABLETOP_MAP"])
             let connect = nonEmpty(environment["BZ_TABLETOP_CONNECT"])
-            guard map != nil || connect != nil else {
-                throw TabletopTransportError.configuration(
-                    "Live mode requires BZ_TABLETOP_MAP or BZ_TABLETOP_CONNECT")
-            }
+            let map = nonEmpty(environment["BZ_TABLETOP_MAP"]) ?? (connect == nil ? TabletopProduct.defaultMap : nil)
             return .live(dataPath: dataPath, map: map, connect: connect)
         case let mode: throw TabletopTransportError.configuration("Unknown BZ_TABLETOP_MODE '\(mode)'")
         }
@@ -26,6 +30,15 @@ enum TabletopRuntimeModeResolver {
     private static func nonEmpty(_ value: String?) -> String? {
         guard let value, !value.isEmpty else { return nil }
         return value
+    }
+}
+
+enum TabletopConfigStringCopy {
+    static func copy(count: UInt32, valueAt: (UInt32) -> String?) -> [UInt32: String] {
+        var values: [UInt32: String] = [:]
+        values.reserveCapacity(Int(count))
+        for index in 0..<count { values[index] = valueAt(index) ?? "" }
+        return values
     }
 }
 
@@ -63,6 +76,13 @@ enum TabletopSnapshotValueValidator {
         guard buttons <= 12, inventory <= 6, queue <= 7 else {
             throw TabletopTransportError.malformedSnapshot("unit layout counts exceed ABI bounds")
         }
+    }
+}
+
+enum TabletopSnapshotDiagnostics {
+    static func message(overflow: UInt32, duplicates: UInt32) -> String? {
+        guard overflow > 0 || duplicates > 0 else { return nil }
+        return "Snapshot capped \(overflow) entities and ignored \(duplicates) duplicate IDs."
     }
 }
 

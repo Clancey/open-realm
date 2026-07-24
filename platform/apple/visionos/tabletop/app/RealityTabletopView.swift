@@ -162,6 +162,10 @@ struct TabletopImmersiveView: View {
                 }
                 .padding()
                 .glassBackgroundEffect()
+            } else if let diagnostic = model.snapshotDiagnostic {
+                Text(diagnostic)
+                    .padding()
+                    .glassBackgroundEffect()
             }
         }
     }

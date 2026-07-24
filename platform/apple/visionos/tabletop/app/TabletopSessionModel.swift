@@ -1,9 +1,11 @@
+import Foundation
 import SwiftUI
 
 @MainActor
 final class TabletopSessionModel: ObservableObject {
     @Published private(set) var renderSnapshot = TabletopRenderSnapshot.empty
     @Published private(set) var errorMessage: String?
+    @Published private(set) var snapshotDiagnostic: String?
 
     private let transport: any TabletopSnapshotTransport
     private let commandTransport: (any TabletopCommandTransport)?
@@ -33,12 +35,15 @@ final class TabletopSessionModel: ObservableObject {
         commandEpoch &+= 1
         renderSnapshot = .empty
         errorMessage = nil
+        snapshotDiagnostic = nil
         deduplicator = TabletopGenerationDeduplicator()
         do {
             try await transport.start()
             let first = try await TabletopPolling.firstSnapshot(
                 transport: transport, attempts: 90, sleep: { try await Task.sleep(for: .milliseconds(33)) })
             consume(first)
+            FileHandle.standardError.write(Data(
+                "OpenRealmTabletop: first snapshot generation \(first.generation), map \(first.mapName ?? "<none>")\n".utf8))
             phase = .running
         } catch {
             await transport.stop()
@@ -66,10 +71,8 @@ final class TabletopSessionModel: ObservableObject {
         guard let fresh = deduplicator.accept(snapshot) else { return }
         // The transport has already released all C storage before this main-actor conversion.
         renderSnapshot = TabletopSnapshotConverter.convert(fresh)
-        if fresh.entitiesOverflowCount > 0 || fresh.duplicateEntityCount > 0 {
-            errorMessage = "Snapshot capped \(fresh.entitiesOverflowCount) entities and ignored " +
-                "\(fresh.duplicateEntityCount) duplicate IDs."
-        }
+        snapshotDiagnostic = TabletopSnapshotDiagnostics.message(
+            overflow: fresh.entitiesOverflowCount, duplicates: fresh.duplicateEntityCount)
     }
 
     func select(entityID: UInt64) {
@@ -87,6 +90,7 @@ final class TabletopSessionModel: ObservableObject {
     func stop() async {
         commandEpoch &+= 1
         renderSnapshot = .empty
+        snapshotDiagnostic = nil
         guard let pollingTask else {
             await transport.stop()
             phase = .idle

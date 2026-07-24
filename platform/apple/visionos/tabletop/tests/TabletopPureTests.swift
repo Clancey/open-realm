@@ -11,6 +11,8 @@ enum TabletopPureTests {
         testLifecycleStateMapping()
         testRuntimeModeSelection()
         testDataPreflight()
+        testConfigStringCopy()
+        testSnapshotDiagnostics()
         testSnapshotValueValidation()
         testCommandLowering()
         testGestureTerminalSuppression()
@@ -126,30 +128,52 @@ enum TabletopPureTests {
 
     private static func testRuntimeModeSelection() {
         do {
-            let fixture = try TabletopRuntimeModeResolver.resolve(environment: [:], resourcePath: "/resources")
+            let liveDefault = try TabletopRuntimeModeResolver.resolve(environment: [:], bundlePath: "/app")
+            let fixture = try TabletopRuntimeModeResolver.resolve(
+                environment: ["BZ_TABLETOP_MODE": "fixture"], bundlePath: "/app")
             let live = try TabletopRuntimeModeResolver.resolve(
                 environment: ["BZ_TABLETOP_MODE": "live", "BZ_TABLETOP_DATA_PATH": "/data",
-                              "BZ_TABLETOP_MAP": "map.w3m"], resourcePath: "/resources")
-            expect(fixture == .fixture, "fixture mode is the explicit default")
+                              "BZ_TABLETOP_MAP": "map.w3m"], bundlePath: "/app")
+            expect(liveDefault == .live(
+                dataPath: "/app/Resources/Warcraft III", map: "Human02", connect: nil),
+                "production defaults to bundled live data and the standard acceptance map")
+            expect(fixture == .fixture, "fixture mode requires explicit selection")
             expect(live == .live(dataPath: "/data", map: "map.w3m", connect: nil),
                 "live mode lowers environment settings without fixture fallback")
+            expect(TabletopProduct.bundleIdentifier == "org.openrealm.visionos.tabletop" &&
+                   TabletopProduct.executable == "OpenRealmTabletop",
+                   "framework-free product constants use the production identity")
             do {
                 _ = try TabletopRuntimeModeResolver.resolve(
-                    environment: ["BZ_TABLETOP_MODE": "invalid"], resourcePath: "/resources")
+                    environment: ["BZ_TABLETOP_MODE": "invalid"], bundlePath: "/app")
                 expect(false, "invalid runtime mode was silently accepted")
             } catch TabletopTransportError.configuration {
                 expect(true, "invalid runtime mode is actionable")
             }
-            do {
-                _ = try TabletopRuntimeModeResolver.resolve(
-                    environment: ["BZ_TABLETOP_MODE": "live"], resourcePath: "/resources")
-                expect(false, "targetless live mode was accepted")
-            } catch TabletopTransportError.configuration {
-                expect(true, "live mode requires an actionable map or connect target")
-            }
+            let remote = try TabletopRuntimeModeResolver.resolve(
+                environment: ["BZ_TABLETOP_CONNECT": "127.0.0.1"], bundlePath: "/app")
+            expect(remote == .live(
+                dataPath: "/app/Resources/Warcraft III", map: nil, connect: "127.0.0.1"),
+                "explicit remote mode does not also start the default local map")
         } catch {
             expect(false, "runtime mode selection unexpectedly failed: \(error)")
         }
+    }
+
+    private static func testConfigStringCopy() {
+        let values = TabletopConfigStringCopy.copy(count: 3) { index in
+            index == 1 ? "Human02" : nil
+        }
+        expect(values.count == 3 && values[0] == "" && values[1] == "Human02" && values[2] == "",
+               "configstring count copies every slot and preserves valid empty entries")
+    }
+
+    private static func testSnapshotDiagnostics() {
+        expect(TabletopSnapshotDiagnostics.message(overflow: 0, duplicates: 0) == nil,
+               "clean snapshots clear non-fatal diagnostics")
+        expect(TabletopSnapshotDiagnostics.message(overflow: 7, duplicates: 2) ==
+               "Snapshot capped 7 entities and ignored 2 duplicate IDs.",
+               "snapshot loss remains visible without becoming a fatal transport error")
     }
 
     private static func testDataPreflight() {

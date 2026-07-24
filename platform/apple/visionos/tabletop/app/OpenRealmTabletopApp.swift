@@ -9,7 +9,7 @@ struct OpenRealmTabletopApp: App {
         let environment = ProcessInfo.processInfo.environment
         do {
             switch try TabletopRuntimeModeResolver.resolve(
-                environment: environment, resourcePath: Bundle.main.resourcePath) {
+                environment: environment, bundlePath: Bundle.main.bundlePath) {
             case .fixture:
                 let fixture = FixtureSnapshotTransport()
                 _model = StateObject(wrappedValue: TabletopSessionModel(
@@ -18,10 +18,10 @@ struct OpenRealmTabletopApp: App {
                 guard TabletopDataPreflight.isUsable(
                     entries: try Self.dataEntries(dataPath), localMapRequired: map != nil) else {
                     throw TabletopTransportError.configuration(
-                        "Live data path '\(dataPath)' is missing or empty; stage data through " +
-                        "BZ_TABLETOP_RESOURCE_HOOK or set BZ_TABLETOP_DATA_PATH")
+                        "Live data path '\(dataPath)' is missing required Warcraft III data; " +
+                        "run the production bundle staging target or set BZ_TABLETOP_DATA_PATH")
                 }
-                var arguments = ["OpenRealmTabletopFixture", "-data", dataPath]
+                var arguments = [TabletopProduct.executable, "-data", dataPath]
                 if let map { arguments += ["+map", map] }
                 if let connect { arguments += ["+connect", connect] }
                 let live = LiveTabletopTransport(arguments: arguments)

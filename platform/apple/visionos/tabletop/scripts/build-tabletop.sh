@@ -23,11 +23,12 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../.." && pwd)
 TABLETOP="$ROOT/platform/apple/visionos/tabletop"
 BUILD="$ROOT/build/visionos/tabletop/$PLATFORM"
-APP="$BUILD/OpenRealmTabletopFixture.app"
-EXECUTABLE=OpenRealmTabletopFixture
+APP="$BUILD/OpenRealmTabletop.app"
+EXECUTABLE=OpenRealmTabletop
 SDK_PATH=$(xcrun --sdk "$SDK" --show-sdk-path)
 ENGINE="$ROOT/build/lib/visionos/$PLATFORM/libopenwarcraft3-engine.a"
 BRIDGE="$ROOT/build/lib/visionos/$PLATFORM/libopenwarcraft3-bridge.a"
+WC3_DATA_TOOL="$ROOT/platform/apple/visionos/scripts/wc3_data.sh"
 
 if [ ! -f "$ENGINE" ] || [ ! -f "$BRIDGE" ]; then
     echo "missing layer-2 engine/bridge archives for $PLATFORM" >&2
@@ -47,7 +48,7 @@ fi
 
 # shellcheck disable=SC2086
 xcrun --sdk "$SDK" swiftc -parse-as-library -O -target "$TRIPLE" -sdk "$SDK_PATH" \
-    -module-name OpenRealmTabletopFixture \
+    -module-name OpenRealmTabletop \
     -I "$TABLETOP/bridge" \
     -framework SwiftUI -framework RealityKit \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$APP/Info.plist" \
@@ -56,7 +57,7 @@ xcrun --sdk "$SDK" swiftc -parse-as-library -O -target "$TRIPLE" -sdk "$SDK_PATH
     "$BRIDGE" "$ENGINE" -framework Foundation -lc++ -lpthread -lz \
     -o "$APP/$EXECUTABLE"
 
-# The data-layer lane may supply a hook later; this fixture lane deliberately copies no game archives itself.
+"$WC3_DATA_TOOL" stage "$APP"
 if [ -n "${BZ_TABLETOP_RESOURCE_HOOK:-}" ]; then
     if [ ! -x "$BZ_TABLETOP_RESOURCE_HOOK" ]; then
         echo "tabletop resource hook is not executable: $BZ_TABLETOP_RESOURCE_HOOK" >&2
@@ -66,7 +67,7 @@ if [ -n "${BZ_TABLETOP_RESOURCE_HOOK:-}" ]; then
 fi
 
 if [ "$PLATFORM" = xrsimulator ]; then
-    codesign --force --sign - --identifier org.openrealm.tabletop.fixture --timestamp=none "$APP"
+    codesign --force --sign - --identifier org.openrealm.visionos.tabletop --timestamp=none "$APP"
 fi
 "$SCRIPT_DIR/verify-bundle.sh" "$PLATFORM" "$APP"
 printf '%s\n' "$APP"

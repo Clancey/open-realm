@@ -20,7 +20,7 @@ private struct LiveSnapshotLease: TabletopSnapshotLease {
             entities: entities.values, sessionID: sessionID, coordinateSpace: .world(bounds),
             connectionState: connectionState(), mapName: copyMapName(), player: copyPlayer(),
             selectedEntityIDs: copySelection(), fog: try copyFog(), unitLayouts: try copyUnitLayouts(),
-            configStrings: [:], entitiesOverflowCount: BZ_TTSnapshot_EntitiesOverflowCount(retained),
+            configStrings: copyConfigStrings(), entitiesOverflowCount: BZ_TTSnapshot_EntitiesOverflowCount(retained),
             duplicateEntityCount: entities.duplicateCount)
     }
 
@@ -76,6 +76,17 @@ private struct LiveSnapshotLease: TabletopSnapshotLease {
             BZ_TTSnapshot_SelectedEntityIds(retained, $0.baseAddress, UInt32($0.count))
         }
         return Array(values.prefix(Int(count)))
+    }
+
+    private func copyConfigStrings() -> [UInt32: String] {
+        let count = BZ_TTSnapshot_ConfigStringCount(retained)
+        return TabletopConfigStringCopy.copy(count: count) { index in
+            var value = [CChar](repeating: 0, count: Int(BZ_TT_MAX_CONFIGSTRING_LEN))
+            let copied = value.withUnsafeMutableBufferPointer {
+                BZ_TTSnapshot_ConfigString(retained, index, $0.baseAddress, $0.count)
+            }
+            return copied ? String(cString: value) : nil
+        }
     }
 
     private func copyFog() throws -> TabletopFogSnapshot? {

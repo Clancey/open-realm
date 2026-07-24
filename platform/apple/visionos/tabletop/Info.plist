@@ -7,9 +7,9 @@
 	<key>CFBundleDisplayName</key>
 	<string>Open Realm Tabletop</string>
 	<key>CFBundleExecutable</key>
-	<string>OpenRealmTabletopFixture</string>
+	<string>OpenRealmTabletop</string>
 	<key>CFBundleIdentifier</key>
-	<string>org.openrealm.tabletop.fixture</string>
+	<string>org.openrealm.visionos.tabletop</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -29,9 +29,9 @@
 	<key>MinimumOSVersion</key>
 	<string>2.0</string>
 	<key>NSHandsTrackingUsageDescription</key>
-	<string>Open Realm uses hand input to select and move tabletop fixture entities.</string>
+	<string>Open Realm uses hand input to select and command tabletop entities.</string>
 	<key>NSWorldSensingUsageDescription</key>
-	<string>Open Realm places its fixture board in the surrounding immersive space.</string>
+	<string>Open Realm places its tabletop board in the surrounding immersive space.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

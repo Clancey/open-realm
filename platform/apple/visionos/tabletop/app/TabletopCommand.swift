@@ -40,7 +40,7 @@ enum TabletopTransportError: Error, Equatable, CustomStringConvertible {
         case .abiVersion(let expected, let actual):
             return "Tabletop transport ABI mismatch: expected \(expected), received \(actual)"
         case .commandRejected(let result): return "Tabletop command rejected with result \(result)"
-        case .commandQueueFull: return "Fixture command queue is full"
+        case .commandQueueFull: return "Tabletop command queue is full"
         case .staleSession: return "Tabletop command belongs to a stopped session"
         case .notInitialized: return "Tabletop transport is not initialized"
         case .terminal: return "Tabletop transport has stopped"
