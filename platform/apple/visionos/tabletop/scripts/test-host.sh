@@ -13,7 +13,10 @@ trap 'rm -f "$ABI_CHECK"' EXIT
 printf '%s\n' \
     'import OpenRealmTabletopBridge' \
     'let _: UInt32 = BZ_TTA_AbiVersion()' \
-    'let _: bzTTTerrainTextureKind_t = BZ_TTA_TERRAIN_TEXTURE_WATER' > "$ABI_CHECK"
+    'let _: bzTTTerrainTextureKind_t = BZ_TTA_TERRAIN_TEXTURE_WATER' \
+    'let _: bzTTTeamTextureKind_t = BZ_TTA_TEAM_TEXTURE_GLOW' \
+    'let _: UInt32 = BZ_TTA_TeamTextureCount(BZ_TABLETOP_ASSETS_ABI_VERSION, BZ_TTA_TEAM_TEXTURE_COLOR)' \
+    '_ = BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, BZ_TTA_TEAM_TEXTURE_GLOW, 0)' > "$ABI_CHECK"
 xcrun swiftc -typecheck -I "$TABLETOP/bridge" -Xcc -I"$ROOT" "$ABI_CHECK"
 xcrun swiftc -parse-as-library \
     "$TABLETOP/app/TabletopSnapshot.swift" \

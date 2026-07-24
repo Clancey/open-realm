@@ -76,6 +76,35 @@ static bool wc3_path(char *out, size_t cap, const char *format, const char *dir,
     return count > 0 && (size_t)count < cap && wc3_tta_path_is_confined(out);
 }
 
+typedef struct {
+    bzTTTeamTextureKind_t kind;
+    const char *dir, *file;
+} wc3TeamTextureDef_t;
+
+/* Classic archives author one image of each semantic kind for every player color. */
+static uint32_t wc3_team_texture_count(bzTTTeamTextureKind_t kind) {
+    return kind == BZ_TTA_TEAM_TEXTURE_COLOR || kind == BZ_TTA_TEAM_TEXTURE_GLOW ? MAX_PLAYERS : 0;
+}
+
+/* Keep Warcraft path construction behind the provider; callers submit only semantic IDs. */
+static bzTTAResult_t wc3_resolve_team_texture_identity(const bzTTTeamTextureResolve_t *resolve) {
+    static const wc3TeamTextureDef_t defs[] = {
+        { BZ_TTA_TEAM_TEXTURE_COLOR, "ReplaceableTextures\\TeamColor", "TeamColor" },
+        { BZ_TTA_TEAM_TEXTURE_GLOW, "ReplaceableTextures\\TeamGlow", "TeamGlow" },
+    };
+    int count;
+    if (!resolve || !resolve->identity || !resolve->cap || resolve->team_color >= MAX_PLAYERS)
+        return BZ_TTA_ERR_INVALID_ARGUMENT;
+    for (size_t i = 0; i < sizeof(defs) / sizeof(defs[0]); i++) {
+        if (defs[i].kind != resolve->kind) continue;
+        count = snprintf(resolve->identity, resolve->cap, "%s\\%s%02u.blp",
+                         defs[i].dir, defs[i].file, resolve->team_color);
+        return count > 0 && (size_t)count < resolve->cap && wc3_tta_path_is_confined(resolve->identity)
+            ? BZ_TTA_OK : BZ_TTA_ERR_PATH_CONFINEMENT;
+    }
+    return BZ_TTA_ERR_INVALID_ARGUMENT;
+}
+
 /* Terrain identity translation stays behind the game callback so Swift never knows Warcraft paths. */
 static bzTTAResult_t wc3_resolve_terrain_identity(bzTTTerrainTextureKind_t kind, uint32_t type_id,
                                                   uint8_t tileset, char *identity, size_t cap) {
@@ -396,6 +425,8 @@ void BZ_WC3_TTA_Source(bzTTAssetSource_t *source) {
         .terrain_token = wc3_terrain_token,
         .copy_terrain = wc3_copy_terrain,
         .resolve_terrain_identity = wc3_resolve_terrain_identity,
+        .team_texture_count = wc3_team_texture_count,
+        .resolve_team_texture_identity = wc3_resolve_team_texture_identity,
         .metadata_token = wc3_metadata_token,
         .resolve_entity_metadata = wc3_resolve_entity_metadata,
     };

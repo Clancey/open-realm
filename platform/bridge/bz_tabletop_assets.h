@@ -63,6 +63,12 @@ typedef enum {
     BZ_TTA_TERRAIN_TEXTURE_WATER = 3,
 } bzTTTerrainTextureKind_t;
 
+/* Values intentionally match classic MDX replaceable texture IDs. */
+typedef enum {
+    BZ_TTA_TEAM_TEXTURE_COLOR = 1,
+    BZ_TTA_TEAM_TEXTURE_GLOW = 2,
+} bzTTTeamTextureKind_t;
+
 enum {
     BZ_TTA_METADATA_OVERRIDE_TEAM_COLOR = 1u << 0,
     BZ_TTA_METADATA_OVERRIDE_TINT = 1u << 1,
@@ -239,6 +245,12 @@ const bzTTAsset_t *BZ_TTA_RegisterConfigString(uint32_t abi_version,
 const bzTTAsset_t *BZ_TTA_RegisterModelTexture(uint32_t abi_version,
                                               const bzTTAsset_t *model,
                                               uint32_t texture_index);
+/* Returns the provider-authored index count for MDX team color/glow images.
+ * Registration accepts [0, count), returns a retained image, and never accepts a path. */
+uint32_t BZ_TTA_TeamTextureCount(uint32_t abi_version, bzTTTeamTextureKind_t kind);
+const bzTTAsset_t *BZ_TTA_RegisterTeamTexture(uint32_t abi_version,
+                                             bzTTTeamTextureKind_t kind,
+                                             uint32_t team_color);
 /* Resolves referenced W3E terrain imagery. Ground/cliff use their table type_index;
  * water is the singleton type_index 0. Unreferenced entries return NULL without lookup. */
 const bzTTAsset_t *BZ_TTA_RegisterTerrainTexture(uint32_t abi_version,

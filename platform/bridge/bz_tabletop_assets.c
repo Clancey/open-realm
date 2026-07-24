@@ -240,6 +240,15 @@ static bzTTAResult_t source_context(uint32_t abi_version, bzTTAssetSource_t *sou
     return status;
 }
 
+/* Source callbacks run only inside the same generation and lock order used by asset loading. */
+static bool source_generation_active(uint64_t generation) {
+    bool active;
+    pthread_mutex_lock(&g_assets_lock);
+    active = g_assets_initialized && !g_assets_terminal && generation == g_assets_generation;
+    pthread_mutex_unlock(&g_assets_lock);
+    return active;
+}
+
 /* All authoritative identity sources converge here for one cache and lifecycle contract. */
 static const bzTTAsset_t *register_identity(const char *identity, bzTTAssetKind_t kind,
                                             const bzTTAssetMetadata_t *metadata_arg,
@@ -363,6 +372,46 @@ const bzTTAsset_t *BZ_TTA_RegisterModelTexture(uint32_t abi_version,
     } else
         memcpy(identity, texture.identity, sizeof(identity));
     return register_identity(identity, BZ_TTA_ASSET_IMAGE, &model->metadata, status, &source, generation);
+}
+
+uint32_t BZ_TTA_TeamTextureCount(uint32_t abi_version, bzTTTeamTextureKind_t kind) {
+    bzTTAssetSource_t source;
+    uint64_t generation;
+    uint32_t count = 0;
+    if ((kind != BZ_TTA_TEAM_TEXTURE_COLOR && kind != BZ_TTA_TEAM_TEXTURE_GLOW) ||
+        source_context(abi_version, &source, &generation) != BZ_TTA_OK || !source.team_texture_count)
+        return 0;
+    pthread_mutex_lock(&g_assets_source_lock);
+    if (source_generation_active(generation)) count = source.team_texture_count(kind);
+    pthread_mutex_unlock(&g_assets_source_lock);
+    return count;
+}
+
+/* Team textures are entity-selected assets, not properties of shared model templates. */
+const bzTTAsset_t *BZ_TTA_RegisterTeamTexture(uint32_t abi_version,
+                                             bzTTTeamTextureKind_t kind,
+                                             uint32_t team_color) {
+    bzTTAssetSource_t source;
+    bzTTTeamTextureResolve_t resolve;
+    bzTTAResult_t status;
+    uint64_t generation;
+    char identity[BZ_TTA_MAX_IDENTITY];
+    if ((kind != BZ_TTA_TEAM_TEXTURE_COLOR && kind != BZ_TTA_TEAM_TEXTURE_GLOW) ||
+        !registration_context(abi_version, BZ_TTA_ASSET_IMAGE, &source, &generation) ||
+        !source.team_texture_count || !source.resolve_team_texture_identity)
+        return NULL;
+    resolve = (bzTTTeamTextureResolve_t){
+        .kind = kind, .team_color = team_color, .identity = identity, .cap = sizeof(identity),
+    };
+    pthread_mutex_lock(&g_assets_source_lock);
+    if (!source_generation_active(generation) || team_color >= source.team_texture_count(kind)) {
+        pthread_mutex_unlock(&g_assets_source_lock);
+        return NULL;
+    }
+    snprintf(identity, sizeof(identity), "<team:%u:%u>", kind, team_color);
+    status = source.resolve_team_texture_identity(&resolve);
+    pthread_mutex_unlock(&g_assets_source_lock);
+    return register_identity(identity, BZ_TTA_ASSET_IMAGE, NULL, status, &source, generation);
 }
 
 const bzTTAsset_t *BZ_TTA_RegisterTerrainTexture(uint32_t abi_version,

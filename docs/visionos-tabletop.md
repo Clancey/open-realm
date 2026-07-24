@@ -90,6 +90,9 @@ transport:
 - `BZ_TTA_RegisterConfigString()` resolves immutable image/model assets from a
   retained snapshot's configstring identity through the engine filesystem and
   MPQ search order. Callers never submit guessed archive paths.
+- `BZ_TTA_RegisterTeamTexture()` resolves MDX team color/glow semantics for a
+  provider-authored team index, keeping team selection out of shared model
+  templates and Warcraft archive paths out of Swift.
 - `BZ_TTA_LatestTerrain()` returns a retained deep copy of authoritative
   `world.map` terrain. The descriptor includes bounds, corner/tile/chunk
   dimensions, corrected ground and water heights, ground/cliff IDs and

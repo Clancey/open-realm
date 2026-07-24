@@ -17,6 +17,10 @@ asset = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION,
                                     BZ_TTA_ASSET_MODEL, &metadata);
 texture = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
                                       asset, texture_index);
+team_count = BZ_TTA_TeamTextureCount(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                     BZ_TTA_TEAM_TEXTURE_GLOW);
+team_glow = BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                      BZ_TTA_TEAM_TEXTURE_GLOW, team_color);
 count = BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND);
 BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND, 0, &terrain_texture);
 ground = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
@@ -67,6 +71,44 @@ Shutdown removes publication references; outstanding readers remain valid
 until they release their own references. Each initialization advances a
 generation, so a filesystem load or terrain copy started before shutdown cannot
 publish into a restarted lifecycle.
+
+## Team textures
+
+Classic MDX replaceable IDs 1 and 2 are per-entity team color and team glow,
+respectively. The public `bzTTTeamTextureKind_t` values intentionally match
+those IDs. `BZ_TTA_TeamTextureCount()` reports the active provider's authored
+range; Warcraft returns 16 for both kinds. `BZ_TTA_RegisterTeamTexture()` accepts
+only indices `[0, count)` and resolves the identity entirely in C:
+
+- color: `ReplaceableTextures\TeamColor\TeamColor%02u.blp`;
+- glow: `ReplaceableTextures\TeamGlow\TeamGlow%02u.blp`.
+
+The caller passes the entity's team-color index, never a path or model
+metadata. This preserves shared model-template caching: the same MDX can be
+drawn for multiple teams without first-entity cache poisoning. Existing
+`BZ_TTA_RegisterModelTexture()` remains model-only, and `entity.image` remains
+the independent per-entity destructable skin override.
+
+Registration returns a retained immutable image with `OK`; a valid authored
+index whose file is missing returns the normal cached/log-once `NOT_FOUND`
+placeholder. Unsupported kinds, indices outside the provider count, invalid
+ABI, and inactive lifecycle return `NULL` without lookup or cache activity.
+Concurrent registration shares one decoded cache entry.
+
+Desktop `MDLX_GetTexture()` selects team color/glow before the generic
+entity-skin override and binds the selected image using the MDX layer's authored
+blend mode and flags. Retail `War3.mpq` contains `TeamColor00..15.blp` and
+`TeamGlow00..15.blp`; `War3x.mpq` contains no replacements, so TFT inherits the
+ROC images through normal archive order. Team color 00 is an opaque uniform 8x8
+image, while team glow 00 is an authored opaque 32x32 gradient; substituting a
+solid palette color for glow loses required spatial image data.
+
+```sh
+build/bin/mpqtool -mpq "$HOME/Downloads/Warcraft III/War3.mpq" \
+  ls ReplaceableTextures/TeamColor
+build/bin/mpqtool -mpq "$HOME/Downloads/Warcraft III/War3.mpq" \
+  ls ReplaceableTextures/TeamGlow
+```
 
 Referenced asset failures produce explicit status-bearing placeholders rather than `NULL`:
 images are a top-left 1x1 opaque magenta RGBA8 pixel and models are empty

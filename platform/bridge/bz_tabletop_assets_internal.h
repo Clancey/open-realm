@@ -54,6 +54,13 @@ struct bzTTTerrain {
 };
 
 typedef struct {
+    bzTTTeamTextureKind_t kind;
+    uint32_t team_color;
+    char *identity;
+    size_t cap;
+} bzTTTeamTextureResolve_t;
+
+typedef struct {
     bool (*path_is_confined)(const char *identity);
     bzTTAsset_t *(*load_asset)(const char *identity, bzTTAssetKind_t kind,
                                const bzTTAssetMetadata_t *metadata, bzTTAResult_t *status);
@@ -61,6 +68,8 @@ typedef struct {
     bzTTTerrain_t *(*copy_terrain)(uintptr_t *source_token, bzTTAResult_t *status);
     bzTTAResult_t (*resolve_terrain_identity)(bzTTTerrainTextureKind_t kind, uint32_t type_id,
                                               uint8_t tileset, char *identity, size_t cap);
+    uint32_t (*team_texture_count)(bzTTTeamTextureKind_t kind);
+    bzTTAResult_t (*resolve_team_texture_identity)(const bzTTTeamTextureResolve_t *resolve);
     uintptr_t (*metadata_token)(void);
     bzTTAResult_t (*resolve_entity_metadata)(uint32_t class_id, bzTTAssetMetadata_t *metadata);
 } bzTTAssetSource_t;

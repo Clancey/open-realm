@@ -26,6 +26,8 @@ void test_assets_set_cliff_specific(bool enabled);
 void test_assets_set_cliff_generic(bool enabled);
 void test_assets_set_water_available(bool available);
 unsigned test_assets_water_reads(void);
+void test_assets_set_team_available(bool available);
+unsigned test_assets_team_reads(void);
 void test_assets_set_metadata_map(unsigned index);
 void test_assets_block_reads(bool blocked);
 void test_assets_wait_for_blocked_reads(unsigned count);
@@ -650,6 +652,110 @@ static void test_water_texture_semantic_success_missing_and_concurrency(void) {
     test_assets_set_tft(false);
 }
 
+typedef struct {
+    bzTTTeamTextureKind_t kind;
+    uint32_t team_color;
+    const bzTTAsset_t *asset;
+} teamRegistrationCtx_t;
+
+static void *register_team_texture(void *opaque) {
+    teamRegistrationCtx_t *ctx = opaque;
+    ctx->asset = BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, ctx->kind, ctx->team_color);
+    return NULL;
+}
+
+/* Team semantics stay per entity while immutable decoded images share the normal asset cache. */
+static void test_team_texture_registration_range_cache_lifecycle_and_inverses(void) {
+    enum { THREADS = 8 };
+    struct bzTTSnapshot snapshot = { 0 };
+    const bzTTAsset_t *asset, *again, *model, *texture;
+    const bzTTTerrain_t *terrain;
+    teamRegistrationCtx_t ctx[THREADS];
+    pthread_t threads[THREADS];
+    char expected[BZ_TTA_MAX_IDENTITY];
+
+    for (int tft = 0; tft < 2; tft++) {
+        test_assets_set_tft(tft); test_assets_set_team_available(true); reset_assets();
+        ASSERT_EQ_INT(BZ_TTA_TeamTextureCount(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                              BZ_TTA_TEAM_TEXTURE_COLOR), MAX_PLAYERS);
+        ASSERT_EQ_INT(BZ_TTA_TeamTextureCount(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                              BZ_TTA_TEAM_TEXTURE_GLOW), MAX_PLAYERS);
+        for (int kind = BZ_TTA_TEAM_TEXTURE_COLOR; kind <= BZ_TTA_TEAM_TEXTURE_GLOW; kind++) {
+            for (uint32_t team = 0; team < MAX_PLAYERS; team++) {
+                asset = BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                                   (bzTTTeamTextureKind_t)kind, team);
+                ASSERT_NOT_NULL(asset); ASSERT(!BZ_TTAsset_IsPlaceholder(asset));
+                ASSERT_EQ_INT(BZ_TTAsset_Status(asset), BZ_TTA_OK);
+                snprintf(expected, sizeof(expected), "ReplaceableTextures\\Team%s\\Team%s%02u.blp",
+                         kind == BZ_TTA_TEAM_TEXTURE_COLOR ? "Color" : "Glow",
+                         kind == BZ_TTA_TEAM_TEXTURE_COLOR ? "Color" : "Glow", team);
+                assert_asset_identity(asset, expected); BZ_TTAsset_Release(asset);
+            }
+        }
+        ASSERT_EQ_INT(BZ_TTA_CacheMisses(), MAX_PLAYERS * 2);
+        ASSERT_EQ_INT(test_assets_team_reads(), MAX_PLAYERS * 2);
+    }
+
+    test_assets_set_team_available(false); reset_assets();
+    asset = BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, BZ_TTA_TEAM_TEXTURE_GLOW, 0);
+    again = BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, BZ_TTA_TEAM_TEXTURE_GLOW, 0);
+    ASSERT_NOT_NULL(asset); ASSERT(asset == again); ASSERT(BZ_TTAsset_IsPlaceholder(asset));
+    ASSERT_EQ_INT(BZ_TTAsset_Status(asset), BZ_TTA_ERR_NOT_FOUND);
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 1); ASSERT_EQ_INT(BZ_TTA_CacheHits(), 1);
+    ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), 1); ASSERT_EQ_INT(test_assets_team_reads(), 1);
+    BZ_TTAsset_Release(asset); ASSERT_EQ_INT(BZ_TTAsset_Status(again), BZ_TTA_ERR_NOT_FOUND);
+    BZ_TTAsset_Release(again);
+
+    test_assets_set_team_available(false); reset_assets();
+    ASSERT_EQ_INT(BZ_TTA_TeamTextureCount(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                          (bzTTTeamTextureKind_t)0), 0);
+    ASSERT_EQ_INT(BZ_TTA_TeamTextureCount(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                          (bzTTTeamTextureKind_t)3), 0);
+    ASSERT_NULL(BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                           (bzTTTeamTextureKind_t)0, 0));
+    ASSERT_NULL(BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                           (bzTTTeamTextureKind_t)3, 0));
+    ASSERT_NULL(BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                           BZ_TTA_TEAM_TEXTURE_GLOW, MAX_PLAYERS));
+    ASSERT_EQ_INT(BZ_TTA_TeamTextureCount(BZ_TABLETOP_ASSETS_ABI_VERSION + 1,
+                                          BZ_TTA_TEAM_TEXTURE_GLOW), 0);
+    ASSERT_NULL(BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION + 1,
+                                           BZ_TTA_TEAM_TEXTURE_GLOW, 0));
+    ASSERT_EQ_INT(test_assets_team_reads(), 0); ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 0);
+    BZ_TTA_Shutdown();
+    ASSERT_EQ_INT(BZ_TTA_TeamTextureCount(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                          BZ_TTA_TEAM_TEXTURE_GLOW), 0);
+    ASSERT_NULL(BZ_TTA_RegisterTeamTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                           BZ_TTA_TEAM_TEXTURE_GLOW, 0));
+
+    test_assets_set_team_available(true); reset_assets();
+    for (int i = 0; i < THREADS; i++) {
+        ctx[i] = (teamRegistrationCtx_t){ .kind = BZ_TTA_TEAM_TEXTURE_GLOW, .team_color = 0 };
+        ASSERT_EQ_INT(pthread_create(threads + i, NULL, register_team_texture, ctx + i), 0);
+    }
+    for (int i = 0; i < THREADS; i++) {
+        ASSERT_EQ_INT(pthread_join(threads[i], NULL), 0); ASSERT_NOT_NULL(ctx[i].asset);
+        ASSERT(ctx[i].asset == ctx[0].asset); BZ_TTAsset_Release(ctx[i].asset);
+    }
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 1); ASSERT_EQ_INT(BZ_TTA_CacheHits(), THREADS - 1);
+    ASSERT_EQ_INT(test_assets_team_reads(), 1);
+
+    test_assets_set_configstring(&snapshot, 1, "TestUI/Models/quad_sprite.mdx");
+    make_terrain(4, 4, 0); reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    model = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
+                                        BZ_TTA_ASSET_MODEL, NULL);
+    ASSERT_NOT_NULL(model);
+    texture = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, model, 0);
+    ASSERT_NOT_NULL(texture); ASSERT(!BZ_TTAsset_IsPlaceholder(texture));
+    terrain = BZ_TTA_LatestTerrain(); ASSERT_NOT_NULL(terrain);
+    asset = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                          BZ_TTA_TERRAIN_TEXTURE_WATER, 0);
+    ASSERT_NOT_NULL(asset); ASSERT(!BZ_TTAsset_IsPlaceholder(asset));
+    BZ_TTAsset_Release(asset); BZ_TTTerrain_Release(terrain);
+    BZ_TTAsset_Release(texture); BZ_TTAsset_Release(model); free_terrain();
+    test_assets_set_tft(false);
+}
+
 static void test_entity_metadata_map_readiness_and_cache_scope(void) {
     bzTTAssetMetadata_t metadata;
     bzTTEntityMetadataInput_t input = { .class_id = FOURCC('h','p','e','a') };
@@ -979,6 +1085,7 @@ void run_bz_tabletop_assets_tests(void) {
     RUN_TEST(test_human02_shape_no_cliff_sentinel);
     RUN_TEST(test_terrain_texture_resolution_roc_tft_and_fallback);
     RUN_TEST(test_water_texture_semantic_success_missing_and_concurrency);
+    RUN_TEST(test_team_texture_registration_range_cache_lifecycle_and_inverses);
     RUN_TEST(test_entity_metadata_categories_footprints_and_overrides);
     RUN_TEST(test_roc_tft_non_pathing_doodad_metadata);
     RUN_TEST(test_entity_metadata_map_readiness_and_cache_scope);

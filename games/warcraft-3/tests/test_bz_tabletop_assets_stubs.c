@@ -25,6 +25,8 @@ static bool cliff_specific;
 static bool cliff_generic = true;
 static bool water_available = true;
 static atomic_uint water_reads;
+static bool team_available = true;
+static atomic_uint team_reads;
 static pthread_mutex_t read_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t read_cond = PTHREAD_COND_INITIALIZER;
 static bool read_blocked;
@@ -37,6 +39,10 @@ void test_assets_set_water_available(bool available) {
     water_available = available; atomic_store(&water_reads, 0);
 }
 unsigned test_assets_water_reads(void) { return atomic_load(&water_reads); }
+void test_assets_set_team_available(bool available) {
+    team_available = available; atomic_store(&team_reads, 0);
+}
+unsigned test_assets_team_reads(void) { return atomic_load(&team_reads); }
 void test_assets_set_metadata_map(unsigned index) {
     level.mapinfo = index < 2 ? test_mapinfo + index : NULL;
     metadata_map = index < 2 ? metadata_maps + index : NULL;
@@ -221,6 +227,9 @@ HANDLE FS_ReadFile(LPCSTR identity, LPDWORD size) {
     FILE *file;
     long length;
     void *data;
+    unsigned team;
+    int end;
+    bool team_color, team_glow;
     if (!identity || !size) return NULL;
     pthread_mutex_lock(&read_lock);
     if (read_blocked) {
@@ -248,6 +257,17 @@ HANDLE FS_ReadFile(LPCSTR identity, LPDWORD size) {
         atomic_fetch_add(&water_reads, 1);
         if (!water_available) return NULL;
         identity = "TestUI/Textures/solid_white.blp";
+    }
+    end = 0;
+    team_color = sscanf(identity, "ReplaceableTextures\\TeamColor\\TeamColor%2u.blp%n", &team, &end) == 1 &&
+                 !identity[end] && team < MAX_PLAYERS;
+    end = 0;
+    team_glow = sscanf(identity, "ReplaceableTextures\\TeamGlow\\TeamGlow%2u.blp%n", &team, &end) == 1 &&
+                !identity[end] && team < MAX_PLAYERS;
+    if (team_color || team_glow) {
+        atomic_fetch_add(&team_reads, 1);
+        if (!team_available) return NULL;
+        identity = team_glow ? "TestUI/Textures/orientation_2x2.blp" : "TestUI/Textures/solid_white.blp";
     }
     else if (!strcmp(identity, "TerrainArt\\TFT\\Dirt.blp"))
         identity = "TestUI/Textures/orientation_2x2.blp";
