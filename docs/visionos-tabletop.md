@@ -113,13 +113,25 @@ used.
 
 `launch-tabletop-simulator.sh` clones only a shutdown Apple Vision Pro device,
 boots that disposable clone with a 120-second bound, installs identical signed
-code, and stages the same three real MPQs into the clone's private app-data
+code, and stages the same three real MPQs into the clone's installed app
 container through `wc3_data.sh`. This avoids an unbounded CoreSimulator import
 of the roughly 717 MB sealed production bundle without weakening either bundle
 gate. It launches with `SIMCTL_CHILD_*`, captures stdout/stderr directly,
 requires five seconds of residency plus transport initialization, first
 snapshot, and `Human02` begin evidence, then terminates the app and deletes the
 clone. It never addresses `booted` or takes over the user's active simulator.
+Verify the real ROC map path with the repository diagnostic tool before launch:
+
+```sh
+make mpqtool
+build/bin/mpqtool -mpq "${BZ_WC3_DATA_DIR:-$HOME/Downloads/Warcraft III}/War3.mpq" \
+  ls Maps/Campaign | grep -F 'Human02.w3m'
+build/bin/mpqtool -mpq "${BZ_WC3_DATA_DIR:-$HOME/Downloads/Warcraft III}/War3.mpq" \
+  info Maps/Campaign/Human02.w3m
+```
+
+The local acceptance source enumerated `Maps\Campaign\Human02.w3m` as a regular,
+uncompressed, unencrypted 236,299-byte entry before the simulator gate.
 
 The direct linker embeds the generated plist in `__TEXT,__info_plist` before
 signing. The verifier requires that section, an exact signing identifier, and
