@@ -24,8 +24,6 @@ bool CM_LoadMapFormat(LPCSTR mapFilename) {
     HANDLE mapData;
     DWORD mapSize = 0;
 
-    /* Map transitions previously discarded the retained W3U/W3B trees without releasing them. */
-    MapInfo_Release(&world.info);
     memset(&world, 0, sizeof(world));
     mapData = FS_ReadFile(mapFilename, &mapSize);
     if (!mapData || mapSize == 0) {

@@ -234,8 +234,7 @@ const bzTTAsset_t *BZ_TTA_RegisterConfigString(uint32_t abi_version,
                                                uint32_t cs_index,
                                                bzTTAssetKind_t kind,
                                                const bzTTAssetMetadata_t *metadata);
-/* Resolves an MDX TEXS identity through the same confined filesystem/MPQ path.
- * Empty nonzero replaceables use authoritative metadata for model->class_id. */
+/* Resolves an MDX TEXS identity through the same confined filesystem/MPQ path. */
 const bzTTAsset_t *BZ_TTA_RegisterModelTexture(uint32_t abi_version,
                                               const bzTTAsset_t *model,
                                               uint32_t texture_index);

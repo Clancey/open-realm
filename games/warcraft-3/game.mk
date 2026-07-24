@@ -139,8 +139,6 @@ TEST_SRCS := \
 	! -name 'test_jass_main.c' \
 	! -name 'test_main_ui.c' \
 	! -name 'test_mpq_compat.c' \
-	! -name 'test_world_overrides.c' \
-	! -name 'test_world_overrides_main.c' \
 	! -name 'test_ui_*.c' | sort) \
 	tests/test_net.c \
 	tests/test_tool_common.c
@@ -163,7 +161,6 @@ test: test-assets $(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB) | $(BIN_DIR)
 	@$(CC) $(TEST_CFLAGS) -o $(BIN_DIR)/test_openwarcraft3$(EXE_EXT) \
 		$(TEST_SRCS) $(TEST_GAME_SRCS) \
 		$(RPATH) $(LDFLAGS) -lsheet -lshared -ljass -lm
-	@$(MAKE) test-world-overrides
 	@$(BIN_DIR)/test_openwarcraft3$(EXE_EXT)
 	@$(MAKE) test-commands
 	@$(MAKE) test-bz-runtime
@@ -192,7 +189,6 @@ $(eval $(call test_schema,test-bz-tabletop-lifecycle,test-assets $(SHARED_LIB) $
 $(eval $(call test_schema,test-bz-tabletop-transport,,$(TEST_CFLAGS) -Iplatform/bridge -Iplatform/apple/visionos/tabletop/client,$(BIN_DIR)/test_bz_tabletop_transport$(EXE_EXT),$(WC3_TEST_DIR)/test_bz_tabletop_transport_main.c $(WC3_TEST_DIR)/test_bz_tabletop_transport.c $(WC3_TEST_DIR)/test_bz_tabletop_transport_client.c $(WC3_TEST_DIR)/test_bz_tabletop_transport_stubs.c platform/bridge/bz_tabletop_transport.c client/cl_parse.c platform/apple/visionos/tabletop/client/cl_scrn_tabletop_null.c common/net.c common/msg.c,-lm -lpthread,))
 $(eval $(call test_schema,test-bz-tabletop-assets,test-assets,$(TEST_CFLAGS) -Iplatform/bridge -I$(WC3_DIR)/visionos,$(BIN_DIR)/test_bz_tabletop_assets$(EXE_EXT),$(WC3_TEST_DIR)/test_bz_tabletop_assets_main.c $(WC3_TEST_DIR)/test_bz_tabletop_assets.c $(WC3_TEST_DIR)/test_bz_tabletop_assets_stubs.c platform/bridge/bz_tabletop_assets.c $(WC3_DIR)/visionos/wc3_tabletop_assets.c $(WC3_DIR)/visionos/wc3_blp_decode.c $(WC3_DIR)/visionos/wc3_mdx_decode.c,-lm -lpthread,))
 $(eval $(call test_schema,test-jass,$(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB),$(TEST_CFLAGS),$(BIN_DIR)/test_jass$(EXE_EXT),$(WC3_TEST_DIR)/test_jass_main.c $(WC3_TEST_DIR)/test_jass.c $(WC3_TEST_DIR)/test_harness.c $(WC3_TEST_DIR)/test_client_stubs.c $(WC3_DIR)/game/g_metadata.c common/msg.c,-lsheet -lshared -ljass -lm,))
-$(eval $(call test_schema,test-world-overrides,$(SHARED_LIB),$(TEST_CFLAGS),$(BIN_DIR)/test_world_overrides$(EXE_EXT),$(WC3_TEST_DIR)/test_world_overrides_main.c $(WC3_TEST_DIR)/test_world_overrides.c $(WC3_DIR)/game/g_world.c common/mpq.c,-lshared -lm -lz,))
 $(eval $(call test_schema,test-ui,test-assets $(SHARED_LIB) $(JASS_LIB) $(SHEET_LIB),$(TEST_UI_CFLAGS),$(BIN_DIR)/test_openwarcraft3_ui$(EXE_EXT),$(TEST_UI_SRCS) $(TEST_GAME_SRCS) common/mpq.c $(call CSRC,$(WC3_DIR)/ui),-lsheet -lshared -ljass -lm -lz,))
 
 test-mpq-compat: mpqtool $(MPQ_TEST)
@@ -230,8 +226,7 @@ test-assets: blpgen mdxgen mpqtool mdxtool | $(TESTS_DIR)
 		"quad_sprite TestUI/Textures/checker_8x8.blp $(TESTS_RES_DIR)/TestUI/Models/quad_sprite.mdx" \
 		"panel_sprite TestUI/Textures/solid_white.blp $(TESTS_RES_DIR)/TestUI/Models/panel_sprite.mdx" \
 		"ui_panel TestUI/Textures/solid_white.blp $(TESTS_RES_DIR)/TestUI/Models/ui_panel.mdx" \
-		"anim_pulse TestUI/Textures/alpha_ring_16x16.blp $(TESTS_RES_DIR)/TestUI/Models/anim_pulse.mdx" \
-		"replaceable_sprite 31 $(TESTS_RES_DIR)/TestUI/Models/replaceable_sprite.mdx"; do \
+		"anim_pulse TestUI/Textures/alpha_ring_16x16.blp $(TESTS_RES_DIR)/TestUI/Models/anim_pulse.mdx"; do \
 		$(BIN_DIR)/mdxgen$(EXE_EXT) $$model; \
 	done
 	@echo "[test-assets] packing tests.mpq"

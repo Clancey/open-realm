@@ -325,13 +325,7 @@ static void test_metadata_map_snapshot_survives_republication(void) {
     unitData_t second_unit = {
         .originalUnitID = UNIT_ID("hfoo"), .newUnitID = UNIT_ID("h000"),
     };
-    unitData_t destructable = {
-        .originalUnitID = UNIT_ID("LTlt"), .newUnitID = UNIT_ID("L000"),
-    };
-    struct mapInfo_s first = {
-        .num_userCreatedUnits = 1, .userCreatedUnits = &first_unit,
-        .num_userCreatedDestructables = 1, .userCreatedDestructables = &destructable,
-    };
+    struct mapInfo_s first = { .num_userCreatedUnits = 1, .userCreatedUnits = &first_unit };
     struct mapInfo_s second = { .num_userCreatedUnits = 1, .userCreatedUnits = &second_unit };
     const metadataMapSnapshot_t *old, *current;
     uint64_t old_token;
@@ -341,7 +335,6 @@ static void test_metadata_map_snapshot_survives_republication(void) {
     G_MetadataPublishMap(&second);
     current = G_MetadataMapAcquire();
     ASSERT_EQ_INT(G_MetadataMapClass(old, UNIT_ID("h000")), UNIT_ID("hpea"));
-    ASSERT_EQ_INT(G_MetadataMapClass(old, UNIT_ID("L000")), UNIT_ID("LTlt"));
     ASSERT_EQ_INT(G_MetadataMapClass(current, UNIT_ID("h000")), UNIT_ID("hfoo"));
     ASSERT(G_MetadataMapToken(current) != old_token);
     G_MetadataMapRelease(old); G_MetadataMapRelease(current);

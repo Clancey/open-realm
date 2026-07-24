@@ -340,28 +340,18 @@ static uint64_t metadata_map_token;
 /* Publish only class aliases so worker metadata reads never touch mutable world.info storage. */
 void G_MetadataPublishMap(LPCMAPINFO mapinfo) {
     metadataMapSnapshot_t *snapshot = NULL, *old;
-    DWORD unit_count = mapinfo ? mapinfo->num_userCreatedUnits : 0;
-    DWORD destructable_count = mapinfo ? mapinfo->num_userCreatedDestructables : 0;
-    DWORD count;
+    DWORD count = mapinfo ? mapinfo->num_userCreatedUnits : 0;
     size_t alias_bytes, allocation;
-    if (mapinfo && !__builtin_add_overflow(unit_count, destructable_count, &count) &&
-        (!unit_count || mapinfo->userCreatedUnits) &&
-        (!destructable_count || mapinfo->userCreatedDestructables) &&
+    if (mapinfo && (!count || mapinfo->userCreatedUnits) &&
         !__builtin_mul_overflow((size_t)count, sizeof(*snapshot->aliases), &alias_bytes) &&
         !__builtin_add_overflow(sizeof(*snapshot), alias_bytes, &allocation)) {
         snapshot = calloc(1, allocation);
         if (snapshot) {
             snapshot->refs = 1;
             snapshot->count = count;
-            for (DWORD i = 0; i < unit_count; i++) {
+            for (DWORD i = 0; i < count; i++) {
                 snapshot->aliases[i].original_id = mapinfo->userCreatedUnits[i].originalUnitID;
                 snapshot->aliases[i].class_id = mapinfo->userCreatedUnits[i].newUnitID;
-            }
-            for (DWORD i = 0; i < destructable_count; i++) {
-                snapshot->aliases[unit_count + i].original_id =
-                    mapinfo->userCreatedDestructables[i].originalUnitID;
-                snapshot->aliases[unit_count + i].class_id =
-                    mapinfo->userCreatedDestructables[i].newUnitID;
             }
         }
     }

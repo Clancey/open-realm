@@ -62,8 +62,6 @@ typedef struct {
                                               uint8_t tileset, char *identity, size_t cap);
     uintptr_t (*metadata_token)(void);
     bzTTAResult_t (*resolve_entity_metadata)(uint32_t class_id, bzTTAssetMetadata_t *metadata);
-    bzTTAResult_t (*resolve_replaceable_identity)(uint32_t class_id, uint32_t replaceable_id,
-                                                  char *identity, size_t cap);
 } bzTTAssetSource_t;
 
 bzTTAsset_t *BZ_TTA_AssetAlloc(size_t payload_bytes, bzTTAssetKind_t kind,

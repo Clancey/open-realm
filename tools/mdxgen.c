@@ -10,7 +10,6 @@
  *   mdxgen panel_sprite  <tex_path> <out.mdx>
  *   mdxgen ui_panel      <tex_path> <out.mdx>
  *   mdxgen anim_pulse    <tex_path> <out.mdx>
- *   mdxgen replaceable_sprite <replaceable_id> <out.mdx>
  *
  * quad_sprite  - 1x1 unit flat quad in XY-plane, 1 sequence "Stand"
  * panel_sprite - 2x1.5 unit flat quad, suitable for orthographic UI panels, 1 sequence "Stand"
@@ -204,10 +203,10 @@ static void emit_SEQS(wbuf_t *b, const char **names,
 }
 
 /* TEXS chunk: on-disk texture records, 268 bytes each. */
-static void emit_TEXS(wbuf_t *b, const char *tex_path, uint32_t replaceable_id) {
+static void emit_TEXS(wbuf_t *b, const char *tex_path) {
     wb_tag(b, "TEXS");
     wb_u32(b, MDX_TEX_RECORD);
-    wb_u32(b, replaceable_id);
+    wb_u32(b, 0);                  /* replaceableID = TEXREPL_NONE */
     wb_str(b, tex_path, MDX_TEX_PATH_LEN);
     wb_i32(b, 0);                  /* nWrapping */
 }
@@ -354,7 +353,7 @@ static int build_model(const char *tex_path, const char *out_path,
                        const char **seq_names,
                        const uint32_t *seq_starts,
                        const uint32_t *seq_ends,
-                       int n_seqs, uint32_t replaceable_id)
+                       int n_seqs)
 {
     wbuf_t b = { 0 };
 
@@ -364,7 +363,7 @@ static int build_model(const char *tex_path, const char *out_path,
     emit_VERS(&b);
     emit_MODL(&b, model_name);
     emit_SEQS(&b, seq_names, seq_starts, seq_ends, n_seqs);
-    emit_TEXS(&b, tex_path, replaceable_id);
+    emit_TEXS(&b, tex_path);
     emit_MTLS(&b);
     emit_GEOS(&b, hw, hh);
     emit_BONE(&b);
@@ -399,7 +398,7 @@ static int build_model_rect(const char *tex_path, const char *out_path,
     emit_VERS(&b);
     emit_MODL(&b, model_name);
     emit_SEQS(&b, seq_names, seq_starts, seq_ends, n_seqs);
-    emit_TEXS(&b, tex_path, 0);
+    emit_TEXS(&b, tex_path);
     emit_MTLS(&b);
     emit_GEOS_RECT(&b, minx, miny, maxx, maxy);
     emit_BONE(&b);
@@ -439,7 +438,7 @@ static int gen_quad_sprite(int argc, char **argv) {
     uint32_t ends[]   = { 1000 };
     return build_model(tex, out, "QuadSprite",
                        0.5f, 0.5f,
-                       names, starts, ends, 1, 0) ? 0 : 1;
+                       names, starts, ends, 1) ? 0 : 1;
 }
 
 static int gen_panel_sprite(int argc, char **argv) {
@@ -454,7 +453,7 @@ static int gen_panel_sprite(int argc, char **argv) {
     uint32_t ends[]   = { 1000 };
     return build_model(tex, out, "PanelSprite",
                        1.0f, 0.75f,
-                       names, starts, ends, 1, 0) ? 0 : 1;
+                       names, starts, ends, 1) ? 0 : 1;
 }
 
 static int gen_ui_panel(int argc, char **argv) {
@@ -485,25 +484,7 @@ static int gen_anim_pulse(int argc, char **argv) {
     uint32_t ends[]   = { 1000, 2000 };
     return build_model(tex, out, "AnimPulse",
                        0.5f, 0.5f,
-                       names, starts, ends, 2, 0) ? 0 : 1;
-}
-
-static int gen_replaceable_sprite(int argc, char **argv) {
-    const char *names[] = { "Stand" };
-    uint32_t starts[] = { 0 }, ends[] = { 1000 };
-    char *end;
-    unsigned long replaceable_id;
-    if (argc < 3) {
-        fprintf(stderr, "usage: mdxgen replaceable_sprite <replaceable_id> <out.mdx>\n");
-        return 1;
-    }
-    replaceable_id = strtoul(argv[1], &end, 10);
-    if (*end || !replaceable_id || replaceable_id > UINT32_MAX) {
-        fprintf(stderr, "mdxgen: invalid replaceable ID '%s'\n", argv[1]);
-        return 1;
-    }
-    return build_model("", argv[2], "ReplaceableSprite", 0.5f, 0.5f,
-                       names, starts, ends, 1, (uint32_t)replaceable_id) ? 0 : 1;
+                       names, starts, ends, 2) ? 0 : 1;
 }
 
 /* =========================================================================
@@ -518,7 +499,6 @@ static void usage(void) {
         "  mdxgen panel_sprite  <tex_path> <out.mdx>\n"
         "  mdxgen ui_panel      <tex_path> <out.mdx>\n"
         "  mdxgen anim_pulse    <tex_path> <out.mdx>\n"
-        "  mdxgen replaceable_sprite <replaceable_id> <out.mdx>\n"
         "\n"
         "Examples:\n"
         "  mdxgen quad_sprite   TestUI/Textures/checker_8x8.blp  quad_sprite.mdx\n"
@@ -539,7 +519,6 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "panel_sprite") == 0) return gen_panel_sprite(sub_argc, sub_argv);
     if (strcmp(cmd, "ui_panel")     == 0) return gen_ui_panel(sub_argc, sub_argv);
     if (strcmp(cmd, "anim_pulse")   == 0) return gen_anim_pulse(sub_argc, sub_argv);
-    if (strcmp(cmd, "replaceable_sprite") == 0) return gen_replaceable_sprite(sub_argc, sub_argv);
 
     fprintf(stderr, "mdxgen: unknown command '%s'\n\n", cmd);
     usage();
