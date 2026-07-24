@@ -96,6 +96,14 @@ npig nmh0 npgf nmh1 hfoo nser obea hpea hbla hC02 nvil Obla orai hrif nomg hwtw 
 halt nvlw Huth`. The map-authored `nC03` and `hC02` IDs resolve through the immutable class-alias
 snapshot to `nrdk` and `hmtm` before static-table lookup.
 
+Map aliases combine custom units from `war3map.w3u` and custom destructables
+from `war3map.w3b` in that immutable snapshot. W3U/W3B object and modification
+counts are 32-bit little-endian values; the shared reader bounds each count by
+the remaining file envelope and rejects short, unterminated, or unknown
+modification records. Each original/custom section is additionally bounded to
+`MAX_GAME_ENTITIES` objects and total modifications, and object strings use the
+existing `MAX_TRIGSTR_LENGTH` engine bound.
+
 ### Misc
 | Macro | Code | Notes |
 |---|---|---|

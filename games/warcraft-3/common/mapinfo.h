@@ -182,7 +182,7 @@ typedef struct unitModification_t {
 typedef struct {
     DWORD originalUnitID; // from "Units\UnitData.slk"
     DWORD newUnitID;
-    WORD numbeOfModifications;
+    DWORD numbeOfModifications; /* W3U/W3B stores DWORD; WORD made the following pointer overlap the disk read. */
     unitModification_t *modifications;
 } unitData_t;
 
@@ -236,6 +236,8 @@ struct mapInfo_s {
     DWORD num_randomItems;
     DWORD num_originalUnits;
     DWORD num_userCreatedUnits;
+    DWORD num_originalDestructables;
+    DWORD num_userCreatedDestructables;
     mapPlayer_t players[MAX_PLAYERS];
     mapTeam_t *teams;
     mapUpgradeAvailability_t *upgradeAvailabilities;
@@ -245,6 +247,8 @@ struct mapInfo_s {
     mapTrigStr_t *strings;
     unitData_t *originalUnits;
     unitData_t *userCreatedUnits;
+    unitData_t *originalDestructables;
+    unitData_t *userCreatedDestructables;
     LPSTR mapscript;
 };
 

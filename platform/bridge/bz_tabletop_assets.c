@@ -359,7 +359,26 @@ const bzTTAsset_t *BZ_TTA_RegisterModelTexture(uint32_t abi_version,
         return NULL;
     if (!texture.identity[0]) {
         snprintf(identity, sizeof(identity), "<replaceable:%u>", texture.replaceable_id);
-        status = BZ_TTA_ERR_UNSUPPORTED;
+        if (!texture.replaceable_id || !source.resolve_replaceable_identity)
+            status = BZ_TTA_ERR_UNSUPPORTED;
+        else {
+            uintptr_t metadata_token;
+            pthread_mutex_lock(&g_assets_source_lock);
+            pthread_mutex_lock(&g_assets_lock);
+            if (!g_assets_initialized || g_assets_terminal || generation != g_assets_generation) {
+                pthread_mutex_unlock(&g_assets_lock);
+                pthread_mutex_unlock(&g_assets_source_lock);
+                return NULL;
+            }
+            pthread_mutex_unlock(&g_assets_lock);
+            metadata_token = source.metadata_token ? source.metadata_token() : 0;
+            status = source.resolve_replaceable_identity(model->metadata.class_id, texture.replaceable_id,
+                                                         identity, sizeof(identity));
+            if (source.metadata_token && source.metadata_token() != metadata_token)
+                status = BZ_TTA_ERR_NOT_INITIALIZED;
+            pthread_mutex_unlock(&g_assets_source_lock);
+            if (status == BZ_TTA_ERR_NOT_INITIALIZED) return NULL;
+        }
     } else
         memcpy(identity, texture.identity, sizeof(identity));
     return register_identity(identity, BZ_TTA_ASSET_IMAGE, &model->metadata, status, &source, generation);

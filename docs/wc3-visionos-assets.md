@@ -30,7 +30,8 @@ path, then calls `FS_ReadFile`. This preserves the established loose-file and
 MPQ override order, including TFT archives overriding ROC assets. Absolute
 paths, drive prefixes, empty components, `.`/`..`, and control characters are
 rejected before filesystem lookup. Model textures can only be registered from
-their parsed MDX `TEXS` record; the ABI does not expose a guessed-path
+their parsed MDX `TEXS` record. Empty nonzero replaceable records are resolved
+from the model's authoritative class metadata; the ABI exposes no guessed-path
 registration entry point.
 
 Spawn registration uses Doodads/Destructable `numVar`: single-variation rows
@@ -174,6 +175,17 @@ their own size DWORD; top-level chunk sizes do not. Inclusive records and
 counted arrays are checked against their containing span before trailing data
 is read.
 
+`BZ_TTA_RegisterModelTexture()` resolves ordinary `TEXS` paths directly. For an
+empty nonzero replaceable record, the WC3 source maps the model metadata
+`class_id` through the immutable map alias snapshot (including custom
+destructables from `war3map.w3b`), requires a matching
+DestructableData `texID`, and registers `<texFile>.blp` through normal FS/MPQ
+override order. Missing, mismatched, malformed, or unconfined authored mappings
+remain explicit cached placeholders. Retail ROC and TFT both declare `LTlt`
+replaceable ID 31 as
+`ReplaceableTextures\LordaeronTree\LordaeronSummerTree`; the BLP is inherited
+from `War3.mpq` when TFT archives are mounted.
+
 Known model gaps are MDX 1000/1500, full animation curves and skinning
 matrices, geoset animations, particle/ribbon emitters, and event/camera data.
 Classic MDX may omit a geoset `UVBS` stream entirely; the descriptor then
@@ -205,6 +217,8 @@ build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep pathTex Doo
 build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep ngol Units
 build/bin/mpqtool -mpq "/Users/clancey/Downloads/Warcraft III/War3.mpq" \
   info "Maps/Campaign/Human02.w3m"
+build/bin/mpqtool -mpq "/Users/clancey/Downloads/Warcraft III/War3.mpq" \
+  info "ReplaceableTextures/LordaeronTree/LordaeronSummerTree.blp"
 ```
 
 The retail rows confirm ROC `Ldrt` as

@@ -178,6 +178,47 @@ static void wc3_unit_tint(uint32_t class_id, bzTTAssetMetadata_t *metadata) {
         metadata->team_color = (uint32_t)UnitIntegerFieldBase(UnitsMetaData, class_id, "utco");
 }
 
+/* DestructableData owns nonstandard MDX replaceables; models and class aliases supply the lookup keys. */
+static bzTTAResult_t wc3_resolve_replaceable_identity(uint32_t class_id, uint32_t replaceable_id,
+                                                      char *identity, size_t cap) {
+    const metadataMapSnapshot_t *snapshot;
+    LPCSTR id_text, file;
+    uint32_t table_id;
+    unsigned long authored_id;
+    char *end;
+    size_t length;
+    int count;
+    if (!class_id || !replaceable_id || !identity || !cap) return BZ_TTA_ERR_INVALID_ARGUMENT;
+    snapshot = G_MetadataMapAcquire();
+    if (!snapshot) return BZ_TTA_ERR_NOT_INITIALIZED;
+    table_id = G_MetadataMapClass(snapshot, class_id);
+    if (!UnitStringFieldBase(DestructableMetaData, table_id, "bfil")) {
+        G_MetadataMapRelease(snapshot);
+        return BZ_TTA_ERR_NOT_FOUND;
+    }
+    id_text = UnitStringFieldBase(DestructableMetaData, table_id, "btxi");
+    file = UnitStringFieldBase(DestructableMetaData, table_id, "btxf");
+    if (!id_text || !*id_text || !file || !*file || !strcmp(file, "_") || !strcmp(file, "-")) {
+        G_MetadataMapRelease(snapshot);
+        return BZ_TTA_ERR_NOT_FOUND;
+    }
+    authored_id = strtoul(id_text, &end, 10);
+    if (*end || authored_id > UINT32_MAX) {
+        G_MetadataMapRelease(snapshot);
+        return BZ_TTA_ERR_MALFORMED;
+    }
+    if ((uint32_t)authored_id != replaceable_id) {
+        G_MetadataMapRelease(snapshot);
+        return BZ_TTA_ERR_NOT_FOUND;
+    }
+    length = strlen(file);
+    count = length >= 4 && !strcasecmp(file + length - 4, ".blp") ?
+        snprintf(identity, cap, "%s", file) : snprintf(identity, cap, "%s.blp", file);
+    G_MetadataMapRelease(snapshot);
+    if (count <= 0 || (size_t)count >= cap) return BZ_TTA_ERR_MALFORMED;
+    return wc3_tta_path_is_confined(identity) ? BZ_TTA_OK : BZ_TTA_ERR_PATH_CONFINEMENT;
+}
+
 /* Spawn-table precedence is authoritative and avoids reading live server edicts. */
 static bzTTAResult_t wc3_resolve_entity_metadata(uint32_t class_id, bzTTAssetMetadata_t *metadata) {
     char row[5];
@@ -384,5 +425,6 @@ void BZ_WC3_TTA_Source(bzTTAssetSource_t *source) {
         .resolve_terrain_identity = wc3_resolve_terrain_identity,
         .metadata_token = wc3_metadata_token,
         .resolve_entity_metadata = wc3_resolve_entity_metadata,
+        .resolve_replaceable_identity = wc3_resolve_replaceable_identity,
     };
 }

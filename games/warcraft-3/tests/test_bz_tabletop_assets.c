@@ -25,6 +25,7 @@ void test_assets_set_tft(bool enabled);
 void test_assets_set_cliff_specific(bool enabled);
 void test_assets_set_cliff_generic(bool enabled);
 void test_assets_set_metadata_map(unsigned index);
+void test_assets_change_metadata_on_release(bool enabled);
 void test_assets_block_reads(bool blocked);
 void test_assets_wait_for_blocked_reads(unsigned count);
 void test_assets_set_configstring(struct bzTTSnapshot *snapshot, uint32_t index, const char *value);
@@ -199,6 +200,92 @@ static void test_mdx_geometry_materials_sequences_and_bounds(void) {
     ASSERT(BZ_TTAsset_SequenceInfo(asset, 0, &sequence)); ASSERT_STR_EQ(sequence.name, "Stand");
     ASSERT(BZ_TTAsset_NodeInfo(asset, 0, &node)); ASSERT_STR_EQ(node.name, "Bone_Root");
     BZ_TTAsset_Release(image); BZ_TTAsset_Release(asset);
+}
+
+static void test_roc_tft_destructable_replaceable_texture(void) {
+    struct bzTTSnapshot snapshot = { 0 };
+    const bzTTAsset_t *model, *image, *again;
+    bzTTAssetMetadata_t metadata, image_metadata;
+    bzTTModelTextureInfo_t texture;
+    char identity[BZ_TTA_MAX_IDENTITY];
+    for (unsigned tft = 0; tft < 2; tft++) {
+        uint32_t class_id = tft ? FOURCC('L','0','0','0') : FOURCC('L','T','l','t');
+        test_assets_set_tft(tft); reset_assets();
+        if (tft) test_assets_set_metadata_map(1);
+        test_assets_set_configstring(&snapshot, 1, "TestUI/Models/replaceable_sprite.mdx");
+        metadata = resolve_metadata(class_id, BZ_TTA_OK);
+        model = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
+                                            BZ_TTA_ASSET_MODEL, &metadata);
+        ASSERT_NOT_NULL(model); ASSERT(!BZ_TTAsset_IsPlaceholder(model));
+        ASSERT(BZ_TTAsset_ModelTextureInfo(model, 0, &texture));
+        ASSERT_EQ_INT(texture.replaceable_id, 31); ASSERT_STR_EQ(texture.identity, "");
+        image = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, model, 0);
+        again = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, model, 0);
+        ASSERT_NOT_NULL(image); ASSERT(image == again); ASSERT(!BZ_TTAsset_IsPlaceholder(image));
+        ASSERT(BZ_TTAsset_Identity(image, identity, sizeof(identity)));
+        ASSERT_STR_EQ(identity, "ReplaceableTextures\\LordaeronTree\\LordaeronSummerTree.blp");
+        ASSERT(BZ_TTAsset_Metadata(image, &image_metadata));
+        ASSERT_EQ_INT(image_metadata.class_id, class_id);
+        ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), 0);
+        BZ_TTAsset_Release(again); BZ_TTAsset_Release(image); BZ_TTAsset_Release(model);
+    }
+    test_assets_set_tft(false);
+}
+
+static void test_destructable_replaceable_texture_errors_cache_once(void) {
+    static const struct {
+        uint32_t class_id;
+        bzTTAResult_t status;
+        const char *identity;
+    } cases[] = {
+        { FOURCC('B','0','0','1'), BZ_TTA_ERR_NOT_FOUND, "ReplaceableTextures\\missing.blp" },
+        { FOURCC('B','m','i','s'), BZ_TTA_ERR_NOT_FOUND, "<replaceable:31>" },
+        { FOURCC('B','m','a','l'), BZ_TTA_ERR_MALFORMED, "<replaceable:31>" },
+        { FOURCC('B','e','s','c'), BZ_TTA_ERR_PATH_CONFINEMENT, "..\\outside.blp" },
+        { FOURCC('h','f','o','o'), BZ_TTA_ERR_NOT_FOUND, "<replaceable:31>" },
+    };
+    struct bzTTSnapshot snapshot = { 0 };
+    const bzTTAsset_t *model, *image, *again;
+    char identity[BZ_TTA_MAX_IDENTITY];
+    reset_assets();
+    test_assets_set_configstring(&snapshot, 1, "TestUI/Models/replaceable_sprite.mdx");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bzTTAssetMetadata_t metadata = {
+            .class_id = cases[i].class_id, .team_color = BZ_TTA_TEAM_COLOR_NONE,
+            .tint_r = 1, .tint_g = 1, .tint_b = 1, .tint_a = 1,
+        };
+        model = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
+                                            BZ_TTA_ASSET_MODEL, &metadata);
+        ASSERT_NOT_NULL(model); ASSERT(!BZ_TTAsset_IsPlaceholder(model));
+        image = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, model, 0);
+        again = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, model, 0);
+        ASSERT_NOT_NULL(image); ASSERT(image == again); ASSERT(BZ_TTAsset_IsPlaceholder(image));
+        ASSERT_EQ_INT(BZ_TTAsset_Status(image), cases[i].status);
+        ASSERT(BZ_TTAsset_Identity(image, identity, sizeof(identity)));
+        ASSERT_STR_EQ(identity, cases[i].identity);
+        BZ_TTAsset_Release(again); BZ_TTAsset_Release(image); BZ_TTAsset_Release(model);
+    }
+
+    ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), sizeof(cases) / sizeof(cases[0]));
+}
+
+static void test_replaceable_rejects_map_generation_race(void) {
+    struct bzTTSnapshot snapshot = { 0 };
+    const bzTTAsset_t *model, *image;
+    bzTTAssetMetadata_t metadata;
+    reset_assets();
+    test_assets_set_configstring(&snapshot, 1, "TestUI/Models/replaceable_sprite.mdx");
+    metadata = resolve_metadata(FOURCC('L','T','l','t'), BZ_TTA_OK);
+    model = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
+                                        BZ_TTA_ASSET_MODEL, &metadata);
+    ASSERT(model != NULL);
+    test_assets_change_metadata_on_release(true);
+    ASSERT(BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, model, 0) == NULL);
+    image = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, model, 0);
+    ASSERT(image != NULL);
+    ASSERT_EQ_INT(BZ_TTAsset_Status(image), BZ_TTA_OK);
+    BZ_TTAsset_Release(image);
+    BZ_TTAsset_Release(model);
 }
 
 static void test_desktop_model_identity_fallbacks(void) {
@@ -743,11 +830,53 @@ typedef struct {
     const bzTTAsset_t *asset;
 } registrationCtx_t;
 
+typedef struct {
+    const bzTTAsset_t *model;
+    const bzTTAsset_t *image;
+} replaceableRegistrationCtx_t;
+
 static void *blocked_registration(void *opaque) {
     registrationCtx_t *ctx = opaque;
     ctx->asset = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, ctx->snapshot, 1,
                                               BZ_TTA_ASSET_IMAGE, NULL);
     return NULL;
+}
+
+static void *blocked_replaceable_registration(void *opaque) {
+    replaceableRegistrationCtx_t *ctx = opaque;
+    ctx->image = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, ctx->model, 0);
+    return NULL;
+}
+
+static void test_concurrent_replaceable_registration_cache(void) {
+    enum { THREADS = 8 };
+    struct bzTTSnapshot snapshot = { 0 };
+    replaceableRegistrationCtx_t ctx[THREADS];
+    pthread_t threads[THREADS];
+    bzTTAssetMetadata_t metadata;
+    const bzTTAsset_t *model;
+    test_assets_set_configstring(&snapshot, 1, "TestUI/Models/replaceable_sprite.mdx");
+    reset_assets();
+    metadata = resolve_metadata(FOURCC('L','T','l','t'), BZ_TTA_OK);
+    model = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
+                                        BZ_TTA_ASSET_MODEL, &metadata);
+    ASSERT_NOT_NULL(model);
+    test_assets_block_reads(true);
+    for (int i = 0; i < THREADS; i++) {
+        ctx[i] = (replaceableRegistrationCtx_t){ .model = model };
+        ASSERT_EQ_INT(pthread_create(threads + i, NULL, blocked_replaceable_registration, ctx + i), 0);
+    }
+    test_assets_wait_for_blocked_reads(1);
+    test_assets_block_reads(false);
+    for (int i = 0; i < THREADS; i++) ASSERT_EQ_INT(pthread_join(threads[i], NULL), 0);
+    for (int i = 0; i < THREADS; i++) {
+        ASSERT_NOT_NULL(ctx[i].image); ASSERT(ctx[i].image == ctx[0].image);
+        BZ_TTAsset_Release(ctx[i].image);
+    }
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 3);
+    ASSERT_EQ_INT(BZ_TTA_CacheHits(), THREADS - 1);
+    ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), 0);
+    BZ_TTAsset_Release(model);
 }
 
 static void test_inflight_load_cannot_cross_restart(void) {
@@ -854,6 +983,9 @@ void run_bz_tabletop_assets_tests(void) {
     RUN_TEST(test_roc_tft_resolution_and_cache);
     RUN_TEST(test_placeholder_path_confinement_and_log_once_cache);
     RUN_TEST(test_mdx_geometry_materials_sequences_and_bounds);
+    RUN_TEST(test_roc_tft_destructable_replaceable_texture);
+    RUN_TEST(test_destructable_replaceable_texture_errors_cache_once);
+    RUN_TEST(test_replaceable_rejects_map_generation_race);
     RUN_TEST(test_desktop_model_identity_fallbacks);
     RUN_TEST(test_spawn_model_variation_resolution);
     RUN_TEST(test_model_identity_output_bounds);
@@ -870,6 +1002,7 @@ void run_bz_tabletop_assets_tests(void) {
     RUN_TEST(test_entity_metadata_error_log_once_and_cache);
     RUN_TEST(test_entity_metadata_concurrency_and_lifecycle);
     RUN_TEST(test_concurrent_readers_and_shutdown_lifetime);
+    RUN_TEST(test_concurrent_replaceable_registration_cache);
     RUN_TEST(test_inflight_load_cannot_cross_restart);
     RUN_TEST(test_concurrent_missing_asset_logs_once);
     RUN_TEST(test_cleanup_publish_race);

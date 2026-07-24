@@ -239,6 +239,16 @@ static void CM_ReadInfo(HANDLE archive) {
 }
 #endif
 
+static void CM_FreeObjectOverrides(DWORD count, unitData_t *objects) {
+    if (!objects) return;
+    FOR_LOOP(i, count) {
+        FOR_LOOP(j, objects[i].numbeOfModifications)
+            SAFE_DELETE(objects[i].modifications[j].data, MemFree);
+        SAFE_DELETE(objects[i].modifications, MemFree);
+    }
+    MemFree(objects);
+}
+
 static void MapInfo_Release(LPMAPINFO mapInfo) {
     mapTrigStr_t *string = mapInfo ? mapInfo->strings : NULL;
 
@@ -284,12 +294,17 @@ static void MapInfo_Release(LPMAPINFO mapInfo) {
     SAFE_DELETE(mapInfo->techAvailabilities, MemFree);
     SAFE_DELETE(mapInfo->randomUnits, MemFree);
     SAFE_DELETE(mapInfo->randomItems, MemFree);
+    CM_FreeObjectOverrides(mapInfo->num_originalUnits, mapInfo->originalUnits);
+    CM_FreeObjectOverrides(mapInfo->num_userCreatedUnits, mapInfo->userCreatedUnits);
+    CM_FreeObjectOverrides(mapInfo->num_originalDestructables, mapInfo->originalDestructables);
+    CM_FreeObjectOverrides(mapInfo->num_userCreatedDestructables, mapInfo->userCreatedDestructables);
     while (string) {
         mapTrigStr_t *next = string->next;
         MemFree(string);
         string = next;
     }
     SAFE_DELETE(mapInfo->mapscript, MemFree);
+    memset(mapInfo, 0, sizeof(*mapInfo));
 }
 
 #define CM_PLACEMENT_ROC_VERSION 7
@@ -707,21 +722,69 @@ static void CM_ReadHeightmap(HANDLE archive) {
 }
 #endif
 
-void CM_ReadModification(HANDLE file, unitModification_t *mod) {
-    SFileReadFile(file, &mod->modID, 4, NULL, NULL);
-    SFileReadFile(file, &mod->type, 4, NULL, NULL);
+#define CM_MAX_OBJECT_OVERRIDE_COUNT MAX_GAME_ENTITIES
+#define CM_MAX_OBJECT_MODIFICATION_COUNT MAX_GAME_ENTITIES
+
+static DWORD CM_ObjectBytesRemaining(HANDLE file) {
+    DWORD position = SFileSetFilePointer(file, 0, 0, FILE_CURRENT);
+    DWORD size = SFileGetFileSize(file, NULL);
+    return position < size ? size - position : 0;
+}
+
+static BOOL CM_ReadObjectBytes(HANDLE file, void *out, DWORD size) {
+    DWORD read = 0;
+    return SFileReadFile(file, out, size, &read, NULL) && read == size;
+}
+
+static BOOL CM_ReadObjectStringLength(HANDLE file, DWORD *length) {
+    DWORD position = SFileSetFilePointer(file, 0, 0, FILE_CURRENT);
+    DWORD limit = MIN(CM_ObjectBytesRemaining(file), MAX_TRIGSTR_LENGTH);
+    BYTE value;
+    *length = 0;
+    for (DWORD i = 0; i < limit; i++) {
+        if (!CM_ReadObjectBytes(file, &value, 1)) break;
+        if (!value) {
+            *length = i + 1;
+            break;
+        }
+    }
+    SFileSetFilePointer(file, position, 0, FILE_BEGIN);
+    return *length != 0;
+}
+
+static BOOL CM_ReadObjectCount(HANDLE file, DWORD elem_size, DWORD limit, DWORD *count, LPCSTR context) {
+    DWORD remaining;
+    if (!CM_ReadObjectBytes(file, count, sizeof(*count))) {
+        fprintf(stderr, "CM_ReadObjectCount: short count for %s\n", context);
+        return false;
+    }
+    remaining = CM_ObjectBytesRemaining(file);
+    if (*count <= limit && *count <= remaining / elem_size) return true;
+    fprintf(stderr, "CM_ReadObjectCount: invalid %s count %u limit=%u remaining=%u elem=%u\n",
+            context, (unsigned)*count, (unsigned)limit, (unsigned)remaining, (unsigned)elem_size);
+    return false;
+}
+
+static BOOL CM_ReadModification(HANDLE file, unitModification_t *mod, LPCSTR context) {
     DWORD strlength = 0;
+    if (!CM_ReadObjectBytes(file, &mod->modID, 4) ||
+        !CM_ReadObjectBytes(file, &mod->type, 4)) {
+        fprintf(stderr, "CM_ReadModification: short header for %s\n", context);
+        return false;
+    }
     switch (mod->type) {
         case mod_int:
         case mod_real:
         case mod_unreal:
             mod->data = MemAlloc(4);
-            SFileReadFile(file, mod->data, 4, NULL, NULL);
+            if (!mod->data) return false;
+            if (!CM_ReadObjectBytes(file, mod->data, 4)) return false;
             break;
         case mod_bool:
         case mod_char:
             mod->data = MemAlloc(1);
-            SFileReadFile(file, mod->data, 1, NULL, NULL);
+            if (!mod->data) return false;
+            if (!CM_ReadObjectBytes(file, mod->data, 1)) return false;
             break;
         case mod_string:
         case mod_unitList:
@@ -740,47 +803,112 @@ void CM_ReadModification(HANDLE file, unitModification_t *mod) {
         case mod_missileArt:
         case mod_attributeType:
         case mod_attackBits:
-            strlength = SFileReadStringLength(file);
+            if (!CM_ReadObjectStringLength(file, &strlength)) {
+                fprintf(stderr, "CM_ReadModification: unterminated string for %s\n", context);
+                return false;
+            }
             mod->data = MemAlloc(strlength);
-            SFileReadFile(file, mod->data, strlength, NULL, NULL);
+            if (!mod->data) return false;
+            if (!CM_ReadObjectBytes(file, mod->data, strlength)) return false;
             break;
         default:
-            assert(false);
-            break;
+            fprintf(stderr, "CM_ReadModification: invalid type %u for %s\n", (unsigned)mod->type, context);
+            return false;
     }
+    return true;
 }
 
-unitData_t *CM_ReadUnitsOverrides(HANDLE file, DWORD *numUnits) {
+static BOOL CM_ReadUnitsOverrides(HANDLE file, LPCSTR identity, DWORD *numUnits, unitData_t **out) {
+    unitData_t *units;
+    DWORD count, total_modifications = 0;
     DWORD unknown;
-    SFileReadFile(file,numUnits, 4, NULL, NULL);
-    unitData_t *units = MemAlloc(*numUnits * sizeof(unitData_t));
-    for (unitData_t *unit = units; unit - units < *numUnits; unit++) {
-        SFileReadFile(file, &unit->originalUnitID, 4, NULL, NULL);
-        SFileReadFile(file, &unit->newUnitID, 4, NULL, NULL);
-        SFileReadFile(file, &unit->numbeOfModifications, 4, NULL, NULL);
-        unit->modifications = MemAlloc(unit->numbeOfModifications * sizeof(unitModification_t));
+    char context[128];
+    *numUnits = 0; *out = NULL;
+    if (!CM_ReadObjectCount(file, 12, CM_MAX_OBJECT_OVERRIDE_COUNT, &count, identity)) return false;
+    units = count ? MemAlloc(count * sizeof(*units)) : NULL;
+    if (count && !units) return false;
+    if (units) memset(units, 0, count * sizeof(*units));
+    FOR_LOOP(i, count) {
+        unitData_t *unit = units + i;
+        snprintf(context, sizeof(context), "%s object %u", identity, (unsigned)i);
+        if (!CM_ReadObjectBytes(file, &unit->originalUnitID, 4) ||
+            !CM_ReadObjectBytes(file, &unit->newUnitID, 4) ||
+            !CM_ReadObjectCount(file, 13, CM_MAX_OBJECT_MODIFICATION_COUNT,
+                                &unit->numbeOfModifications, context))
+            goto malformed;
+        if (unit->numbeOfModifications > CM_MAX_OBJECT_MODIFICATION_COUNT - total_modifications)
+            goto malformed;
+        total_modifications += unit->numbeOfModifications;
+        if (unit->numbeOfModifications) {
+            unit->modifications = MemAlloc(unit->numbeOfModifications * sizeof(*unit->modifications));
+            if (!unit->modifications) {
+                unit->numbeOfModifications = 0;
+                goto malformed;
+            }
+            memset(unit->modifications, 0, unit->numbeOfModifications * sizeof(*unit->modifications));
+        }
         FOR_LOOP(j, unit->numbeOfModifications) {
-            CM_ReadModification(file, &unit->modifications[j]);
-            SFileReadFile(file, &unknown, 4, NULL, NULL);
+            snprintf(context, sizeof(context), "%s object %u modification %u",
+                     identity, (unsigned)i, (unsigned)j);
+            if (!CM_ReadModification(file, &unit->modifications[j], context) ||
+                !CM_ReadObjectBytes(file, &unknown, 4))
+                goto malformed;
         }
     }
-    return units;
+    *numUnits = count; *out = units;
+    return true;
+malformed:
+    fprintf(stderr, "CM_ReadUnitsOverrides: malformed %s\n", context);
+    CM_FreeObjectOverrides(count, units);
+    return false;
+}
+
+typedef struct {
+    LPCSTR identity;
+    DWORD *num_original, *num_custom;
+    unitData_t **original, **custom;
+} mapOverrides_t;
+
+static void CM_ReadOverrides(HANDLE archive, const mapOverrides_t *overrides) {
+    unitData_t *original = NULL, *custom = NULL;
+    DWORD num_original = 0, num_custom = 0;
+    DWORD version;
+    HANDLE file;
+    if (!SFileOpenFileEx(archive, overrides->identity, SFILE_OPEN_FROM_MPQ, &file)) {
+        *overrides->num_original = *overrides->num_custom = 0;
+        *overrides->original = *overrides->custom = NULL;
+        return;
+    }
+    if (!CM_ReadObjectBytes(file, &version, 4) ||
+        !CM_ReadUnitsOverrides(file, overrides->identity, &num_original, &original) ||
+        !CM_ReadUnitsOverrides(file, overrides->identity, &num_custom, &custom)) {
+        fprintf(stderr, "CM_ReadOverrides: malformed %s\n", overrides->identity);
+        CM_FreeObjectOverrides(num_original, original);
+        CM_FreeObjectOverrides(num_custom, custom);
+        num_original = num_custom = 0; original = custom = NULL;
+    }
+    *overrides->num_original = num_original; *overrides->num_custom = num_custom;
+    *overrides->original = original; *overrides->custom = custom;
+    SFileCloseFile(file);
 }
 
 void CM_ReadUnits(HANDLE archive) {
-    DWORD version;
-    HANDLE file;
-    if (!SFileOpenFileEx(archive, "war3map.w3u", SFILE_OPEN_FROM_MPQ, &file)) {
-        world.info.num_originalUnits = 0;
-        world.info.num_userCreatedUnits = 0;
-        world.info.originalUnits = NULL;
-        world.info.userCreatedUnits = NULL;
-        return;
-    }
-    SFileReadFile(file, &version, 4, NULL, NULL);
-    world.info.originalUnits = CM_ReadUnitsOverrides(file, &world.info.num_originalUnits);
-    world.info.userCreatedUnits = CM_ReadUnitsOverrides(file, &world.info.num_userCreatedUnits);
-    SFileCloseFile(file);
+    mapOverrides_t units = {
+        .identity = "war3map.w3u",
+        .num_original = &world.info.num_originalUnits,
+        .num_custom = &world.info.num_userCreatedUnits,
+        .original = &world.info.originalUnits,
+        .custom = &world.info.userCreatedUnits,
+    };
+    mapOverrides_t destructables = {
+        .identity = "war3map.w3b",
+        .num_original = &world.info.num_originalDestructables,
+        .num_custom = &world.info.num_userCreatedDestructables,
+        .original = &world.info.originalDestructables,
+        .custom = &world.info.userCreatedDestructables,
+    };
+    CM_ReadOverrides(archive, &units);
+    CM_ReadOverrides(archive, &destructables);
 }
 
 LPSTR FS_ReadArchiveFileIntoString(HANDLE archive, LPCSTR filename) {

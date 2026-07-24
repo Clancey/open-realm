@@ -22,6 +22,7 @@ static const metadataMapSnapshot_t *metadata_map = metadata_maps;
 static bool test_tft;
 static bool cliff_specific;
 static bool cliff_generic = true;
+static bool change_metadata_on_release;
 static pthread_mutex_t read_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t read_cond = PTHREAD_COND_INITIALIZER;
 static bool read_blocked;
@@ -34,14 +35,23 @@ void test_assets_set_metadata_map(unsigned index) {
     level.mapinfo = index < 2 ? test_mapinfo + index : NULL;
     metadata_map = index < 2 ? metadata_maps + index : NULL;
 }
+void test_assets_change_metadata_on_release(bool enabled) { change_metadata_on_release = enabled; }
 
 void G_MetadataPublishMap(LPCMAPINFO mapinfo) { (void)mapinfo; }
 const metadataMapSnapshot_t *G_MetadataMapAcquire(void) { return metadata_map; }
-void G_MetadataMapRelease(const metadataMapSnapshot_t *snapshot) { (void)snapshot; }
+void G_MetadataMapRelease(const metadataMapSnapshot_t *snapshot) {
+    (void)snapshot;
+    if (change_metadata_on_release) {
+        change_metadata_on_release = false;
+        metadata_map = metadata_maps + (metadata_map == metadata_maps);
+        level.mapinfo = test_mapinfo + metadata_map->map;
+    }
+}
 uint64_t G_MetadataMapToken(const metadataMapSnapshot_t *snapshot) { return snapshot ? snapshot->token : 0; }
 DWORD G_MetadataMapClass(const metadataMapSnapshot_t *snapshot, DWORD class_id) {
-    return snapshot && snapshot->map == 1 && class_id == FOURCC('h','p','e','a')
-        ? FOURCC('h','p','e','2') : class_id;
+    if (!snapshot || snapshot->map != 1) return class_id;
+    if (class_id == FOURCC('h','p','e','a')) return FOURCC('h','p','e','2');
+    return class_id == FOURCC('L','0','0','0') ? FOURCC('L','T','l','t') : class_id;
 }
 void test_assets_block_reads(bool blocked) {
     pthread_mutex_lock(&read_lock);
@@ -151,14 +161,24 @@ static LPCSTR unit_field(DWORD class_id, LPCSTR name) {
 static LPCSTR destructable_field(DWORD class_id, LPCSTR name) {
     if (class_id == FOURCC('L','T','l','t') || class_id == FOURCC('B','0','0','1') ||
         class_id == FOURCC('B','b','a','d') || class_id == FOURCC('B','m','a','l') ||
-        class_id == FOURCC('B','e','s','c')) {
+        class_id == FOURCC('B','e','s','c') || class_id == FOURCC('B','m','i','s')) {
         if (!strcmp(name, "bfil")) return "Doodads\\Terrain\\Model.mdx";
         if (!strcmp(name, "btar")) return class_id == FOURCC('L','T','l','t') ? "tree" : "wall";
         if (!strcmp(name, "bptx"))
             return class_id == FOURCC('L','T','l','t') ? "PathTextures\\2x2Tree.tga" :
-                   class_id == FOURCC('B','0','0','1') ? "PathTextures\\3x4Destructable.tga" :
+                   class_id == FOURCC('B','0','0','1') || class_id == FOURCC('B','m','i','s') ?
+                       "PathTextures\\3x4Destructable.tga" :
                    class_id == FOURCC('B','m','a','l') ? "PathTextures\\malformed.tga" :
                    class_id == FOURCC('B','e','s','c') ? "..\\outside.tga" : NULL;
+        if (!strcmp(name, "btxi"))
+            return class_id == FOURCC('B','m','a','l') ? "bad" :
+                   class_id == FOURCC('B','m','i','s') ? "32" : "31";
+        if (!strcmp(name, "btxf"))
+            return class_id == FOURCC('L','T','l','t') ?
+                       "ReplaceableTextures\\LordaeronTree\\LordaeronSummerTree" :
+                   class_id == FOURCC('B','0','0','1') ? "ReplaceableTextures\\missing" :
+                   class_id == FOURCC('B','e','s','c') ? "..\\outside" :
+                   "ReplaceableTextures\\LordaeronTree\\LordaeronSummerTree";
         if (!strcmp(name, "bvcr")) return "220";
         if (!strcmp(name, "bvcg")) return "230";
         if (!strcmp(name, "bvcb")) return "240";
@@ -235,7 +255,8 @@ HANDLE FS_ReadFile(LPCSTR identity, LPDWORD size) {
     if (!strcmp(identity, "TerrainArt\\ROC\\Dirt.blp") ||
         !strcmp(identity, "TerrainArt\\ROC\\Grass.blp") ||
         !strcmp(identity, "ReplaceableTextures\\Cliff\\L_Cliff0.blp") ||
-        !strcmp(identity, "ReplaceableTextures\\Cliff\\Cliff0.blp"))
+        !strcmp(identity, "ReplaceableTextures\\Cliff\\Cliff0.blp") ||
+        !strcmp(identity, "ReplaceableTextures\\LordaeronTree\\LordaeronSummerTree.blp"))
         identity = "TestUI/Textures/solid_white.blp";
     else if (!strcmp(identity, "TerrainArt\\TFT\\Dirt.blp"))
         identity = "TestUI/Textures/orientation_2x2.blp";
