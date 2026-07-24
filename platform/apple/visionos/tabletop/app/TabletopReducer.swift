@@ -16,7 +16,10 @@ enum TabletopLauncherEvent {
 enum TabletopLauncherReducer {
     static func reduce(_ state: TabletopLauncherState, _ event: TabletopLauncherEvent) -> TabletopLauncherState {
         switch event {
-        case .launchRequested where state == .waiting, .retryRequested:
+        case .launchRequested where state == .waiting:
+            return .opening
+        case .retryRequested:
+            guard case .failed = state else { return state }
             return .opening
         case .openSucceeded where state == .opening:
             return .open

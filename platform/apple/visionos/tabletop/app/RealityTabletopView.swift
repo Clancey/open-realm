@@ -111,6 +111,8 @@ final class RealityTabletopReconciler {
 }
 
 struct TabletopImmersiveView: View {
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var model: TabletopSessionModel
     @State private var reconciler = RealityTabletopReconciler()
     @State private var dragState = TabletopDragState()
@@ -145,11 +147,21 @@ struct TabletopImmersiveView: View {
             guard !active, let id = dragState.entityID else { return }
             _ = dragState.end(entityID: id, cancelled: true)
         }
-        .task { await model.start() }
-        .onDisappear { model.stop() }
+        .onDisappear { Task { await model.stop() } }
         .overlay(alignment: .top) {
             if let error = model.errorMessage {
-                Text(error).padding().glassBackgroundEffect()
+                VStack {
+                    Text(error)
+                    Button("Return to Launcher") {
+                        Task {
+                            await model.stop()
+                            await dismissImmersiveSpace()
+                            openWindow(id: "launcher")
+                        }
+                    }
+                }
+                .padding()
+                .glassBackgroundEffect()
             }
         }
     }

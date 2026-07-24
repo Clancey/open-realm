@@ -1,4 +1,4 @@
-# visionOS tabletop runtime and fixture shell
+# visionOS tabletop runtime and native shell
 
 Layer 1 establishes a callable, statically-linked, visionOS-compatible
 Warcraft III engine runtime that a later layer can host from Swift/RealityKit
@@ -15,7 +15,7 @@ frozen Layer-2 C ABI plus the existing Objective-C++ lifecycle host. Live mode
 copies retained C snapshots into Swift values, releases the C snapshot, then
 publishes to RealityKit; it never exposes engine-owned pointers to the UI.
 
-## Fixture-only Swift seam
+## Native Swift shell seam
 
 ```
 TabletopSnapshotTransport (pure Swift protocol)
@@ -39,27 +39,49 @@ RealityTabletopReconciler (RealityKit ownership)
 - `FixtureSnapshotTransport` emits at most 49 terrain tiles and three entities.
   It advances generation every six polls so both deduplication paths run.
 - `LiveTabletopTransport` starts/stops `BZTabletopBridge`, retains with
-  `BZ_TT_Latest()`, validates `BZ_TABLETOP_ABI_VERSION`, copies map bounds and
-  every uniquely identified bounded entity, records ABI overflow and duplicate
-  slot IDs, and always releases before returning.
+  `BZ_TT_Latest()`, validates `BZ_TABLETOP_ABI_VERSION`, and copies connection,
+  map, player/resource, selection, every entity POD field, fog planes, and
+  nested unit-layout/button/inventory/queue strings and arrays into
+  framework-free Swift values. It records ABI overflow and duplicate slot IDs,
+  and a tested lease helper always releases before returning or throwing.
   Typed `TabletopCommand` values call only the five validated `BZ_TT_Post*`
   entry points. Tap selection uses the ABI's documented generation-zero bypass
   because the engine publishes around 60 Hz while rendering polls around 30 Hz;
   the Swift session ID still rejects commands crossing lifecycle restarts.
 - The launcher opens the `tabletop` mixed `ImmersiveSpace` automatically. It
-  dismisses its window only after `.opened`; cancellation and failure retain
-  an actionable Retry UI.
+  first starts the selected transport and waits up to three cancellable seconds
+  for an ABI-validated snapshot, then opens the space. It dismisses its window
+  only after `.opened`; missing data, startup, ABI, timeout, cancellation, and
+  open failures retain an actionable Retry UI. Runtime/queue failures offer a
+  return to that launcher from the immersive error panel.
 - RealityKit owns the visible surface. SDL is neither a visible surface nor a
   scene delegate on this lane.
 
 Fixture mode is the default. Set `BZ_TABLETOP_MODE=live` to start the engine;
 `BZ_TABLETOP_DATA_PATH` defaults to the app's `Resources/` directory, while
 optional `BZ_TABLETOP_MAP` and `BZ_TABLETOP_CONNECT` values become the normal
-engine startup arguments. An unknown mode is surfaced as an error, never
-silently demoted to fixtures. The data lane may provide an executable
+engine startup arguments. Live mode requires either a map or connect target.
+Preflight follows the engine's real data rules and filesystem metadata: it
+accepts a regular MPQ file, or the exact root-relative loose
+`Scripts/common.j` plus a regular `.w3m`/`.w3x` for local-map startup
+(`common.j` alone is sufficient for a remote connect). Arbitrary nonempty
+directories are rejected in the launcher rather than producing a fake empty
+live session. An unknown mode is surfaced as an error, never silently demoted
+to fixtures. The data lane may provide an executable
 `BZ_TABLETOP_RESOURCE_HOOK`; `build-tabletop.sh` calls it with the bundle's
 `Resources/` directory. The default build copies no MPQs or other private game
 data.
+
+### Frozen ABI configstring enumeration gap
+
+Layer 3 does not fabricate a configstring bound. The frozen
+`BZ_TTSnapshot_ConfigString(snap, index, out, cap)` accessor exposes neither a
+count nor `MAX_CONFIGSTRINGS`, and `false` means either an empty valid slot or
+an out-of-range index. The shell therefore cannot enumerate all configstrings
+before releasing the retained snapshot without guessing a private engine
+constant. `TabletopSnapshot.configStrings` remains empty until Layer 2 gains an
+authorized append-only count/bound accessor; every other enumerable public
+snapshot field is copied now.
 
 ### Fixture-shell build and tests
 
@@ -69,6 +91,12 @@ make visionos-tabletop-xrsimulator     # arm64 xrsimulator 2.0 app, ad-hoc signe
 make visionos-tabletop-xros            # arm64 xros 2.0 app, unsigned
 make visionos-tabletop                 # all three gates
 ```
+
+Host coverage includes launcher reduction, mode selection, lifecycle mapping,
+generation deduplication, fixture queue hit/full/stale-session paths, command
+lowering/error mapping, world bounds/overflow, duplicate-safe reconciliation,
+gesture terminal suppression, polling cancellation, first-snapshot timeout
+plumbing, and snapshot release on copy success/failure.
 
 The app bundle is
 `build/visionos/tabletop/<platform>/OpenRealmTabletopFixture.app` with bundle
@@ -407,8 +435,8 @@ output, or eventually running a built binary):
 Layer 2 replaces Layer 1's link-smoke-only null client with the **real**
 `client/*.c` networking/parse/state path, and adds
 `platform/bridge/bz_tabletop_transport.{h,c}` — a pure C, versioned,
-Objective-C/Swift/SDL/RealityKit-free ABI that a later native Swift/
-RealityKit host imports directly (or via a bridging header) to read
+Objective-C/Swift/SDL/RealityKit-free ABI that the native shell above imports
+through its local module map to read
 authoritative snapshots and post typed commands. It still does **not**
 implement Swift/SwiftUI/RealityKit, app creation/signing, asset decoding/export,
 visible rendering, audio, menus, or multiplayer — those remain later layers.

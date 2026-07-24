@@ -25,6 +25,13 @@ enum TabletopTransportError: Error, Equatable, CustomStringConvertible {
     case commandRejected(UInt32)
     case commandQueueFull
     case staleSession
+    case notInitialized
+    case terminal
+    case abiVersionRejected
+    case staleGeneration
+    case invalidCommand(String)
+    case startupTimedOut
+    case malformedSnapshot(String)
     case invalidSnapshotEntity(UInt32)
 
     var description: String {
@@ -35,6 +42,13 @@ enum TabletopTransportError: Error, Equatable, CustomStringConvertible {
         case .commandRejected(let result): return "Tabletop command rejected with result \(result)"
         case .commandQueueFull: return "Fixture command queue is full"
         case .staleSession: return "Tabletop command belongs to a stopped session"
+        case .notInitialized: return "Tabletop transport is not initialized"
+        case .terminal: return "Tabletop transport has stopped"
+        case .abiVersionRejected: return "Tabletop transport rejected this ABI version"
+        case .staleGeneration: return "Tabletop command was based on a stale snapshot"
+        case .invalidCommand(let message): return message
+        case .startupTimedOut: return "Timed out waiting for the first live tabletop snapshot"
+        case .malformedSnapshot(let message): return "Malformed tabletop snapshot: \(message)"
         case .invalidSnapshotEntity(let index): return "Tabletop snapshot entity \(index) could not be copied"
         }
     }

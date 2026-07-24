@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Open Realm Tabletop Fixture</string>
+	<string>Open Realm Tabletop</string>
 	<key>CFBundleExecutable</key>
 	<string>OpenRealmTabletopFixture</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>OpenRealmTabletopFixture</string>
+	<string>OpenRealmTabletop</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

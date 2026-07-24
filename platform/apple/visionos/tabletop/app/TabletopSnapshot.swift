@@ -50,15 +50,23 @@ struct TabletopEntitySnapshot: Equatable, Sendable {
     var position: TabletopVector3
     var heading: Float
     var selected: Bool
+    var metadata = TabletopEntityMetadata()
 }
 
 struct TabletopSnapshot: Equatable, Sendable {
+    var abiVersion: UInt32 = 0
     var generation: UInt64
     var terrain: [TabletopTerrainTile]
     var entities: [TabletopEntitySnapshot]
     var sessionID: UInt64 = 0
     var coordinateSpace = TabletopCoordinateSpace.fixtureBoard
     var connectionState = TabletopConnectionState.active
+    var mapName: String?
+    var player: TabletopPlayerSnapshot?
+    var selectedEntityIDs: [UInt32] = []
+    var fog: TabletopFogSnapshot?
+    var unitLayouts: [TabletopUnitLayoutSnapshot] = []
+    var configStrings: [UInt32: String] = [:]
     var entitiesOverflowCount: UInt32 = 0
     var duplicateEntityCount: UInt32 = 0
 }

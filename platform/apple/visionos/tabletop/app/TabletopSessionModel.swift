@@ -10,43 +10,65 @@ final class TabletopSessionModel: ObservableObject {
     private var deduplicator = TabletopGenerationDeduplicator()
     private var pollingTask: Task<Void, Never>?
     private var commandEpoch: UInt64 = 0
+    private var phase = TabletopLifecycleState.idle
+    let modeName: String
 
-    init(transport: any TabletopSnapshotTransport, commands: (any TabletopCommandTransport)? = nil) {
+    init(modeName: String, transport: any TabletopSnapshotTransport,
+         commands: (any TabletopCommandTransport)? = nil) {
+        self.modeName = modeName
         self.transport = transport
         self.commandTransport = commands
     }
 
-    func start() async {
+    func prepare() async throws {
+        if phase == .running { return }
         if let current = pollingTask {
-            guard current.isCancelled else { return }
+            guard current.isCancelled else {
+                throw TabletopTransportError.runtime("Tabletop polling is already active")
+            }
             await current.value
         }
+        guard phase == .idle else { throw TabletopTransportError.runtime("Tabletop startup is already in progress") }
+        phase = .starting
         commandEpoch &+= 1
         renderSnapshot = .empty
         errorMessage = nil
         deduplicator = TabletopGenerationDeduplicator()
+        do {
+            try await transport.start()
+            let first = try await TabletopPolling.firstSnapshot(
+                transport: transport, attempts: 90, sleep: { try await Task.sleep(for: .milliseconds(33)) })
+            consume(first)
+            phase = .running
+        } catch {
+            await transport.stop()
+            phase = .idle
+            throw error
+        }
         pollingTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await transport.start()
-                while !Task.isCancelled {
-                    if let snapshot = try await transport.poll(), let fresh = deduplicator.accept(snapshot) {
-                        // Conversion copies transport values before RealityKit observes the published snapshot.
-                        renderSnapshot = TabletopSnapshotConverter.convert(fresh)
-                        if fresh.entitiesOverflowCount > 0 || fresh.duplicateEntityCount > 0 {
-                            errorMessage = "Snapshot capped \(fresh.entitiesOverflowCount) entities and ignored " +
-                                "\(fresh.duplicateEntityCount) duplicate IDs."
-                        }
-                    }
-                    try await Task.sleep(for: .milliseconds(33))
-                }
+                try await TabletopPolling.run(
+                    transport: transport, sleep: { try await Task.sleep(for: .milliseconds(33)) },
+                    receive: { [weak self] snapshot in await self?.consume(snapshot) })
             } catch is CancellationError {
                 // Cancellation is normal when the immersive scene closes.
             } catch {
                 errorMessage = "Tabletop transport failed: \(error)"
             }
             await transport.stop()
+            phase = .idle
             pollingTask = nil
+        }
+    }
+
+    private func consume(_ snapshot: TabletopSnapshot) {
+        guard let fresh = deduplicator.accept(snapshot) else { return }
+        // The transport has already released all C storage before this main-actor conversion.
+        renderSnapshot = TabletopSnapshotConverter.convert(fresh)
+        if fresh.entitiesOverflowCount > 0 || fresh.duplicateEntityCount > 0 {
+            errorMessage = "Snapshot capped \(fresh.entitiesOverflowCount) entities and ignored " +
+                "\(fresh.duplicateEntityCount) duplicate IDs."
         }
     }
 
@@ -62,9 +84,17 @@ final class TabletopSessionModel: ObservableObject {
         }
     }
 
-    func stop() {
+    func stop() async {
         commandEpoch &+= 1
         renderSnapshot = .empty
-        pollingTask?.cancel()
+        guard let pollingTask else {
+            await transport.stop()
+            phase = .idle
+            return
+        }
+        phase = .stopped
+        pollingTask.cancel()
+        await pollingTask.value
+        phase = .idle
     }
 }

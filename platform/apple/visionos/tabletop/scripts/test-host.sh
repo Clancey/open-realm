@@ -10,6 +10,8 @@ mkdir -p "$(dirname -- "$OUT")"
 xcrun swiftc -parse-as-library \
     "$TABLETOP/app/TabletopSnapshot.swift" \
     "$TABLETOP/app/TabletopCommand.swift" \
+    "$TABLETOP/app/TabletopAdapter.swift" \
+    "$TABLETOP/app/TabletopLiveValues.swift" \
     "$TABLETOP/app/FixtureSnapshotTransport.swift" \
     "$TABLETOP/app/TabletopReducer.swift" \
     "$TABLETOP/app/TabletopPlacement.swift" \
