@@ -80,6 +80,7 @@ BZ_XR_FDF_CFLAGS   := $(BZ_XR_CFLAGS) -DSTB_FDF_IMPLEMENTATION -DSTB_FDF_GLOBALS
 # This mirrors how the desktop unity build (Makefile's `CSRC`, alphabetically
 # sorted) happens to place cl_input.c before cl_view.c today.
 BZ_XR_CLIENT_SRCS := $(shell find $(BZ_XR_TT_CLIENT_DIR) -name '*.c' | sort) \
+                     $(BZ_XR_BRIDGE_TRANSPORT_DIR)/bz_tabletop_assets.c \
                      $(BZ_XR_BRIDGE_TRANSPORT_DIR)/bz_tabletop_transport.c \
                      client/cl_main.c client/cl_parse.c client/cl_view.c client/cl_tent.c client/keys.c
 BZ_XR_ENGINE_SRCS := $(shell find common -name '*.c' ! -name main.c ! -name macos.c ! -name world.c ! -name routing.c | sort) \
@@ -87,6 +88,7 @@ BZ_XR_ENGINE_SRCS := $(shell find common -name '*.c' ! -name main.c ! -name maco
                      $(BZ_XR_CLIENT_SRCS)
 BZ_XR_GAME_SRCS   := $(shell find $(WC3_DIR)/game -name '*.c' | sort) \
                      $(shell find $(WC3_DIR)/common -name '*.c' ! -name world_w3.c | sort)
+BZ_XR_ASSET_SRCS  := $(shell find $(WC3_DIR)/visionos -name '*.c' | sort)
 BZ_XR_JASS_SRCS   := $(shell find $(WC3_JASS_DIR) -name '*.c' | sort)
 BZ_XR_SHEET_SRCS  := $(WC3_SHEET_DIR)/parser.c $(WC3_SHEET_DIR)/sheet.c
 BZ_XR_SHARED_SRCS := $(shell find shared -name '*.c' | sort)
@@ -111,7 +113,7 @@ BZ_XR_SDK_xrsimulator    := xrsimulator
 BZ_XR_TRIPLE_xros        := arm64-apple-xros$(BZ_XR_MIN_OS)
 BZ_XR_SDK_xros           := xros
 
-# Per-platform: 5 unity objects (engine, game, jass, sheet, shared) archived
+# Per-platform: 6 unity objects (engine, game, asset translation, jass, sheet, shared) archived
 # into one libopenwarcraft3-engine.a. Sys_Quit() is intentionally left
 # undefined by the archive - exactly like Quake 2's per-platform sys_*.c,
 # it is supplied by whichever host links this archive (the desktop main.c,
@@ -122,11 +124,12 @@ BZ_XR_$(1)_ARCHIVE  := $$(BZ_XR_$(1)_DIR)/libopenwarcraft3-engine.a
 
 $$(eval $$(call bz_xr_unity_o,$$(BZ_XR_$(1)_DIR)/engine.o,engine,$$(BZ_XR_ENGINE_SRCS),$$(BZ_XR_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_unity_o,$$(BZ_XR_$(1)_DIR)/game.o,game,$$(BZ_XR_GAME_SRCS),$$(BZ_XR_FDF_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+$$(eval $$(call bz_xr_unity_o,$$(BZ_XR_$(1)_DIR)/assets.o,assets,$$(BZ_XR_ASSET_SRCS),$$(BZ_XR_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_unity_o,$$(BZ_XR_$(1)_DIR)/jass.o,jass,$$(BZ_XR_JASS_SRCS),$$(BZ_XR_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_unity_o,$$(BZ_XR_$(1)_DIR)/sheet.o,sheet,$$(BZ_XR_SHEET_SRCS),$$(BZ_XR_BASE_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_unity_o,$$(BZ_XR_$(1)_DIR)/shared.o,shared,$$(BZ_XR_SHARED_SRCS),$$(BZ_XR_BASE_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 
-$$(BZ_XR_$(1)_ARCHIVE): $$(BZ_XR_$(1)_DIR)/engine.o $$(BZ_XR_$(1)_DIR)/game.o $$(BZ_XR_$(1)_DIR)/jass.o $$(BZ_XR_$(1)_DIR)/sheet.o $$(BZ_XR_$(1)_DIR)/shared.o
+$$(BZ_XR_$(1)_ARCHIVE): $$(BZ_XR_$(1)_DIR)/engine.o $$(BZ_XR_$(1)_DIR)/game.o $$(BZ_XR_$(1)_DIR)/assets.o $$(BZ_XR_$(1)_DIR)/jass.o $$(BZ_XR_$(1)_DIR)/sheet.o $$(BZ_XR_$(1)_DIR)/shared.o
 	@mkdir -p $$(@D)
 	@echo "[archive $(1)]"
 	@ar rcs $$@ $$^

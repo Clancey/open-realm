@@ -82,6 +82,12 @@ static void wb_patch_size(wbuf_t *b, size_t off) {
     memcpy(b->data + off, &sz, 4);
 }
 
+/* MDX object records include their own size DWORD; top-level chunk sizes do not. */
+static void wb_patch_record_size(wbuf_t *b, size_t off) {
+    uint32_t sz = (uint32_t)(b->size - off);
+    memcpy(b->data + off, &sz, 4);
+}
+
 static void wb_tag(wbuf_t *b, const char tag[4]) {
     wb_write(b, tag, 4);
 }
@@ -218,14 +224,14 @@ static void emit_MTLS(wbuf_t *b) {
         wb_tag(b, "LAYS");
         wb_u32(b, 1);              /* num_layers */
         /* Layer entry: 4-byte size prefix then 24 bytes of fixed fields */
-        wb_u32(b, MDX_LAYER_FIXED);
+        wb_u32(b, MDX_LAYER_FIXED + 4);
         wb_u32(b, 4);              /* blendMode = 4 (AddAlpha, works for sprites) */
         wb_u32(b, 0x10);           /* flags = TwoSided */
         wb_u32(b, 0);              /* textureId = 0 */
         wb_u32(b, 0xFFFFFFFF);     /* transformId = none */
         wb_i32(b, 0);              /* coordId */
         wb_f32(b, 1.0f);           /* staticAlpha */
-        wb_patch_size(b, mat_size_off);
+        wb_patch_record_size(b, mat_size_off);
     }
     wb_patch_size(b, chunk_size_off);
 }
@@ -292,7 +298,7 @@ static void emit_GEOS_RECT(wbuf_t *b, float minx, float miny, float maxx, float 
                   maxx, maxy, 0.0f);
         wb_u32(b, 0);              /* num_bounds (per-sequence) = 0 */
 
-        wb_patch_size(b, geo_size_off);
+        wb_patch_record_size(b, geo_size_off);
     }
     wb_patch_size(b, chunk_size_off);
 }

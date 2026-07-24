@@ -2,6 +2,8 @@
 #define BZ_TABLETOP_SWIFT_H
 
 #import "bz_tabletop_bridge.h"
+#include "bz_tabletop_lifecycle.h"
+#include "../../../../bridge/bz_tabletop_assets.h"
 #include "../../../../bridge/bz_tabletop_transport.h"
 
 #endif

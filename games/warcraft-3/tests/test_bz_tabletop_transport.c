@@ -25,6 +25,9 @@
 #include "test_framework.h"
 
 void test_transport_stubs_reset(void);
+void test_transport_block_asset_init(bool block);
+void test_transport_wait_for_asset_init(void);
+bool test_transport_asset_terminal(void);
 void test_transport_set_world_bounds(BOX2 bounds);
 void test_transport_set_unit_layouts(const bzTTUnitLayout_t *layouts, uint32_t count);
 
@@ -79,6 +82,32 @@ static void test_init_after_shutdown_is_idempotent_restart(void) {
     BZ_TT_Shutdown();
     BZ_TT_Init(); /* restart: Latest() must be NULL again until a fresh publish */
     ASSERT_NULL(BZ_TT_Latest());
+}
+
+static void *transport_init_thread(void *opaque) { (void)opaque; BZ_TT_Init(); return NULL; }
+static void *transport_shutdown_thread(void *opaque) {
+    atomic_bool *done = opaque;
+    BZ_TT_Shutdown(); atomic_store(done, true); return NULL;
+}
+
+static void test_asset_and_transport_lifecycle_are_atomic(void) {
+    pthread_t initializer, shutdowner;
+    atomic_bool shutdown_done = false;
+    uint32_t id = 1;
+    BZ_TT_Shutdown();
+    test_transport_block_asset_init(true);
+    ASSERT_EQ_INT(pthread_create(&initializer, NULL, transport_init_thread, NULL), 0);
+    test_transport_wait_for_asset_init();
+    ASSERT_EQ_INT(pthread_create(&shutdowner, NULL, transport_shutdown_thread, &shutdown_done), 0);
+    struct timespec tiny = { 0, 2L * 1000L * 1000L };
+    nanosleep(&tiny, NULL);
+    ASSERT(!atomic_load(&shutdown_done));
+    test_transport_block_asset_init(false);
+    ASSERT_EQ_INT(pthread_join(initializer, NULL), 0);
+    ASSERT_EQ_INT(pthread_join(shutdowner, NULL), 0);
+    ASSERT(test_transport_asset_terminal());
+    ASSERT_EQ_INT(BZ_TT_PostSelect(BZ_TABLETOP_ABI_VERSION, 0, &id, 1), BZ_TT_ERR_TERMINAL);
+    BZ_TT_Init();
 }
 
 /* --- Snapshot generation / immutability / ownership ---------------------- */
@@ -671,6 +700,7 @@ void run_bz_tabletop_transport_tests(void) {
     RUN_TEST(test_post_before_init_is_rejected);
     RUN_TEST(test_shutdown_rejects_further_posts_but_keeps_outstanding_snapshots);
     RUN_TEST(test_init_after_shutdown_is_idempotent_restart);
+    RUN_TEST(test_asset_and_transport_lifecycle_are_atomic);
     RUN_TEST(test_generation_increments_monotonically_per_publish);
     RUN_TEST(test_retained_snapshot_is_immutable_across_a_later_publish);
     RUN_TEST(test_retain_and_release_are_reference_counted);
