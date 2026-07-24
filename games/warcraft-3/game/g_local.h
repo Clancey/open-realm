@@ -924,6 +924,7 @@ void G_SetPlayerAlliance(LPCPLAYER, LPCPLAYER, PLAYERALLIANCE, BOOL);
 BOOL G_GetPlayerAlliance(LPCPLAYER, LPCPLAYER, PLAYERALLIANCE);
 
 // m_unit.c
+void unit_stand(LPEDICT);
 BOOL unit_issueorder(LPEDICT, LPCSTR, LPCVECTOR2);
 BOOL unit_issueimmediateorder(LPEDICT, LPCSTR);
 BOOL unit_issuetargetorder(LPEDICT, LPCSTR, LPEDICT);

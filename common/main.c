@@ -1,5 +1,6 @@
 #include "../client/client.h"
 #include "server/server.h"
+#include "bz_runtime.h"
 
 #include <SDL2/SDL.h>
 #include <stdlib.h>
@@ -61,20 +62,6 @@
 
 extern LPTEXTURE Texture;
 
-static unsigned short Sys_GamePort(void) {
-    int port = Cvar_Integer("game_port", PORT_SERVER);
-
-    if (port <= 0 || port > 65535) {
-        fprintf(stderr,
-                "Invalid game_port %d, using default %u\n",
-                port,
-                (unsigned)PORT_SERVER);
-        Cvar_Set("game_port", PORT_SERVER_STRING);
-        port = PORT_SERVER;
-    }
-    return (unsigned short)port;
-}
-
 void Sys_Quit(void) {
     exit(0);
 }
@@ -116,9 +103,15 @@ static LPSTR Sys_ConsoleInput(void) {
     }
 }
 
+/*
+ * main() is a thin desktop wrapper: everything reusable across hosts
+ * (cvar/filesystem/client/server bring-up, the per-frame SV_Frame/CL_Frame
+ * dance, and orderly shutdown) lives in bz_runtime.c. This file keeps only
+ * what is genuinely desktop-specific: the startup banner and -data usage
+ * text, SDL_GetTicks() as the frame time source, and dedicated-mode stdin
+ * console input (select()/fgetc(), which has no equivalent on an
+ * embeddable host with no terminal). */
 int main(int argc, LPSTR argv[]) {
-    BOOL data = 0;
-
     fprintf(stderr,
             "\nOpenWarcraft3\n"
             "Platform: %s\n"
@@ -128,103 +121,30 @@ int main(int argc, LPSTR argv[]) {
             BZ_ARCH,
             BZ_BYTE_ORDER);
 
-    Com_Init(argc, (LPCSTR *)argv);
-
-    LPCSTR data_dir = Cvar_String("data", "");
-    if (data_dir && *data_dir) {
-        if (!FS_AddDataDirectory(data_dir)) {
-            fprintf(stderr, "Failed to add data directory: %s\n", data_dir);
-            return 1;
+    bzRuntimeArgs_t runtimeArgs = { argc, (LPCSTR *)argv };
+    bzRuntimeInitResult_t initResult = BZ_RuntimeInit(&runtimeArgs);
+    if (initResult != BZ_RUNTIME_INIT_OK) {
+        if (initResult == BZ_RUNTIME_INIT_ERR_NO_DATA_DIR) {
+            printf(USAGE);
         }
-        data = 1;
-    }
-
-    LPCSTR extra_data_dir = Cvar_String("extra_data", "");
-    if (extra_data_dir && *extra_data_dir) {
-        FS_AddDataDirectory(extra_data_dir);
-    }
-
-    if (!data) {
-        printf(USAGE);
+        /* All other failure reasons are already reported to stderr by
+         * BZ_RuntimeInit() itself, matching the previous inline messages. */
         return 1;
-    }
-
-    PATHSTR resolved_map;
-    LPCSTR map = Cvar_String("map", "");
-    LPCSTR connect_addr = Cvar_String("connect", "");
-    bool has_map = map && *map;
-    bool has_connect_addr = connect_addr && *connect_addr;
-    bool menu_mode = !has_map && !has_connect_addr;
-    bool listen_server_mode = has_map && !has_connect_addr;
-    unsigned short game_port = Sys_GamePort();
-
-    if (has_map) {
-        if (!Com_ResolveMapArgument(map, resolved_map, sizeof(resolved_map))) {
-            return 1;
-        }
-        map = resolved_map;
-    }
-    bool dedicated = Cvar_Integer("dedicated", 0) != 0;
-
-    /* Dedicated server mode: follow the Quake 2 convention of running the
-     * server without the client stack.  Unlike Quake 2 which uses a
-     * compile-time cl_null.c stub, we use runtime checks here because the
-     * codebase is not yet structured for a separate dedicated target and
-     * runtime branching keeps a single binary for both modes. */
-    cls.key_dest = dedicated ? key_game : (menu_mode ? key_menu : key_game);
-    cls.state = ca_disconnected;
-
-    NET_Init();
-
-    if (dedicated) {
-        // Dedicated server mode: no client stack, no SDL window.
-        if (!has_map) {
-            fprintf(stderr, "Dedicated server requires +map <map>\n");
-            return 1;
-        }
-        SV_Init();
-        fprintf(stderr, "Dedicated server starting on map: %s\n", map);
-        /* Call SV_Map directly instead of routing through the 'map' command,
-         * because Com_Map_f -> MenuAction -> CL_BeginLoadingMap requires the
-         * client stack which is not initialized in dedicated mode. */
-        SV_Map(map);
-    } else {
-        if (!menu_mode) {
-            SV_Init();
-        }
-        CL_Init();
-        Cbuf_AddLateCommands();
-        Cbuf_Execute();
-
-        if (has_connect_addr) {
-            // Remote-client mode: skip the local server, connect over UDP.
-            CL_Connect(connect_addr, game_port);
-        } else if (listen_server_mode) {
-            // Listen-server mode: show the client loading screen before the
-            // synchronous server map load, mirroring Quake's loading plaque flow.
-            if (!svs.initialized) {
-                SV_Init();
-            }
-            CL_BeginLoadingMap(map);
-            SCR_UpdateScreen(0);
-            SV_Map(map);
-        }
-        // Menu mode: UI runs client-side, no server connection needed (Quake 3 pattern)
     }
 
     fprintf(stderr, "OpenWarcraft3 initialized.\n\n");
 
+    bool dedicated = Cvar_Integer("dedicated", 0) != 0;
     DWORD startTime = SDL_GetTicks();
-    DWORD frameCount = 0;
-    while (true) {
+    bool running = true;
+    while (running) {
         DWORD currentTime = SDL_GetTicks();
         DWORD msec = currentTime - startTime;
-        if (svs.initialized && (sv.state == ss_lobby || sv.state == ss_game)) {
-            SV_Frame(msec);
-        }
-        if (!dedicated) {
-            CL_Frame(msec);
-        } else {
+        startTime = currentTime;
+
+        running = BZ_RuntimeFrame(msec);
+
+        if (dedicated) {
             /* Dedicated server: read console commands from stdin. */
             LPSTR cmd = Sys_ConsoleInput();
             if (cmd && *cmd) {
@@ -232,12 +152,6 @@ int main(int argc, LPSTR argv[]) {
                 Cbuf_AddText("\n");
                 Cbuf_Execute();
             }
-        }
-        startTime = currentTime;
-        frameCount++;
-        if (Cvar_Integer("com_frame_limit", 0) > 0 &&
-            frameCount >= (DWORD)Cvar_Integer("com_frame_limit", 0)) {
-            Com_Quit();
         }
     }
 

@@ -56,6 +56,11 @@ void SV_Shutdown(void) {
 void Sys_Quit(void) {
 }
 
+/* Com_Quit() calls this; this binary never drives BZ_RuntimeInit(), so it
+ * has nothing to tear down. */
+void BZ_RuntimeShutdown(void) {
+}
+
 void PF_Sleep(DWORD msec) {
     (void)msec;
 }
