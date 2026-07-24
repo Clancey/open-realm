@@ -1,11 +1,12 @@
-# visionOS tabletop runtime (Layer 1: callable static engine)
+# visionOS tabletop runtime
 
 Layer 1 establishes a callable, statically-linked, visionOS-compatible
 Warcraft III engine runtime that a later layer can host from Swift/RealityKit
 without disturbing the desktop `openwarcraft3`/`opensc2` executables. This
-layer does **not** implement the SwiftUI/RealityKit tabletop UI, asset
-export/MPQ bundling, gameplay controls, multiplayer, or a later "snapshot
-bridge" — those are separate, later layers.
+layer does **not** implement the SwiftUI/RealityKit tabletop UI, gameplay
+controls, multiplayer, or a later "snapshot bridge" — those are separate,
+later layers. A parallel data lane supplies the local-only build contract for
+staging legally owned Warcraft III MPQs; no retail data is committed.
 
 ## Architecture summary
 
@@ -64,6 +65,67 @@ build/lib/visionos/<platform>/bridge-link-smoke           # link-check binary (b
 `BZ_XR_MIN_OS` (default `1.0`) controls the `-target arm64-apple-xros<ver>[-simulator]`
 triple's minimum OS version; override with `make xrsimulator BZ_XR_MIN_OS=2.0` if a
 later layer needs a newer floor.
+
+## Warcraft III bundle data contract
+
+`platform/apple/visionos/scripts/wc3_data.sh` is the single build-time contract
+between legally owned local Warcraft III data and a later app shell. It resolves
+the source as:
+
+```sh
+${BZ_WC3_DATA_DIR:-$HOME/Downloads/Warcraft III}
+```
+
+The source must contain three non-empty files with these exact names:
+`War3.mpq`, `War3x.mpq`, and `War3xLocal.mpq`. Other source entries — including
+installer ISOs, `SETUP.MPQ`, documentation, or directories — are ignored. The
+tool copies only the three allowlisted files and replaces the destination data
+directory, so repeated builds remove stale resources instead of accumulating
+them.
+
+```sh
+make visionos-verify-wc3-source
+make visionos-stage-wc3-data BZ_XR_APP_STAGE_DIR="/tmp/OpenRealm Stage"
+make visionos-verify-wc3-data BZ_XR_APP_STAGE_DIR="/tmp/OpenRealm Stage"
+make test-visionos-wc3-data
+```
+
+The caller passes an app or staging **root**, never the resource directory
+itself. Staging and verification use this exact layout:
+
+```text
+<app-or-staging-root>/
+└── Resources/
+    └── Warcraft III/
+        ├── War3.mpq
+        ├── War3x.mpq
+        └── War3xLocal.mpq
+```
+
+Missing and empty inputs are diagnosed by exact absolute/caller-provided path
+before the existing destination is touched. `verify-bundle` also rejects every
+entry outside the three-file allowlist, plus symlinked `Resources`, data
+directories, or MPQ files that could escape the bundle. A later shell build
+should invoke the verifier after copying resources and before signing or
+packaging.
+
+### Read-only bundle data and writable application state
+
+The app bundle is immutable at runtime. The shell must resolve
+`Resources/Warcraft III` from its bundle and pass that directory as the
+engine's `-data` argument; engine, transport, and UI code must never patch,
+replace, download into, or otherwise write to those MPQs.
+
+All mutable state — configuration, saves, downloaded maps, caches, diagnostics,
+and logs — belongs beneath the app's writable Application Support directory
+(resolved with the platform API and scoped to the app's bundle identifier).
+The later shell owns creating and passing that writable location. It must not
+use the bundle resource directory as a working directory or writable fallback.
+
+The three MPQ names are explicitly ignored by Git. Synthetic tests create only
+temporary, non-retail fixtures; local acceptance may validate a developer's
+real source path but must not print, hash, copy into the repository, or commit
+the proprietary contents.
 
 ### Why `bridge-link-smoke` is built but never run
 
@@ -245,8 +307,9 @@ output, or eventually running a built binary):
 
 - No SwiftUI/RealityKit UI (later layer).
 - No snapshot bridge / entity-state serialization (later layer).
-- No Warcraft III asset export or MPQ bundling into an app bundle (later
-  layer — this layer only proves the engine *links*, it does not ship data).
+- No proprietary Warcraft III data in source control. The data helper only
+  stages locally owned MPQs into a caller-owned build directory; this layer
+  still does not create, sign, or launch an app bundle.
 - No gameplay input/controls and no multiplayer/networking beyond what
   `common/net.c` already provides headlessly.
 - No SDL/OpenGL window, no SDL input polling, no Xcode project.
@@ -261,7 +324,6 @@ output, or eventually running a built binary):
   unsigned. Producing a signed, installable device build is an external
   gate (a valid Apple provisioning profile/signing identity) outside this
   layer's scope — see the `xros`/`xros-bridge` build notes above.
-
 # Layer 2: real headless client + snapshot/command transport
 
 Layer 2 replaces Layer 1's link-smoke-only null client with the **real**
@@ -270,7 +332,7 @@ Layer 2 replaces Layer 1's link-smoke-only null client with the **real**
 Objective-C/Swift/SDL/RealityKit-free ABI that a later native Swift/
 RealityKit host imports directly (or via a bridging header) to read
 authoritative snapshots and post typed commands. It still does **not**
-implement Swift/SwiftUI/RealityKit, MPQ bundling, asset decoding/export,
+implement Swift/SwiftUI/RealityKit, app creation/signing, asset decoding/export,
 visible rendering, audio, menus, or multiplayer — those remain later layers.
 Do not confuse `bz_tabletop_transport.{h,c}` (this layer, a plain-C ABI
 under `platform/bridge/`) with the Objective-C++ lifecycle bridge class
@@ -467,7 +529,7 @@ configurations, plus the plain build).
 
 ## What Layer 2 does not do
 
-- No Swift/SwiftUI/RealityKit code, no MPQ bundling, no asset decoding/
+- No Swift/SwiftUI/RealityKit code, no app creation/signing, no asset decoding/
   export, no visible rendering, no audio, no menus, no multiplayer beyond
   what `common/net.c` already provides headlessly (unchanged from Layer 1).
 - No raw terrain tile/height data in snapshots (no public engine accessor

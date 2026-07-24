@@ -31,6 +31,32 @@ BZ_XR_MIN_OS  ?= 1.0
 BZ_XR_TT_CLIENT_DIR := platform/apple/visionos/tabletop/client
 BZ_XR_BRIDGE_TRANSPORT_DIR := platform/bridge
 BZ_XR_LIB_DIR  := $(LIB_DIR)/visionos
+BZ_XR_WC3_DATA_TOOL := platform/apple/visionos/scripts/wc3_data.sh
+BZ_XR_WC3_DATA_TEST := platform/apple/visionos/tests/test_wc3_data.sh
+BZ_XR_APP_STAGE_DIR ?=
+
+# Build-time retail-data contract for the later app shell. The caller supplies
+# the app/staging root; the helper owns only Resources/Warcraft III beneath it.
+.PHONY: test-visionos-wc3-data visionos-verify-wc3-source visionos-stage-wc3-data visionos-verify-wc3-data
+test-visionos-wc3-data:
+	@"$(BZ_XR_WC3_DATA_TEST)"
+
+test: test-visionos-wc3-data
+
+visionos-verify-wc3-source:
+	@"$(BZ_XR_WC3_DATA_TOOL)" verify-source
+
+visionos-stage-wc3-data:
+	@if [ -z "$(strip $(BZ_XR_APP_STAGE_DIR))" ]; then \
+		echo "visionos-stage-wc3-data: set BZ_XR_APP_STAGE_DIR to an app/staging root" >&2; exit 2; \
+	fi
+	@"$(BZ_XR_WC3_DATA_TOOL)" stage "$(BZ_XR_APP_STAGE_DIR)"
+
+visionos-verify-wc3-data:
+	@if [ -z "$(strip $(BZ_XR_APP_STAGE_DIR))" ]; then \
+		echo "visionos-verify-wc3-data: set BZ_XR_APP_STAGE_DIR to an app/staging root" >&2; exit 2; \
+	fi
+	@"$(BZ_XR_WC3_DATA_TOOL)" verify-bundle "$(BZ_XR_APP_STAGE_DIR)"
 
 # Independent from the desktop CFLAGS/WC3_CFLAGS: those pick up Darwin's
 # `-arch $(ARCH)` (conflicts with `-target`) and Homebrew include paths that
@@ -180,4 +206,3 @@ $(foreach t,$(BZ_XR_TARGETS),$(eval $(call bz_xr_bridge_rules,$(t))))
 
 .PHONY: visionos-bridge
 visionos-bridge: xrsimulator-bridge xros-bridge
-
