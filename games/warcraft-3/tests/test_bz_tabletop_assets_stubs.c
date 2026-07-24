@@ -80,6 +80,9 @@ sheetRow_t *FS_ParseSLK(LPCSTR identity) {
 }
 
 LPCSTR FS_FindSheetCell(sheetRow_t *sheet, LPCSTR row, LPCSTR column) {
+    static const char *no_path_doodads[] = {
+        "LPwh", "LOfl", "LOth", "LPrs", "LPlp", "LOtz", "LOsm", "AWfs", "LPcw", "AOsr",
+    };
     if (sheet == (sheetRow_t *)(uintptr_t)1 && !strcmp(row, "Ldrt")) {
         if (!strcmp(column, "dir")) return test_tft ? "TerrainArt\\TFT" : "TerrainArt\\ROC";
         if (!strcmp(column, "file")) return "Dirt";
@@ -98,6 +101,18 @@ LPCSTR FS_FindSheetCell(sheetRow_t *sheet, LPCSTR row, LPCSTR column) {
         if (!strcmp(column, "vertR01")) return "128";
         if (!strcmp(column, "vertG01")) return "192";
         if (!strcmp(column, "vertB01")) return "255";
+    }
+    if (sheet == Doodads)
+        for (size_t i = 0; i < sizeof(no_path_doodads) / sizeof(*no_path_doodads); i++)
+            if (!strcmp(row, no_path_doodads[i])) {
+                if (!strcmp(column, "file")) return i == 9 ? "ScorchedRemains" : "DoodadModel";
+                if (!strcmp(column, "pathTex")) return "none";
+                if (!strcmp(column, "vertR01") || !strcmp(column, "vertG01") ||
+                    !strcmp(column, "vertB01")) return "255";
+            }
+    if (sheet == Doodads && !strcmp(row, "Dmis")) {
+        if (!strcmp(column, "file")) return "MissingPathDoodad";
+        if (!strcmp(column, "pathTex")) return "PathTextures\\missing.tga";
     }
     return NULL;
 }

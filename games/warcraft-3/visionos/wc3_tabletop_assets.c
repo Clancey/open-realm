@@ -115,7 +115,8 @@ static bzTTAResult_t wc3_resolve_terrain_identity(bzTTTerrainTextureKind_t kind,
 }
 
 static bool wc3_metadata_path(const char *path) {
-    return path && *path && strcmp(path, "_") && strcmp(path, "-");
+    /* Doodads.slk uses "none" for authored non-pathing rows such as LPwh and AOsr. */
+    return path && *path && strcmp(path, "_") && strcmp(path, "-") && strcmp(path, "none");
 }
 
 static uint16_t wc3_u16(const uint8_t *data) {

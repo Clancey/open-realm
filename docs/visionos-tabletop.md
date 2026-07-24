@@ -685,6 +685,13 @@ configurations, plus the plain build).
   actually touched. Most are zero-model slots. Snapshot construction applies
   the established desktop predicate `ce->current.model != 0` before copy/cap
   accounting, so overflow reports only active entities beyond 1024.
+  - One active client slot is one transport entity even when `model2` makes the
+    desktop renderer emit a second attached render entity. Human02 therefore
+    stabilizes at 2,397 transport entities (`1024 + overflow 1373`) while the text
+    renderer reports 2,398 render entities; the one-entity difference is the
+    attachment, not a dropped active slot. Three bounded equivalent-lifecycle
+    runs identified the same source each time: client slot 67, class `hC02`,
+    `model=28`, `model2=121`, connection state 3.
 - `Netchan_Transmit()` resets `netchan->message.cursize` to 0 after handing
   off to `NET_SendPacket()`, and is a no-op if `cursize == 0` — useful for
   asserting both that a real send actually ran, and that draining an empty

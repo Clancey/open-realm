@@ -307,6 +307,7 @@ static void test_snapshot_reflects_entities_and_selection(void) {
     cl.ents[1].current.origin.z = 0.0f;
     cl.ents[1].current.player = 2;
     cl.ents[1].current.model = 7;
+    cl.ents[1].current.model2 = 12; /* One active slot remains one transport entity despite its render attachment. */
     cl.ents[1].selected = true;
     cl.ents[2].current.number = 2;
     cl.ents[2].current.class_id = 43;

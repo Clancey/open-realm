@@ -598,6 +598,30 @@ static void test_entity_metadata_categories_footprints_and_overrides(void) {
     ASSERT_EQ_FLOAT(metadata.tint_r, 128.0f / 255.0f, 0.001f);
 }
 
+static void test_roc_tft_non_pathing_doodad_metadata(void) {
+    static const uint32_t class_ids[] = {
+        FOURCC('L','P','w','h'), FOURCC('L','O','f','l'), FOURCC('L','O','t','h'),
+        FOURCC('L','P','r','s'), FOURCC('L','P','l','p'), FOURCC('L','O','t','z'),
+        FOURCC('L','O','s','m'), FOURCC('A','W','f','s'), FOURCC('L','P','c','w'),
+        FOURCC('A','O','s','r'),
+    };
+    bzTTAssetMetadata_t metadata;
+    for (unsigned tft = 0; tft < 2; tft++) {
+        test_assets_set_tft(tft); reset_assets();
+        for (size_t i = 0; i < sizeof(class_ids) / sizeof(*class_ids); i++) {
+            metadata = resolve_metadata(class_ids[i], BZ_TTA_OK);
+            ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_DOODAD);
+            ASSERT_EQ_FLOAT(metadata.footprint_x, 0, 0.001f);
+            ASSERT_EQ_FLOAT(metadata.footprint_y, 0, 0.001f);
+        }
+        ASSERT_EQ_INT(BZ_TTA_MetadataLogs(), 0);
+    }
+    test_assets_set_tft(false); reset_assets();
+    metadata = resolve_metadata(FOURCC('D','m','i','s'), BZ_TTA_ERR_NOT_FOUND);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_DOODAD);
+    ASSERT_EQ_INT(BZ_TTA_MetadataLogs(), 1);
+}
+
 static void test_entity_metadata_error_log_once_and_cache(void) {
     bzTTAssetMetadata_t metadata;
     uint64_t misses, hits;
@@ -841,6 +865,7 @@ void run_bz_tabletop_assets_tests(void) {
     RUN_TEST(test_human02_shape_no_cliff_sentinel);
     RUN_TEST(test_terrain_texture_resolution_roc_tft_and_fallback);
     RUN_TEST(test_entity_metadata_categories_footprints_and_overrides);
+    RUN_TEST(test_roc_tft_non_pathing_doodad_metadata);
     RUN_TEST(test_entity_metadata_map_readiness_and_cache_scope);
     RUN_TEST(test_entity_metadata_error_log_once_and_cache);
     RUN_TEST(test_entity_metadata_concurrency_and_lifecycle);

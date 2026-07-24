@@ -130,6 +130,13 @@ world-unit footprint diameter. Missing required
 path/collision data returns an explicit cached/log-once error instead of
 guessing from selection radius or model bounds.
 
+`Doodads.slk` uses the literal `pathTex=none` for authored non-pathing rows.
+This is an absent optional footprint, not an archive identity. ROC and TFT
+Human02 rows `LPwh`, `LOfl`, `LOth`, `LPrs`, `LPlp`, `LOtz`, `LOsm`, `AWfs`,
+`LPcw`, and `AOsr` therefore resolve as valid doodad metadata with a zero
+footprint. A non-sentinel path identity that is missing or malformed remains an
+explicit cached/log-once metadata error.
+
 Table tint and custom team-color values are defaults. Callers can replace team
 color and/or runtime tint with the corresponding `override_mask` bits;
 `BZ_TTA_TEAM_COLOR_NONE` means the table defines no custom team color.
@@ -169,6 +176,9 @@ is read.
 
 Known model gaps are MDX 1000/1500, full animation curves and skinning
 matrices, geoset animations, particle/ribbon emitters, and event/camera data.
+Classic MDX may omit a geoset `UVBS` stream entirely; the descriptor then
+authoritatively reports `uv_count=0`. Consumers may synthesize zero UVs for that
+fully absent stream, but a partial nonzero stream remains malformed.
 
 ## Validation
 
