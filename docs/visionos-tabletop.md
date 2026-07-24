@@ -40,7 +40,7 @@ values. `WarcraftRenderDescriptorProvider` remains the framework-free seam:
 
 ```text
 TabletopSnapshot (copied Swift value)
-        +-- WarcraftProductionAssets (copied ABI v1 values)
+        +-- WarcraftProductionAssets (copied asset ABI v2 values)
         |
 WarcraftRenderPipeline actor (generation dedupe)
         |
@@ -57,7 +57,7 @@ RealityTabletopReconciler
 
 `BZ_TABLETOP_RENDER_PROVIDER=fixture|production` selects the provider
 explicitly. It defaults to `fixture` only when `BZ_TABLETOP_MODE=fixture`; live
-transport defaults to `production`. The production provider calls only `bz_tabletop_assets.h` ABI v1 while the
+transport defaults to `production`. The production provider calls only `bz_tabletop_assets.h` ABI v2 while the
 retained transport snapshot is alive, deep-copies terrain, MDX 800
 geosets/material layers/textures/sequences/nodes/bounds and top-left RGBA8 BLP
 pixels, then releases every asset and terrain handle before RealityKit work.
@@ -77,7 +77,7 @@ Terrain uses fixed 32x32-cell meshes. A 128x128 map therefore produces exactly
 16 terrain entities; partial edge chunks remain bounded to 32 cells per axis.
 Water surfaces, cliff walls, and ramp tops are emitted in the same chunk model
 as separate material geosets. Fog is one three-state RGBA texture entity.
-Units, buildings, resources, doodads, and destructables use descriptor geosets,
+Units, buildings, resources, doodads, destructables, and items use descriptor geosets,
 footprint/category scaling, team color/tint, selection rings, rectangular
 health/mana bars, and sequence/frame state. No capsule or pill primitive is a
 production asset fallback.
@@ -139,7 +139,7 @@ Y/Z swap negates yaw to preserve heading, and unshaded opaque MDX layers use an
 opaque depth-writing material program rather than the alpha path.
 
 `BZ_TTA_ResolveEntityMetadata` supplies category, class, team, tint, and
-footprint values with Doodad -> Destructable -> Unit precedence. The live
+footprint values with Doodad -> Destructable -> Unit -> Item precedence. The live
 player value is passed only through the team-color override bit; Swift does not
 invent a tint override or derive category/footprint from transport radius.
 Resolution errors remain `unknown` with explicit placeholder diagnostics.
@@ -249,6 +249,10 @@ make visionos-tabletop-xros            # arm64 xros 2.0 app, unsigned
 make visionos-tabletop                 # all three gates
 make visionos-tabletop-simulator-acceptance # disposable-clone live MPQ gate
 ```
+
+Simulator acceptance waits through the late Human02 item publication window
+after the first stable asset summary and rejects metadata/production placeholder
+diagnostics from that later generation.
 
 Host coverage includes launcher reduction, mode selection, lifecycle mapping,
 generation deduplication, fixture queue hit/full/stale-session paths, command

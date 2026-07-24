@@ -88,6 +88,7 @@ TEST_GAME_SRCS := \
 	$(WC3_DIR)/game/g_ai.c \
 	$(WC3_DIR)/game/g_events.c \
 	$(WC3_DIR)/game/g_fow.c \
+	$(WC3_DIR)/game/g_items.c \
 	$(WC3_DIR)/game/g_metadata.c \
 	$(WC3_DIR)/game/g_model.c \
 	$(WC3_DIR)/game/g_monster.c \

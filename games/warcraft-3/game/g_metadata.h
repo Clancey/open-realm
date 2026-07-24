@@ -336,6 +336,10 @@ sheetMetaData_t ItemsMetaData[] = {
     { "inam", "comment", "ItemData" },
     { "icla", "itemClass", "ItemData" },
     { "ifil", "file", "ItemData" },
+    { "isca", "scale", "ItemData" },
+    { "iclr", "colorR", "ItemData" },
+    { "iclg", "colorG", "ItemData" },
+    { "iclb", "colorB", "ItemData" },
     { NULL }
 };
 #endif

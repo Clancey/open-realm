@@ -212,6 +212,12 @@ static void wc3_unit_tint(uint32_t class_id, bzTTAssetMetadata_t *metadata) {
         metadata->team_color = (uint32_t)UnitIntegerFieldBase(UnitsMetaData, class_id, "utco");
 }
 
+static void wc3_item_tint(uint32_t class_id, bzTTAssetMetadata_t *metadata) {
+    metadata->tint_r = wc3_tint(UnitStringFieldBase(ItemsMetaData, class_id, "iclr"));
+    metadata->tint_g = wc3_tint(UnitStringFieldBase(ItemsMetaData, class_id, "iclg"));
+    metadata->tint_b = wc3_tint(UnitStringFieldBase(ItemsMetaData, class_id, "iclb"));
+}
+
 /* Spawn-table precedence is authoritative and avoids reading live server edicts. */
 static bzTTAResult_t wc3_resolve_entity_metadata(uint32_t class_id, bzTTAssetMetadata_t *metadata) {
     char row[5];
@@ -247,6 +253,14 @@ static bzTTAResult_t wc3_resolve_entity_metadata(uint32_t class_id, bzTTAssetMet
         goto done;
     }
     if (!UnitStringFieldBase(UnitsMetaData, table_id, "umdl")) {
+        LPCSTR item_file = UnitStringFieldBase(ItemsMetaData, table_id, "ifil");
+        if (item_file) {
+            /* Items are non-pathing, zero-collision entities; selection size is not a footprint proxy. */
+            metadata->category = BZ_TTA_CATEGORY_ITEM;
+            wc3_item_tint(table_id, metadata);
+            status = wc3_tta_path_is_confined(item_file) ? BZ_TTA_OK : BZ_TTA_ERR_PATH_CONFINEMENT;
+            goto done;
+        }
         status = BZ_TTA_ERR_NOT_FOUND;
         goto done;
     }

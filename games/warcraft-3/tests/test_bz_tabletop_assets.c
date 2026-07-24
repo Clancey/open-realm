@@ -47,6 +47,8 @@ static void test_abi_and_asymmetric_blp_orientation(void) {
     uint8_t pixels[16];
     reset_assets();
     ASSERT_EQ_INT(BZ_TTA_AbiVersion(), BZ_TABLETOP_ASSETS_ABI_VERSION);
+    ASSERT_EQ_INT(BZ_TABLETOP_ASSETS_ABI_VERSION, 2);
+    ASSERT_EQ_INT(BZ_TTA_CATEGORY_ITEM, 6);
     ASSERT_EQ_INT(sizeof(bzTTAssetMetadata_t), 36);
     ASSERT_EQ_INT(sizeof(bzTTImageInfo_t), 24);
     ASSERT_EQ_INT(sizeof(bzTTMaterialLayerInfo_t), 24);
@@ -818,6 +820,70 @@ static void test_entity_metadata_categories_footprints_and_overrides(void) {
     ASSERT_EQ_FLOAT(metadata.tint_r, 128.0f / 255.0f, 0.001f);
 }
 
+static void test_roc_tft_item_metadata_fourcc_category_footprint_and_models(void) {
+    static const uint32_t class_ids[] = {
+        0x34656472, 0x66746172, 0x66696c72, 0x7a697772, 0x74767270, 0x676e6b63,
+    };
+    static const char *names[] = { "rde4", "ratf", "rlif", "rwiz", "prvt", "ckng" };
+    struct bzTTSnapshot snapshot = { 0 };
+    bzTTAssetMetadata_t metadata;
+    const bzTTAsset_t *model, *again;
+    char row[5];
+    for (unsigned tft = 0; tft < 2; tft++) {
+        test_assets_set_tft(tft); reset_assets();
+        for (size_t i = 0; i < sizeof(class_ids) / sizeof(*class_ids); i++) {
+            memcpy(row, &class_ids[i], 4); row[4] = 0;
+            ASSERT_STR_EQ(row, names[i]);
+            metadata = resolve_metadata(class_ids[i], BZ_TTA_OK);
+            ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_ITEM);
+            ASSERT_EQ_INT(metadata.class_id, class_ids[i]);
+            ASSERT_EQ_FLOAT(metadata.footprint_x, 0, 0.001f);
+            ASSERT_EQ_FLOAT(metadata.footprint_y, 0, 0.001f);
+        }
+        resolve_metadata(class_ids[0], BZ_TTA_OK);
+        ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 6); ASSERT_EQ_INT(BZ_TTA_CacheHits(), 1);
+        ASSERT_EQ_INT(BZ_TTA_MetadataLogs(), 0);
+
+        metadata = resolve_metadata(FOURCC('i','t','s','t'), BZ_TTA_OK);
+        ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_ITEM);
+        ASSERT_EQ_FLOAT(metadata.tint_r, tft ? 100.0f / 255.0f : 1, 0.001f);
+        ASSERT_EQ_FLOAT(metadata.tint_g, tft ? 140.0f / 255.0f : 1, 0.001f);
+        test_assets_set_configstring(&snapshot, 1, "TestUI/Models/quad_sprite.mdl");
+        model = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
+                                            BZ_TTA_ASSET_MODEL, &metadata);
+        again = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
+                                            BZ_TTA_ASSET_MODEL, &metadata);
+        ASSERT_NOT_NULL(model); ASSERT(model == again); ASSERT(!BZ_TTAsset_IsPlaceholder(model));
+        BZ_TTAsset_Release(model); BZ_TTAsset_Release(again);
+    }
+
+    test_assets_set_tft(false); reset_assets();
+    metadata = resolve_metadata(FOURCC('i','b','a','d'), BZ_TTA_ERR_PATH_CONFINEMENT);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_ITEM);
+    resolve_metadata(FOURCC('i','b','a','d'), BZ_TTA_ERR_PATH_CONFINEMENT);
+    ASSERT_EQ_INT(BZ_TTA_MetadataLogs(), 1);
+    metadata = resolve_metadata(FOURCC('M','I','S','S'), BZ_TTA_ERR_NOT_FOUND);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_UNKNOWN);
+
+    reset_assets(); test_assets_set_metadata_map(1);
+    metadata = resolve_metadata(FOURCC('i','0','0','0'), BZ_TTA_OK);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_ITEM);
+    ASSERT_EQ_INT(metadata.class_id, FOURCC('i','0','0','0'));
+    test_assets_set_metadata_map(0);
+
+    reset_assets();
+    metadata = resolve_metadata(FOURCC('i','m','i','s'), BZ_TTA_OK);
+    test_assets_set_configstring(&snapshot, 1, "TestUI/Models/missing_item.mdx");
+    model = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
+                                        BZ_TTA_ASSET_MODEL, &metadata);
+    again = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
+                                        BZ_TTA_ASSET_MODEL, &metadata);
+    ASSERT_NOT_NULL(model); ASSERT(model == again); ASSERT(BZ_TTAsset_IsPlaceholder(model));
+    ASSERT_EQ_INT(BZ_TTAsset_Status(model), BZ_TTA_ERR_NOT_FOUND);
+    ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), 1);
+    BZ_TTAsset_Release(model); BZ_TTAsset_Release(again);
+}
+
 static void test_roc_tft_non_pathing_doodad_metadata(void) {
     static const uint32_t class_ids[] = {
         FOURCC('L','P','w','h'), FOURCC('L','O','f','l'), FOURCC('L','O','t','h'),
@@ -896,13 +962,14 @@ static void test_entity_metadata_concurrency_and_lifecycle(void) {
     struct timespec drain_wait = { .tv_nsec = 10000000 };
     reset_assets();
     for (int i = 0; i < THREADS; i++) {
-        ctx[i] = (metadataCtx_t){ .class_id = FOURCC('h','p','e','a') };
+        ctx[i] = (metadataCtx_t){ .class_id = FOURCC('r','d','e','4') };
         ASSERT_EQ_INT(pthread_create(threads + i, NULL, metadata_resolver, ctx + i), 0);
     }
     for (int i = 0; i < THREADS; i++) {
         ASSERT_EQ_INT(pthread_join(threads[i], NULL), 0);
         ASSERT_EQ_INT(ctx[i].status, BZ_TTA_OK);
     }
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 1); ASSERT_EQ_INT(BZ_TTA_CacheHits(), THREADS - 1);
     reset_assets(); test_assets_block_reads(true);
     ctx[0] = (metadataCtx_t){ .class_id = FOURCC('h','t','o','w') };
     ASSERT_EQ_INT(pthread_create(threads, NULL, metadata_resolver, ctx), 0);
@@ -1087,6 +1154,7 @@ void run_bz_tabletop_assets_tests(void) {
     RUN_TEST(test_water_texture_semantic_success_missing_and_concurrency);
     RUN_TEST(test_team_texture_registration_range_cache_lifecycle_and_inverses);
     RUN_TEST(test_entity_metadata_categories_footprints_and_overrides);
+    RUN_TEST(test_roc_tft_item_metadata_fourcc_category_footprint_and_models);
     RUN_TEST(test_roc_tft_non_pathing_doodad_metadata);
     RUN_TEST(test_entity_metadata_map_readiness_and_cache_scope);
     RUN_TEST(test_entity_metadata_error_log_once_and_cache);

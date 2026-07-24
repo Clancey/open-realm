@@ -281,6 +281,45 @@ static void test_tft_metadata_schema_resolves_human02_units(void) {
     G_MetadataPublishMap(level.mapinfo);
 }
 
+static void test_item_metadata_schema_tracks_whole_file_override(void) {
+    sheetField_t roc_fields[] = {
+        { "itemClass", "artifact", &roc_fields[1] },
+        { "file", "Objects\\ROC.mdl" },
+    };
+    sheetField_t tft_fields[] = {
+        { "class", "Artifact", &tft_fields[1] },
+        { "file", "Objects\\TFT.mdl", &tft_fields[2] },
+        { "scale", "1" },
+    };
+    sheetRow_t roc = { "rde4", roc_fields }, tft = { "rde4", tft_fields };
+    sheetMetaData_t metadata[] = {
+        { "icla", "itemClass", "ItemData" }, { "ifil", "file", "ItemData" },
+        { "isca", "scale", "ItemData" }, { NULL },
+    };
+    G_ApplyItemDataSchema(metadata, &roc);
+    ASSERT_STR_EQ(UnitStringFieldBase(metadata, UNIT_ID("rde4"), "icla"), "artifact");
+    ASSERT_STR_EQ(UnitStringFieldBase(metadata, UNIT_ID("rde4"), "ifil"), "Objects\\ROC.mdl");
+    ASSERT_NULL(UnitStringFieldBase(metadata, UNIT_ID("rde4"), "isca"));
+    G_ApplyItemDataSchema(metadata, &tft);
+    ASSERT_STR_EQ(UnitStringFieldBase(metadata, UNIT_ID("rde4"), "icla"), "Artifact");
+    ASSERT_STR_EQ(UnitStringFieldBase(metadata, UNIT_ID("rde4"), "ifil"), "Objects\\TFT.mdl");
+    ASSERT_FLOAT_EQ(UnitRealFieldBase(metadata, UNIT_ID("rde4"), "isca"), 1.0f);
+}
+
+static void test_item_scale_requires_complete_finite_positive_value(void) {
+    FLOAT scale = 7;
+    ASSERT(G_ParseItemScale("1.25", &scale));
+    ASSERT_FLOAT_EQ(scale, 1.25f);
+    ASSERT(!G_ParseItemScale(NULL, &scale));
+    ASSERT(!G_ParseItemScale("", &scale));
+    ASSERT(!G_ParseItemScale("0", &scale));
+    ASSERT(!G_ParseItemScale("-1", &scale));
+    ASSERT(!G_ParseItemScale("1junk", &scale));
+    ASSERT(!G_ParseItemScale("inf", &scale));
+    ASSERT(!G_ParseItemScale("nan", &scale));
+    ASSERT_FLOAT_EQ(scale, 1.25f);
+}
+
 typedef struct {
     DWORD class_id;
     char observed[5];
@@ -480,6 +519,8 @@ BEGIN_SUITE(slk)
     RUN_TEST(test_unit_unknown_id_returns_zero);
     RUN_TEST(test_unit_metadata_schema_tracks_archive_variant);
     RUN_TEST(test_tft_metadata_schema_resolves_human02_units);
+    RUN_TEST(test_item_metadata_schema_tracks_whole_file_override);
+    RUN_TEST(test_item_scale_requires_complete_finite_positive_value);
     RUN_TEST(test_class_name_is_thread_local);
     RUN_TEST(test_metadata_map_snapshot_survives_republication);
     RUN_TEST(test_metadata_map_snapshot_concurrent_publication);

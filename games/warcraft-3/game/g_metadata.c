@@ -152,6 +152,22 @@ sheetMetaData_t *G_FindMetaData(sheetMetaData_t *metadatas, LPCSTR name) {
     return NULL;
 }
 
+/* ItemData is replaced wholesale by TFT, whose class column was renamed from ROC's itemClass. */
+void G_ApplyItemDataSchema(sheetMetaData_t *metadatas, sheetRow_t *table) {
+    bool tft = false;
+    sheetMetaData_t *item_class;
+    FOR_EACH_LIST(sheetRow_t const, row, table)
+        FOR_EACH_LIST(sheetField_t const, field, row->fields)
+            if (!strcasecmp(field->name, "class")) {
+                tft = true;
+                goto found;
+            }
+found:
+    item_class = G_FindMetaData(metadatas, "icla");
+    if (item_class) item_class->field = tft ? "class" : "itemClass";
+    G_SetConfigTable(metadatas, "ItemData", table);
+}
+
 /* A field code that no metadata entry maps is a programming error, not missing
  * unit data: the accessor silently resolves to NULL/0. That is how stat bugs
  * hid for so long ("umpc" mana, "udfc" armor, "uinc"/"ustc"/"uagc" attributes).
@@ -268,7 +284,7 @@ void InitUnitData(void) {
     
     G_SetConfigTable(DestructableMetaData, "DestructableData", DestructableData);
     
-    G_SetConfigTable(ItemsMetaData, "ItemData", FS_ParseSLK("Units\\ItemData.slk"));
+    G_ApplyItemDataSchema(ItemsMetaData, FS_ParseSLK("Units\\ItemData.slk"));
 }
 
 void ShutdownUnitData(void) {
