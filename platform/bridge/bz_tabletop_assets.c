@@ -26,8 +26,10 @@ static uint64_t g_cache_hits, g_cache_misses, g_placeholder_logs, g_metadata_log
 static uint64_t g_assets_generation;
 static uintptr_t g_failed_terrain_token, g_metadata_token;
 
-static bool terrain_type(const bzTTTerrain_t *terrain, uint32_t index, uint32_t offset,
-                         uint32_t count, uint32_t *out);
+static bool terrain_type_info(const bzTTTerrain_t *terrain, uint32_t index, uint32_t offset,
+                              uint32_t count, bzTTTerrainTextureInfo_t *out);
+static bool terrain_type_table(const bzTTTerrain_t *terrain, bzTTTerrainTextureKind_t kind,
+                               uint32_t *offset, uint32_t *count);
 
 static bool metadata_equal(const bzTTAssetMetadata_t *a, const bzTTAssetMetadata_t *b) {
     return a->category == b->category && a->class_id == b->class_id &&
@@ -369,7 +371,8 @@ const bzTTAsset_t *BZ_TTA_RegisterTerrainTexture(uint32_t abi_version,
                                                  uint32_t type_index) {
     bzTTAssetSource_t source;
     bzTTAResult_t status;
-    uint32_t type_id;
+    bzTTTerrainTextureInfo_t texture;
+    uint32_t offset, count;
     uint64_t generation;
     char identity[BZ_TTA_MAX_IDENTITY];
     if (!terrain || (kind != BZ_TTA_TERRAIN_TEXTURE_GROUND && kind != BZ_TTA_TERRAIN_TEXTURE_CLIFF))
@@ -377,15 +380,12 @@ const bzTTAsset_t *BZ_TTA_RegisterTerrainTexture(uint32_t abi_version,
     if (source_context(abi_version, &source, &generation) != BZ_TTA_OK ||
         terrain->generation != generation || !source.resolve_terrain_identity)
         return NULL;
-    if (!terrain_type(terrain, type_index,
-                      kind == BZ_TTA_TERRAIN_TEXTURE_GROUND ? terrain->grounds_offset : terrain->cliffs_offset,
-                      kind == BZ_TTA_TERRAIN_TEXTURE_GROUND ? terrain->info.ground_type_count :
-                                                              terrain->info.cliff_type_count,
-                      &type_id))
+    if (!terrain_type_table(terrain, kind, &offset, &count) ||
+        !terrain_type_info(terrain, type_index, offset, count, &texture) || !texture.corner_count)
         return NULL;
-    snprintf(identity, sizeof(identity), "<terrain:%08x>", type_id);
+    snprintf(identity, sizeof(identity), "<terrain:%08x>", texture.type_id);
     pthread_mutex_lock(&g_assets_source_lock);
-    status = source.resolve_terrain_identity(kind, type_id, terrain->tileset, identity, sizeof(identity));
+    status = source.resolve_terrain_identity(kind, texture.type_id, terrain->tileset, identity, sizeof(identity));
     pthread_mutex_unlock(&g_assets_source_lock);
     return register_identity(identity, BZ_TTA_ASSET_IMAGE, NULL, status, &source, generation);
 }
@@ -709,25 +709,76 @@ bool BZ_TTTerrain_Corner(const bzTTTerrain_t *terrain, uint32_t x, uint32_t y,
     return true;
 }
 
-static bool terrain_type(const bzTTTerrain_t *terrain, uint32_t index, uint32_t offset,
-                         uint32_t count, uint32_t *out) {
-    const uint32_t *value;
+static bool terrain_type_info(const bzTTTerrain_t *terrain, uint32_t index, uint32_t offset,
+                              uint32_t count, bzTTTerrainTextureInfo_t *out) {
+    const bzTTTerrainTypeRecord_t *record;
     if (!terrain || !out || index >= count) return false;
-    value = BZ_TTA_TerrainData((bzTTTerrain_t *)terrain, offset + index * sizeof(uint32_t),
-                               sizeof(uint32_t));
-    if (!value) return false;
-    *out = *value;
+    record = BZ_TTA_TerrainData((bzTTTerrain_t *)terrain,
+                                offset + index * sizeof(*record), sizeof(*record));
+    if (!record) return false;
+    *out = (bzTTTerrainTextureInfo_t){
+        .type_index = index, .type_id = record->id, .corner_count = record->corner_count,
+    };
     return true;
 }
 
+static bool terrain_type_table(const bzTTTerrain_t *terrain, bzTTTerrainTextureKind_t kind,
+                               uint32_t *offset, uint32_t *count) {
+    if (!terrain || !offset || !count) return false;
+    if (kind == BZ_TTA_TERRAIN_TEXTURE_GROUND) {
+        *offset = terrain->grounds_offset; *count = terrain->info.ground_type_count;
+        return true;
+    }
+    if (kind == BZ_TTA_TERRAIN_TEXTURE_CLIFF) {
+        *offset = terrain->cliffs_offset; *count = terrain->info.cliff_type_count;
+        return true;
+    }
+    return false;
+}
+
 bool BZ_TTTerrain_GroundType(const bzTTTerrain_t *terrain, uint32_t index, uint32_t *out) {
-    return terrain_type(terrain, index, terrain ? terrain->grounds_offset : 0,
-                        terrain ? terrain->info.ground_type_count : 0, out);
+    bzTTTerrainTextureInfo_t info;
+    if (!out || !terrain_type_info(terrain, index, terrain ? terrain->grounds_offset : 0,
+                                   terrain ? terrain->info.ground_type_count : 0, &info))
+        return false;
+    *out = info.type_id;
+    return true;
 }
 
 bool BZ_TTTerrain_CliffType(const bzTTTerrain_t *terrain, uint32_t index, uint32_t *out) {
-    return terrain_type(terrain, index, terrain ? terrain->cliffs_offset : 0,
-                        terrain ? terrain->info.cliff_type_count : 0, out);
+    bzTTTerrainTextureInfo_t info;
+    if (!out || !terrain_type_info(terrain, index, terrain ? terrain->cliffs_offset : 0,
+                                   terrain ? terrain->info.cliff_type_count : 0, &info))
+        return false;
+    *out = info.type_id;
+    return true;
+}
+
+uint32_t BZ_TTTerrain_ReferencedTextureCount(const bzTTTerrain_t *terrain,
+                                             bzTTTerrainTextureKind_t kind) {
+    bzTTTerrainTextureInfo_t info;
+    uint32_t offset, count, references = 0;
+    if (!terrain_type_table(terrain, kind, &offset, &count)) return 0;
+    for (uint32_t i = 0; i < count; i++)
+        if (terrain_type_info(terrain, i, offset, count, &info) && info.corner_count) references++;
+    return references;
+}
+
+bool BZ_TTTerrain_ReferencedTexture(const bzTTTerrain_t *terrain,
+                                    bzTTTerrainTextureKind_t kind,
+                                    uint32_t reference_index,
+                                    bzTTTerrainTextureInfo_t *out) {
+    bzTTTerrainTextureInfo_t info;
+    uint32_t offset, count;
+    if (!out || !terrain_type_table(terrain, kind, &offset, &count)) return false;
+    for (uint32_t i = 0, reference = 0; i < count; i++) {
+        if (!terrain_type_info(terrain, i, offset, count, &info) || !info.corner_count) continue;
+        if (reference++ == reference_index) {
+            *out = info;
+            return true;
+        }
+    }
+    return false;
 }
 
 uint64_t BZ_TTA_CacheHits(void) {

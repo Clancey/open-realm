@@ -398,6 +398,7 @@ static void test_terrain_dimensions_corners_water_cliffs_and_chunks(void) {
     const bzTTTerrain_t *terrain, *again;
     bzTTTerrainInfo_t info;
     bzTTTerrainCorner_t corner;
+    bzTTTerrainTextureInfo_t texture;
     uint32_t ground, cliff;
     make_terrain(34, 34, 0);
     reset_assets();
@@ -413,6 +414,13 @@ static void test_terrain_dimensions_corners_water_cliffs_and_chunks(void) {
     ASSERT_EQ_FLOAT(corner.water_height, -78, 0.001f);
     ASSERT(BZ_TTTerrain_GroundType(terrain, 1, &ground)); ASSERT_EQ_INT(ground, FOURCC('L','g','r','s'));
     ASSERT(BZ_TTTerrain_CliffType(terrain, 0, &cliff)); ASSERT_EQ_INT(cliff, FOURCC('C','L','i','f'));
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND), 2);
+    ASSERT(BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND, 1, &texture));
+    ASSERT_EQ_INT(texture.type_index, 1); ASSERT_EQ_INT(texture.type_id, FOURCC('L','g','r','s'));
+    ASSERT_EQ_INT(texture.corner_count, 578);
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, 0), 0);
+    ASSERT(!BZ_TTTerrain_ReferencedTexture(terrain, 0, 0, &texture));
+    ASSERT(!BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND, 0, NULL));
     BZ_TTTerrain_Release(terrain); BZ_TTTerrain_Release(again);
     free_terrain();
 }
@@ -428,9 +436,17 @@ static void test_malformed_terrain_type_index(void) {
 }
 
 static void test_human02_shape_no_cliff_sentinel(void) {
+    const bzTTAsset_t *unused;
     const bzTTTerrain_t *terrain;
     bzTTTerrainCorner_t corner;
+    bzTTTerrainTextureInfo_t texture;
     make_terrain(129, 129, 0);
+    free(world.map->cliffs); world.map->num_cliffs = 3;
+    world.map->cliffs = calloc(world.map->num_cliffs, sizeof(DWORD));
+    world.map->cliffs[0] = FOURCC('C','L','d','i');
+    world.map->cliffs[1] = FOURCC('C','L','g','r');
+    world.map->cliffs[2] = FOURCC('C','L','n','o');
+    ((LPWAR3MAPVERTEX)world.map->vertices)[0].cliff = 1;
     ((LPWAR3MAPVERTEX)world.map->vertices)[2732].cliff = 0x0f;
     reset_assets(); BZ_TTA_PublishTerrainFromGame();
     terrain = BZ_TTA_LatestTerrain();
@@ -438,6 +454,17 @@ static void test_human02_shape_no_cliff_sentinel(void) {
     ASSERT(BZ_TTTerrain_Corner(terrain, 23, 21, &corner));
     ASSERT(corner.flags & BZ_TTA_TERRAIN_NO_CLIFF);
     ASSERT_EQ_INT(corner.cliff_id, 0);
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF), 2);
+    ASSERT(BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF, 0, &texture));
+    ASSERT_EQ_INT(texture.type_index, 0); ASSERT_EQ_INT(texture.type_id, FOURCC('C','L','d','i'));
+    ASSERT_EQ_INT(texture.corner_count, 16639);
+    ASSERT(BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF, 1, &texture));
+    ASSERT_EQ_INT(texture.type_index, 1); ASSERT_EQ_INT(texture.type_id, FOURCC('C','L','g','r'));
+    ASSERT_EQ_INT(texture.corner_count, 1);
+    ASSERT(!BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF, 2, &texture));
+    unused = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                           BZ_TTA_TERRAIN_TEXTURE_CLIFF, 2);
+    ASSERT_NULL(unused); ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), 0);
     BZ_TTTerrain_Release(terrain);
     free_terrain();
 
@@ -458,6 +485,7 @@ static void test_terrain_texture_resolution_roc_tft_and_fallback(void) {
     const bzTTTerrain_t *terrain;
     const bzTTAsset_t *ground, *again, *cliff;
     bzTTAssetMetadata_t metadata;
+    bzTTTerrainTextureInfo_t texture;
     test_assets_set_tft(false); test_assets_set_cliff_specific(false);
     make_terrain(4, 4, 0); reset_assets(); BZ_TTA_PublishTerrainFromGame();
     terrain = BZ_TTA_LatestTerrain(); ASSERT_NOT_NULL(terrain);
@@ -494,6 +522,9 @@ static void test_terrain_texture_resolution_roc_tft_and_fallback(void) {
     test_assets_set_tft(false); test_assets_set_cliff_specific(false); test_assets_set_cliff_generic(false);
     make_terrain(4, 4, 2); reset_assets(); BZ_TTA_PublishTerrainFromGame();
     terrain = BZ_TTA_LatestTerrain();
+    ASSERT_EQ_INT(BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF), 1);
+    ASSERT(BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF, 0, &texture));
+    ASSERT_EQ_INT(texture.type_index, 0); ASSERT_EQ_INT(texture.corner_count, 16);
     cliff = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
                                           BZ_TTA_TERRAIN_TEXTURE_CLIFF, 0);
     again = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
@@ -755,7 +786,10 @@ static void *terrain_reader(void *opaque) {
         const bzTTTerrain_t *terrain = BZ_TTA_LatestTerrain();
         if (terrain) {
             bzTTTerrainCorner_t corner;
+            bzTTTerrainTextureInfo_t texture;
             BZ_TTTerrain_Corner(terrain, 0, 0, &corner);
+            if (BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF))
+                BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF, 0, &texture);
             atomic_fetch_add(ctx->reads, 1);
             BZ_TTTerrain_Release(terrain);
         }

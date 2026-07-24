@@ -285,7 +285,7 @@ static bzTTTerrain_t *wc3_copy_terrain(uintptr_t *source_token, bzTTAResult_t *s
     LPCWAR3MAP map = world.map;
     bzTTTerrain_t *terrain;
     bzTTTerrainCorner_t *corners;
-    uint32_t *grounds, *cliffs;
+    bzTTTerrainTypeRecord_t *grounds, *cliffs;
     size_t corner_count, corners_bytes, grounds_bytes, cliffs_bytes, payload;
     if (!map || !map->vertices || map->width < 2 || map->height < 2 ||
         map->num_grounds > 256 || map->num_cliffs > 256 ||
@@ -309,7 +309,7 @@ static bzTTTerrain_t *wc3_copy_terrain(uintptr_t *source_token, bzTTAResult_t *s
     corners_bytes = corner_count * sizeof(*corners);
     grounds_bytes = (size_t)map->num_grounds * sizeof(*grounds);
     cliffs_bytes = (size_t)map->num_cliffs * sizeof(*cliffs);
-    payload = terrain_align_size(corners_bytes, _Alignof(uint32_t));
+    payload = terrain_align_size(corners_bytes, _Alignof(bzTTTerrainTypeRecord_t));
     if (payload > SIZE_MAX - grounds_bytes || payload + grounds_bytes > SIZE_MAX - cliffs_bytes) {
         *status = BZ_TTA_ERR_OUT_OF_MEMORY;
         return NULL;
@@ -343,16 +343,16 @@ static bzTTTerrain_t *wc3_copy_terrain(uintptr_t *source_token, bzTTAResult_t *s
         *status = BZ_TTA_ERR_MALFORMED;
         return NULL;
     }
-    if (grounds_bytes) memcpy(grounds, map->grounds, grounds_bytes);
-    if (cliffs_bytes) memcpy(cliffs, map->cliffs, cliffs_bytes);
+    for (uint32_t i = 0; i < map->num_grounds; i++) grounds[i].id = map->grounds[i];
+    for (uint32_t i = 0; i < map->num_cliffs; i++) cliffs[i].id = map->cliffs[i];
     for (size_t i = 0; i < corner_count; i++) {
         LPCWAR3MAPVERTEX src = (LPCWAR3MAPVERTEX)map->vertices + i;
         bzTTTerrainCorner_t *dst = corners + i;
         dst->height = DECODE_HEIGHT(src->accurate_height) + src->level * TILE_SIZE - HEIGHT_COR;
         /* Match desktop terrain: raw W3E water levels include an 80-unit format bias. */
         dst->water_height = DECODE_HEIGHT(src->waterlevel) - WATER_HEIGHT_COR;
-        dst->ground_id = map->grounds[src->ground];
-        dst->cliff_id = src->cliff == 0x0f ? 0 : map->cliffs[src->cliff];
+        dst->ground_id = grounds[src->ground].id;
+        dst->cliff_id = src->cliff == 0x0f ? 0 : cliffs[src->cliff].id;
         dst->ground_variation = src->groundVariation;
         dst->cliff_variation = src->cliffVariation;
         dst->cliff_level = src->level;
@@ -362,6 +362,8 @@ static bzTTTerrain_t *wc3_copy_terrain(uintptr_t *source_token, bzTTAResult_t *s
                      (src->water ? BZ_TTA_TERRAIN_WATER : 0) |
                      (src->boundary ? BZ_TTA_TERRAIN_BOUNDARY : 0) |
                      (src->cliff == 0x0f ? BZ_TTA_TERRAIN_NO_CLIFF : 0);
+        grounds[src->ground].corner_count++;
+        if (src->cliff != 0x0f) cliffs[src->cliff].corner_count++;
     }
     pthread_mutex_lock(&terrain_sheet_lock);
     ground_sheet = FS_ParseSLK("TerrainArt\\Terrain.slk");

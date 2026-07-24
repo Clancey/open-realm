@@ -8,6 +8,11 @@ typedef struct {
     uint32_t vertices_offset, normals_offset, uvs_offset, indices_offset;
 } bzTTGeosetRecord_t;
 
+typedef struct {
+    uint32_t id;
+    uint32_t corner_count;
+} bzTTTerrainTypeRecord_t;
+
 struct bzTTAsset {
     int refcount;
     bzTTAssetKind_t kind;

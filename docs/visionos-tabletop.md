@@ -94,6 +94,9 @@ transport:
   `world.map` terrain. The descriptor includes bounds, corner/tile/chunk
   dimensions, corrected ground and water heights, ground/cliff IDs and
   variations, cliff levels, and ramp/water/blight/boundary flags.
+- `BZ_TTTerrain_ReferencedTextureCount()` and
+  `BZ_TTTerrain_ReferencedTexture()` expose only corner-referenced terrain
+  texture registrations while preserving their original W3E table indices.
 - Handles are opaque and explicitly retained/released. Descriptor accessors copy
   plain C POD values; payloads remain immutable, so concurrent readers require
   no renderer-thread lock.

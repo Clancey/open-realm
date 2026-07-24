@@ -207,6 +207,12 @@ typedef struct {
     uint8_t flags;
 } bzTTTerrainCorner_t;
 
+typedef struct {
+    uint32_t type_index;
+    uint32_t type_id;
+    uint32_t corner_count;
+} bzTTTerrainTextureInfo_t;
+
 enum {
     BZ_TTA_TERRAIN_MAP_EDGE = 1u << 0,
     BZ_TTA_TERRAIN_RAMP = 1u << 1,
@@ -232,8 +238,9 @@ const bzTTAsset_t *BZ_TTA_RegisterConfigString(uint32_t abi_version,
 const bzTTAsset_t *BZ_TTA_RegisterModelTexture(uint32_t abi_version,
                                               const bzTTAsset_t *model,
                                               uint32_t texture_index);
-/* Resolves a W3E terrain type through Terrain.slk or CliffTypes.slk. Cliff
- * resolution includes the authoritative map-tileset candidate and generic fallback. */
+/* Resolves a referenced W3E terrain type through Terrain.slk or CliffTypes.slk. Cliff
+ * resolution includes the authoritative map-tileset candidate and generic fallback.
+ * Zero-reference table entries are not registrations and return NULL without lookup. */
 const bzTTAsset_t *BZ_TTA_RegisterTerrainTexture(uint32_t abi_version,
                                                 const bzTTTerrain_t *terrain,
                                                 bzTTTerrainTextureKind_t kind,
@@ -282,6 +289,13 @@ bool BZ_TTTerrain_Corner(const bzTTTerrain_t *terrain, uint32_t x, uint32_t y,
                          bzTTTerrainCorner_t *out);
 bool BZ_TTTerrain_GroundType(const bzTTTerrain_t *terrain, uint32_t index, uint32_t *out);
 bool BZ_TTTerrain_CliffType(const bzTTTerrain_t *terrain, uint32_t index, uint32_t *out);
+/* Returns the dense registration list while preserving each W3E table index for corners. */
+uint32_t BZ_TTTerrain_ReferencedTextureCount(const bzTTTerrain_t *terrain,
+                                             bzTTTerrainTextureKind_t kind);
+bool BZ_TTTerrain_ReferencedTexture(const bzTTTerrain_t *terrain,
+                                    bzTTTerrainTextureKind_t kind,
+                                    uint32_t reference_index,
+                                    bzTTTerrainTextureInfo_t *out);
 
 /* Stable counters for tests and host diagnostics. */
 uint64_t BZ_TTA_CacheHits(void);

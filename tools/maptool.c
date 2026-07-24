@@ -195,17 +195,23 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (inspect) {
-        size_t corners = (size_t)tr.world->width * tr.world->height;
+        size_t ground_uses[256] = { 0 }, cliff_uses[256] = { 0 };
+        size_t corners;
         size_t no_cliff_corners = 0;
+        if (tr.world->num_grounds > 256 || tr.world->num_cliffs > 256 ||
+            (tr.world->height && tr.world->width > SIZE_MAX / tr.world->height)) {
+            fprintf(stderr, "maptool: exporter-invalid terrain shape grounds=%u cliffs=%u width=%u height=%u\n",
+                    tr.world->num_grounds, tr.world->num_cliffs, tr.world->width, tr.world->height);
+            re.Shutdown();
+            Viewer_CloseArchives(archives, sizeof(archives) / sizeof(archives[0]));
+            return 1;
+        }
+        corners = (size_t)tr.world->width * tr.world->height;
         fprintf(stderr,
                 "maptool: terrain width=%u height=%u grounds=%u cliffs=%u vertices=%p "
                 "ground_table=%p cliff_table=%p corners=%zu\n",
                 tr.world->width, tr.world->height, tr.world->num_grounds, tr.world->num_cliffs,
                 tr.world->vertices, tr.world->grounds, tr.world->cliffs, corners);
-        for (DWORD i = 0; i < tr.world->num_grounds; i++)
-            fprintf(stderr, "maptool: ground[%u]=%.4s\n", i, (LPCSTR)(tr.world->grounds + i));
-        for (DWORD i = 0; i < tr.world->num_cliffs; i++)
-            fprintf(stderr, "maptool: cliff[%u]=%.4s\n", i, (LPCSTR)(tr.world->cliffs + i));
         for (size_t i = 0; i < corners; i++) {
             LPCWAR3MAPVERTEX corner = (LPCWAR3MAPVERTEX)tr.world->vertices + i;
             if (corner->cliff == 0x0f) no_cliff_corners++;
@@ -218,7 +224,15 @@ int main(int argc, char **argv) {
                         tr.world->num_grounds, corner->cliff, tr.world->num_cliffs);
                 break;
             }
+            ground_uses[corner->ground]++;
+            if (corner->cliff != 0x0f) cliff_uses[corner->cliff]++;
         }
+        for (DWORD i = 0; i < tr.world->num_grounds; i++)
+            fprintf(stderr, "maptool: ground[%u]=%.4s corners=%zu\n", i,
+                    (LPCSTR)(tr.world->grounds + i), ground_uses[i]);
+        for (DWORD i = 0; i < tr.world->num_cliffs; i++)
+            fprintf(stderr, "maptool: cliff[%u]=%.4s corners=%zu\n", i,
+                    (LPCSTR)(tr.world->cliffs + i), cliff_uses[i]);
         fprintf(stderr, "maptool: no-cliff sentinel corners=%zu\n", no_cliff_corners);
         re.Shutdown();
         Viewer_CloseArchives(archives, sizeof(archives) / sizeof(archives[0]));

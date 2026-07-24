@@ -3,9 +3,9 @@
 ## Warcraft III map terrain inspection
 
 `maptool -inspect` loads a retail map through the renderer's W3E parser, prints
-corner-grid dimensions and ground/cliff FourCC tables, reports the first truly
-out-of-range corner, counts the W3E cliff-index-15 no-cliff sentinel, and exits
-without entering the viewer loop:
+corner-grid dimensions and ground/cliff FourCC tables with per-type corner
+counts, reports the first truly out-of-range corner, counts the W3E
+cliff-index-15 no-cliff sentinel, and exits without entering the viewer loop:
 
 ```sh
 make maptool
@@ -15,6 +15,14 @@ build/bin/maptool -mpq "/Users/clancey/Downloads/Warcraft III/War3.mpq" \
 
 Use this bounded mode before changing terrain validation assumptions; do not
 extract the map or commit proprietary output.
+
+Human02 reports `CLdi=2796`, `CLgr=11496`, `CLno=0`, and 2,349 no-cliff
+sentinels. `CLno` is table metadata only, not a required terrain texture.
+Confirm its absent retail metadata without guessing a texture path:
+
+```sh
+build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep CLno TerrainArt
+```
 
 ## MPQ Inspection (mpqtool)
 

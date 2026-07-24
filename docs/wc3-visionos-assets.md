@@ -17,8 +17,10 @@ asset = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION,
                                     BZ_TTA_ASSET_MODEL, &metadata);
 texture = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
                                       asset, texture_index);
-ground = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
-                                       terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND, type_index);
+count = BZ_TTTerrain_ReferencedTextureCount(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND);
+BZ_TTTerrain_ReferencedTexture(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND, 0, &terrain_texture);
+ground = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                       BZ_TTA_TERRAIN_TEXTURE_GROUND, terrain_texture.type_index);
 status = BZ_TTA_ResolveEntityMetadata(BZ_TABLETOP_ASSETS_ABI_VERSION,
                                       &entity_input, &metadata);
 ```
@@ -64,10 +66,12 @@ until they release their own references. Each initialization advances a
 generation, so a filesystem load or terrain copy started before shutdown cannot
 publish into a restarted lifecycle.
 
-Failures produce explicit status-bearing placeholders rather than `NULL`:
+Referenced asset failures produce explicit status-bearing placeholders rather than `NULL`:
 images are a top-left 1x1 opaque magenta RGBA8 pixel and models are empty
 version-800 descriptors. Allocation failure and invalid ABI/lifecycle arguments
-are the only registration cases that can return `NULL`.
+return `NULL`. A zero-reference terrain table entry is not a registration:
+`BZ_TTA_RegisterTerrainTexture()` returns `NULL` before SLK/MPQ lookup, without
+logging or caching a placeholder.
 
 ## Terrain
 
@@ -90,6 +94,17 @@ cliff-table index. `BZ_TTA_TERRAIN_NO_CLIFF` preserves that state and
 `cliff_id` is zero for those corners. A bounded retail Human02 inspection found
 2,349 sentinel corners; the first is corner 2732 (`x=23`, `y=21`) in its
 129x129 corner grid. Other out-of-range ground/cliff indices remain malformed.
+
+W3E ground/cliff counts describe the complete type tables, which may include
+unreferenced editor data. The dense `BZ_TTTerrain_ReferencedTextureCount()` /
+`BZ_TTTerrain_ReferencedTexture()` list contains only types referenced by
+exported non-sentinel corners. Each `bzTTTerrainTextureInfo_t` preserves the
+original `type_index`, FourCC `type_id`, and authoritative `corner_count`, so
+corner indices and registration indices cannot diverge. Consumers register only
+this list. Human02 contains cliff types `[CLdi, CLgr, CLno]`, but its corner
+counts are `[2796, 11496, 0]`; retail ROC/TFT `CliffTypes.slk` contains no
+`CLno` row because the map never references it. A referenced missing type still
+returns the normal explicit status-bearing placeholder.
 
 The publication token includes the map identity, vertex storage, dimensions,
 and type-table storage. Repeated snapshots of an unchanged map reuse the
