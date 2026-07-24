@@ -66,6 +66,7 @@ struct TabletopSnapshot: Equatable, Sendable {
     var selectedEntityIDs: [UInt32] = []
     var fog: TabletopFogSnapshot?
     var unitLayouts: [TabletopUnitLayoutSnapshot] = []
+    var actionLayout = TabletopActionLayoutSnapshot()
     var configStrings: [UInt32: String] = [:]
     var entitiesOverflowCount: UInt32 = 0
     var duplicateEntityCount: UInt32 = 0

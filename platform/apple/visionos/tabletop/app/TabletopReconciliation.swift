@@ -18,11 +18,16 @@ struct TabletopRenderSnapshot: Equatable {
     var cellSize: Float
     var terrain: [TabletopRenderTile]
     var entities: [TabletopRenderEntity]
+    var selectedEntityIDs: [UInt32]
+    var actionLayout: TabletopActionLayoutSnapshot
+    var worldBounds: TabletopBounds2?
     var warcraft: WarcraftRenderSnapshot?
     var authoritative = false
 
-    static let empty = TabletopRenderSnapshot(generation: 0, sessionID: 0, cellSize: 0.18, terrain: [], entities: [],
-                                               warcraft: nil, authoritative: false)
+    static let empty = TabletopRenderSnapshot(
+        generation: 0, sessionID: 0, cellSize: 0.18, terrain: [], entities: [],
+        selectedEntityIDs: [], actionLayout: TabletopActionLayoutSnapshot(), worldBounds: nil,
+        warcraft: nil, authoritative: false)
 }
 
 enum TabletopSnapshotConverter {
@@ -66,7 +71,10 @@ enum TabletopSnapshotConverter {
         }
         return TabletopRenderSnapshot(generation: snapshot.generation, sessionID: snapshot.sessionID,
                                       cellSize: layout.cellSize,
-                                      terrain: terrain, entities: entities, warcraft: warcraft,
+                                      terrain: terrain, entities: entities,
+                                      selectedEntityIDs: snapshot.selectedEntityIDs,
+                                      actionLayout: snapshot.actionLayout, worldBounds: worldBounds,
+                                      warcraft: warcraft,
                                       authoritative: authoritative)
     }
 

@@ -17,6 +17,8 @@ enum TabletopPureTests {
         testSnapshotDiagnostics()
         testSnapshotValueValidation()
         testCommandLowering()
+        testSpatialControls()
+        testSemanticActions()
         testGestureTerminalSuppression()
         await testFixtureCommands()
         await testUnavailableTransport()
@@ -352,15 +354,45 @@ enum TabletopPureTests {
             let select = try TabletopCommandLowering.lower(
                 .select(entityIDs: [7], observedGeneration: 0, sessionID: 4), currentSessionID: 4)
             let button = try TabletopCommandLowering.lower(
-                .button(code: "hpea", observedGeneration: 8, sessionID: 4), currentSessionID: 4)
+                .button(code: "CmdMove", observedGeneration: 8, sessionID: 4), currentSessionID: 4)
+            let entity = try TabletopCommandLowering.lower(
+                .smartEntity(entityID: 11, observedGeneration: 9, sessionID: 4), currentSessionID: 4)
+            let point = try TabletopCommandLowering.lower(
+                .smartPoint(x: 1, y: -2, observedGeneration: 10, sessionID: 4), currentSessionID: 4)
+            let target = try TabletopCommandLowering.lower(
+                .targetPoint(x: 3, y: 4, observedGeneration: 11, sessionID: 4), currentSessionID: 4)
+            let cancel = try TabletopCommandLowering.lower(
+                .cancel(observedGeneration: 12, sessionID: 4), currentSessionID: 4)
             expect(select == .select([7], 0), "selection lowers to the typed ABI operation")
-            expect(button == .button([104, 112, 101, 97], 8), "four-byte button code lowers exactly")
+            expect(button == .button([67, 109, 100, 77, 111, 118, 101], 8),
+                   "semantic button token lowers exactly")
+            expect(entity == .smartEntity(11, 9), "smart entity lowers exactly")
+            expect(point == .smartPoint(1, -2, 10), "smart point lowers exactly")
+            expect(target == .targetPoint(3, 4, 11), "active point target remains distinct")
+            expect(cancel == .cancel(12), "cancel lowers exactly")
             do {
                 _ = try TabletopCommandLowering.lower(
-                    .button(code: "bad", observedGeneration: 0, sessionID: 4), currentSessionID: 4)
-                expect(false, "short button code was accepted")
+                    .button(code: "Cmd Move", observedGeneration: 0, sessionID: 4), currentSessionID: 4)
+                expect(false, "unsafe button token was accepted")
             } catch TabletopTransportError.invalidCommand {
                 expect(true, "invalid command payload is explicit")
+            }
+            for command in [
+                TabletopCommand.select(entityIDs: [], observedGeneration: 0, sessionID: 4),
+                .smartEntity(entityID: TabletopCommandLowering.maxEntityID,
+                             observedGeneration: 0, sessionID: 4),
+                .smartPoint(x: .nan, y: 0, observedGeneration: 0, sessionID: 4),
+                .targetPoint(x: 0, y: .infinity, observedGeneration: 0, sessionID: 4),
+                .button(code: "", observedGeneration: 0, sessionID: 4),
+            ] {
+                do {
+                    _ = try TabletopCommandLowering.lower(command, currentSessionID: 4)
+                    expect(false, "invalid inverse command was accepted: \(command)")
+                } catch TabletopTransportError.invalidCommand {
+                    expect(true, "invalid inverse command is explicit")
+                } catch {
+                    expect(false, "invalid inverse command returned the wrong error: \(error)")
+                }
             }
             do {
                 _ = try TabletopCommandLowering.lower(
@@ -373,6 +405,161 @@ enum TabletopPureTests {
                    "bounded C queue result maps to an explicit Swift error")
         } catch {
             expect(false, "valid command lowering unexpectedly failed: \(error)")
+        }
+    }
+
+    private static func testSpatialControls() {
+        var source = FixtureSnapshotSource.snapshot(generation: 7)
+        source.sessionID = 3
+        source.selectedEntityIDs = [2]
+        let snapshot = TabletopSnapshotConverter.convert(source)
+        let current = TabletopEntityHit(entityID: 1, generation: 7, sessionID: 3)
+        do {
+            let id = try TabletopHitValidation.entityID(current, in: snapshot)
+            let replacement = try TabletopHitValidation.selection(current, mode: .replacement, in: snapshot)
+            let additive = try TabletopHitValidation.selection(current, mode: .additive, in: snapshot)
+            expect(id == 1, "current entity hit resolves to its stable id")
+            expect(replacement == [1], "replacement selection contains only the hit")
+            expect(additive == [2, 1],
+                   "additive selection merges the copied authoritative selection")
+        } catch {
+            expect(false, "current hit unexpectedly failed: \(error)")
+        }
+        for stale in [
+            TabletopEntityHit(entityID: 1, generation: 6, sessionID: 3),
+            TabletopEntityHit(entityID: 1, generation: 7, sessionID: 2),
+            TabletopEntityHit(entityID: 99, generation: 7, sessionID: 3),
+        ] {
+            do {
+                _ = try TabletopHitValidation.entityID(stale, in: snapshot)
+                expect(false, "stale or missing entity hit was accepted")
+            } catch TabletopTransportError.staleEntityHit {
+                expect(true, "stale entity hit is explicit")
+            } catch {
+                expect(false, "stale entity hit returned the wrong error: \(error)")
+            }
+        }
+
+        var interaction = TabletopInteractionState()
+        expect(interaction.beginSelection(), "idle state accepts selection ownership")
+        expect(!interaction.beginBoardManipulation(.leftHand),
+               "selection and board manipulation cannot own one gesture simultaneously")
+        interaction.finishTransient()
+        expect(interaction.beginSmartPoint(), "idle state accepts a smart-point gesture")
+        expect(!interaction.beginSelection(), "smart-point ownership blocks selection")
+        interaction.cancelGesture()
+        interaction.reconcile(authoritativeTarget: .entityOrPoint)
+        expect(interaction.mode == .abilityTarget(.entityOrPoint),
+               "authoritative snapshot enters ability target mode")
+        expect(interaction.requestCancel() && interaction.mode == .cancelling,
+               "cancel enters an explicit pending state")
+        interaction.reconcile(authoritativeTarget: .none)
+        expect(interaction.mode == .idle, "authoritative acknowledgement ends cancellation")
+        expect(!interaction.requestCancel(), "idle cancellation is rejected")
+        expect(interaction.beginBoardManipulation(.twoHand), "idle state accepts two-hand board ownership")
+        interaction.reconcile(authoritativeTarget: .point)
+        expect(interaction.mode == .boardManipulation(.twoHand),
+               "active board manipulation is not stolen by snapshot reconciliation")
+        interaction.finishTransient()
+        interaction.reconcile(authoritativeTarget: .point)
+        expect(interaction.mode == .abilityTarget(.point), "target state resumes after board ownership ends")
+        interaction.reset()
+        expect(interaction.mode == .idle, "lifecycle reset clears interaction ownership")
+
+        var board = TabletopBoardManipulationState()
+        expect(board.begin(.leftHand), "left hand acquires board translation")
+        expect(!board.begin(.twoHand), "two-hand manipulation cannot steal left-hand ownership")
+        expect(board.update(.leftHand, translation: TabletopVector3(x: 9, y: -9, z: 9)),
+               "owning hand updates translation")
+        expect(board.transform.translation == TabletopVector3(x: 1.5, y: 0.45, z: -0.35),
+               "board translation is bounded on every axis")
+        expect(board.cancel(.leftHand), "cancel releases board ownership")
+        expect(board.transform == TabletopBoardTransform(), "cancel restores the manipulation baseline")
+        expect(board.begin(.twoHand), "two hands acquire scale and rotation")
+        expect(board.update(.twoHand, yaw: 0.75, magnification: 99), "two hands update scale and rotation")
+        expect(board.transform.scale == 1.8 && board.transform.yaw == 0.75,
+               "board scale is bounded while rotation is preserved")
+        expect(board.end(.twoHand), "matching owner commits manipulation")
+        expect(!board.update(.twoHand, magnification: 1.2), "released owner cannot mutate the board")
+        board.reset()
+        expect(board.transform == TabletopBoardTransform() && board.owner == nil,
+               "lifecycle reset restores tabletop placement")
+
+        do {
+            let point = try TabletopWorldMapping.enginePoint(
+                TabletopVector3(x: 0, y: 0, z: 0),
+                bounds: TabletopBounds2(minX: 10, minZ: 20, maxX: 30, maxZ: 60))
+            expect(point.0 == 20 && point.1 == 40, "board center maps to authoritative world center")
+        } catch {
+            expect(false, "valid board point mapping failed: \(error)")
+        }
+        do {
+            _ = try TabletopWorldMapping.enginePoint(TabletopVector3(x: 0, y: 0, z: 0), bounds: nil)
+            expect(false, "point mapping silently accepted missing bounds")
+        } catch TabletopTransportError.invalidInteractionState {
+            expect(true, "missing point mapping state is explicit")
+        } catch {
+            expect(false, "missing point mapping state returned the wrong error: \(error)")
+        }
+    }
+
+    private static func testSemanticActions() {
+        let move = TabletopActionButtonSnapshot(
+            imageIndex: 12, tooltip: "Move", actionCode: "CmdMove", hotkey: 77,
+            gridX: 0, gridY: 0, hidden: false, disabled: false, cooldown: 0,
+            target: .point, semantic: .button)
+        let cancel = TabletopActionButtonSnapshot(
+            imageIndex: 0, tooltip: "Cancel", actionCode: "", hotkey: 0,
+            gridX: 1, gridY: 0, hidden: false, disabled: false, cooldown: 0,
+            target: .none, semantic: .cancel)
+        let layout = TabletopActionLayoutSnapshot(
+            present: true, visible: true, valid: true, currentTarget: .none, buttons: [move, cancel])
+        do {
+            let moveCommand = try TabletopActionValidation.command(
+                move, layout: layout, generation: 8, sessionID: 2)
+            let cancelCommand = try TabletopActionValidation.command(
+                cancel, layout: layout, generation: 8, sessionID: 2)
+            expect(moveCommand == .button(code: "CmdMove", observedGeneration: 8, sessionID: 2),
+                "semantic button emits only its copied authoritative token")
+            expect(cancelCommand == .cancel(observedGeneration: 8, sessionID: 2),
+                "cancel semantic emits the typed cancel command")
+        } catch {
+            expect(false, "valid semantic action unexpectedly failed: \(error)")
+        }
+        for unavailable in [
+            TabletopActionButtonSnapshot(
+                imageIndex: 0, tooltip: "", actionCode: "Hidden", hotkey: 0,
+                gridX: 2, gridY: 0, hidden: true, disabled: false, cooldown: 0,
+                target: .none, semantic: .button),
+            TabletopActionButtonSnapshot(
+                imageIndex: 0, tooltip: "", actionCode: "Disabled", hotkey: 0,
+                gridX: 3, gridY: 0, hidden: false, disabled: true, cooldown: 1,
+                target: .none, semantic: .button),
+        ] {
+            var unavailableLayout = layout
+            unavailableLayout.buttons.append(unavailable)
+            do {
+                _ = try TabletopActionValidation.command(
+                    unavailable, layout: unavailableLayout, generation: 0, sessionID: 2)
+                expect(false, "hidden or disabled action was accepted")
+            } catch TabletopTransportError.invalidInteractionState {
+                expect(true, "hidden and disabled actions are explicit")
+            } catch {
+                expect(false, "unavailable action returned the wrong error: \(error)")
+            }
+        }
+        var unsupported = move
+        unsupported.semantic = .unsupported
+        var unsupportedLayout = layout
+        unsupportedLayout.buttons = [unsupported]
+        do {
+            _ = try TabletopActionValidation.command(
+                unsupported, layout: unsupportedLayout, generation: 0, sessionID: 2)
+            expect(false, "missing semantic action was accepted")
+        } catch TabletopTransportError.missingSemanticAction {
+            expect(true, "missing semantic action is explicit")
+        } catch {
+            expect(false, "missing semantic action returned the wrong error: \(error)")
         }
     }
 

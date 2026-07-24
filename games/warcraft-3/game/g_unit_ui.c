@@ -11,6 +11,7 @@ FLOAT S_SpellCooldownFraction(LPEDICT caster, DWORD code, DWORD level);
 
 /* Defined in skills/s_spell.c — reads a per-level ability data field, e.g. "Cost". */
 FLOAT S_SpellNumber(DWORD code, LPCSTR field, DWORD level);
+DWORD S_SpellLevel(LPEDICT caster, DWORD code);
 
 static void G_CopyString(LPSTR out, DWORD out_size, LPCSTR text) {
     if (!out || out_size == 0) {
@@ -131,6 +132,7 @@ static LPCSTR G_CommandArtPath(LPCSTR art) {
 }
 
 BOOL G_BuildCommandButton(LPEDICT ent, LPCSTR code, BOOL research, DWORD level, gameCommandButton_t *button) {
+    ability_t const *ability;
     LPCSTR base_code;
     LPCSTR art_code;
     LPCSTR art;
@@ -172,10 +174,15 @@ BOOL G_BuildCommandButton(LPEDICT ent, LPCSTR code, BOOL research, DWORD level, 
     button->y = y == UINT_MAX ? 255 : (BYTE)MIN(y, 2);
     button->research = research ? 1 : 0;
     button->active = (BYTE)FindAbilityIndex(base_code);
+    ability = FindAbilityByClassname(base_code);
+    button->target = ability ? ability->target : UI_ACTION_TARGET_NONE;
     if (strlen(base_code) >= 4) {
-        button->manacost = S_SpellNumber(MAKEFOURCC(base_code[0], base_code[1], base_code[2], base_code[3]),
-                                         "Cost", level);
+        DWORD ability_code = MAKEFOURCC(base_code[0], base_code[1], base_code[2], base_code[3]);
+        DWORD ability_level = level ? level : S_SpellLevel(ent, ability_code);
+        button->manacost = S_SpellNumber(ability_code, "Cost", ability_level);
+        button->cooldown = S_SpellCooldownFraction(ent, ability_code, ability_level);
     }
+    button->disabled = G_CommandButtonDisabled(ent, button);
     if (!button->art[0]) {
         fprintf(stderr,
                 "G_BuildCommandButton: skipping missing art unit=%.4s code=%s art_code=%s raw_art=%s\n",
@@ -246,6 +253,7 @@ BYTE G_GetCommandButtons(LPEDICT ent, gameCommandButton_t *buttons, BYTE max_but
                 if (count > idx && strlen(code) >= 4) {
                     buttons[idx].cooldown = S_SpellCooldownFraction(ent,
                         MAKEFOURCC(code[0], code[1], code[2], code[3]), 0);
+                    buttons[idx].disabled = G_CommandButtonDisabled(ent, &buttons[idx]);
                 }
             }
         }
@@ -257,6 +265,7 @@ BYTE G_GetCommandButtons(LPEDICT ent, gameCommandButton_t *buttons, BYTE max_but
             G_AddCommandButton(ent, buttons, max_buttons, &count, GetClassName(ha->code), false, ha->level);
             if (count > idx) {
                 buttons[idx].cooldown = S_SpellCooldownFraction(ent, ha->code, ha->level);
+                buttons[idx].disabled = G_CommandButtonDisabled(ent, &buttons[idx]);
             }
         }
     }

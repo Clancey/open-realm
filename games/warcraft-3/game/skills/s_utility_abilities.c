@@ -109,14 +109,17 @@ static void root_command(LPEDICT clent) {
 
 ability_t a_charm = {
     .cmd = charm_command,
+    .target = UI_ACTION_TARGET_ENTITY,
 };
 
 ability_t a_eat_tree = {
     .cmd = eat_tree_command,
+    .target = UI_ACTION_TARGET_ENTITY,
 };
 
 ability_t a_moon_well = {
     .cmd = moon_well_command,
+    .target = UI_ACTION_TARGET_ENTITY,
 };
 
 ability_t a_root = {

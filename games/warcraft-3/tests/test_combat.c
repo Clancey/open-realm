@@ -700,6 +700,34 @@ static void test_registered_reference_ability_codes(void) {
     }
 }
 
+static void test_targeted_abilities_publish_semantic_target_kinds(void) {
+    static struct {
+        LPCSTR code;
+        uiActionTarget_t target;
+    } const cases[] = {
+        { STR_CmdMove, UI_ACTION_TARGET_POINT },
+        { STR_CmdPatrol, UI_ACTION_TARGET_POINT },
+        { STR_CmdBuild, UI_ACTION_TARGET_POINT },
+        { STR_CmdAttack, UI_ACTION_TARGET_ENTITY_OR_POINT },
+        { "AHbz", UI_ACTION_TARGET_POINT },
+        { "AUcs", UI_ACTION_TARGET_POINT },
+        { "AEbl", UI_ACTION_TARGET_POINT },
+        { "AHtb", UI_ACTION_TARGET_ENTITY },
+        { "ANfb", UI_ACTION_TARGET_ENTITY },
+        { "AHhb", UI_ACTION_TARGET_ENTITY },
+        { "Ahar", UI_ACTION_TARGET_ENTITY },
+        { "Aeat", UI_ACTION_TARGET_ENTITY },
+        { "Ambt", UI_ACTION_TARGET_ENTITY },
+        { "ANch", UI_ACTION_TARGET_ENTITY },
+        { "AEsh", UI_ACTION_TARGET_ENTITY },
+    };
+    FOR_LOOP(i, sizeof(cases) / sizeof(cases[0])) {
+        ability_t const *ability = FindAbilityByClassname(cases[i].code);
+        ASSERT_NOT_NULL(ability);
+        ASSERT_EQ_INT(ability->target, cases[i].target);
+    }
+}
+
 static const char slk_ability_helpers[] =
     "ID;PWXL;N;EBB;Y3;X13\n"
     "C;Y1;X1;K\"alias\"\n"
@@ -1058,6 +1086,7 @@ BEGIN_SUITE(combat)
     RUN_TEST(test_get_ability_by_index_out_of_range);
     RUN_TEST(test_get_ability_index_roundtrip);
     RUN_TEST(test_registered_reference_ability_codes);
+    RUN_TEST(test_targeted_abilities_publish_semantic_target_kinds);
     RUN_TEST(test_spell_helpers_read_slk_fields);
     RUN_TEST(test_spell_mana_and_cooldown);
     RUN_TEST(test_timed_stun_status_expires_without_touching_pause);

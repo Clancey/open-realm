@@ -84,6 +84,9 @@ typedef struct {
     BYTE active;
     FLOAT cooldown; /* fraction of the ability's cooldown still remaining (0=ready, 1=just used) */
     FLOAT manacost; /* mana cost to cast this ability at its current level (0 if not a spell) */
+    uiActionTarget_t target;
+    BYTE hidden;
+    BYTE disabled;
 } gameCommandButton_t;
 
 typedef struct {

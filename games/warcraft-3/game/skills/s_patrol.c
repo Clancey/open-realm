@@ -59,4 +59,5 @@ static void patrol_command(LPEDICT ent) {
 
 ability_t a_patrol = {
     .cmd = patrol_command,
+    .target = UI_ACTION_TARGET_POINT,
 };

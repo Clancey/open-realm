@@ -417,6 +417,7 @@ typedef struct {
 typedef struct ability_s {
     void (*init)(LPCSTR, struct ability_s *);
     void (*cmd)(LPEDICT);
+    uiActionTarget_t target;
 } ability_t;
 
 typedef struct {
@@ -815,6 +816,8 @@ LPCSTR GetClassName(DWORD);
 // g_unit_ui.c (Phase 8)
 BYTE G_GetCommandButtons(LPEDICT ent, gameCommandButton_t *buttons, BYTE max_buttons);
 BOOL G_BuildCommandButton(LPEDICT ent, LPCSTR code, BOOL research, DWORD level, gameCommandButton_t *button);
+static inline BOOL G_CommandButtonDisabled(LPEDICT ent, gameCommandButton_t const *button)
+{ return button->cooldown > 0 || button->manacost > ent->mana.value; }
 BYTE G_GetInventory(LPEDICT ent, gameInventoryItem_t *items, BYTE max_items);
 BYTE G_GetBuildQueue(LPEDICT ent, gameQueueItem_t *queue, BYTE max_queue);
 
@@ -904,6 +907,12 @@ void ShutdownUnitData(void);
 void G_SelectEntity(LPGAMECLIENT, LPEDICT);
 void G_DeselectEntity(LPGAMECLIENT, LPEDICT);
 BOOL G_IsEntitySelected(LPGAMECLIENT, LPEDICT);
+/* Active callbacks, not button names, authoritatively describe target mode. */
+static inline uiActionTarget_t G_MenuActionTarget(menu_t const *menu) {
+    return menu->on_location_selected
+        ? (menu->on_entity_selected ? UI_ACTION_TARGET_ENTITY_OR_POINT : UI_ACTION_TARGET_POINT)
+        : (menu->on_entity_selected ? UI_ACTION_TARGET_ENTITY : UI_ACTION_TARGET_NONE);
+}
 void G_ClientCommand(LPEDICT, DWORD, LPCSTR[]);
 void G_ClientSetCameraPosition(LPEDICT, LPCVECTOR2);
 

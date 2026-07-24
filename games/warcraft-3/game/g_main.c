@@ -288,6 +288,7 @@ static void G_RunClients(void) {
             UI_WriteCinematicLayer(G_GetPlayerEntityByNumber(client->ps.number));
         }
         client->ps.cinefade = cinefade;
+        client->ps.client_ui_target = G_MenuActionTarget(&client->menu);
     }
 }
 

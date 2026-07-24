@@ -175,4 +175,5 @@ void SP_ability_harvest(LPCSTR classname, ability_t *self) {
 ability_t a_harvest = {
     .init = SP_ability_harvest,
     .cmd = harvest_command,
+    .target = UI_ACTION_TARGET_ENTITY,
 };

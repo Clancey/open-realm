@@ -2,13 +2,15 @@ enum TabletopCommand: Equatable, Sendable {
     case select(entityIDs: [UInt32], observedGeneration: UInt64, sessionID: UInt64)
     case smartEntity(entityID: UInt32, observedGeneration: UInt64, sessionID: UInt64)
     case smartPoint(x: Float, y: Float, observedGeneration: UInt64, sessionID: UInt64)
+    case targetPoint(x: Float, y: Float, observedGeneration: UInt64, sessionID: UInt64)
     case button(code: String, observedGeneration: UInt64, sessionID: UInt64)
     case cancel(observedGeneration: UInt64, sessionID: UInt64)
 
     var sessionID: UInt64 {
         switch self {
         case .select(_, _, let sessionID), .smartEntity(_, _, let sessionID),
-             .smartPoint(_, _, _, let sessionID), .button(_, _, let sessionID),
+             .smartPoint(_, _, _, let sessionID), .targetPoint(_, _, _, let sessionID),
+             .button(_, _, let sessionID),
              .cancel(_, let sessionID): return sessionID
         }
     }
@@ -33,6 +35,9 @@ enum TabletopTransportError: Error, Equatable, CustomStringConvertible {
     case startupTimedOut
     case malformedSnapshot(String)
     case invalidSnapshotEntity(UInt32)
+    case staleEntityHit(UInt64)
+    case missingSemanticAction(String)
+    case invalidInteractionState(String)
 
     var description: String {
         switch self {
@@ -50,6 +55,9 @@ enum TabletopTransportError: Error, Equatable, CustomStringConvertible {
         case .startupTimedOut: return "Timed out waiting for the first live tabletop snapshot"
         case .malformedSnapshot(let message): return "Malformed tabletop snapshot: \(message)"
         case .invalidSnapshotEntity(let index): return "Tabletop snapshot entity \(index) could not be copied"
+        case .staleEntityHit(let id): return "Tabletop entity hit \(id) belongs to a stale snapshot"
+        case .missingSemanticAction(let code): return "Tabletop action '\(code)' has no supported semantic command"
+        case .invalidInteractionState(let message): return message
         }
     }
 }

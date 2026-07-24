@@ -102,9 +102,11 @@ static void SP_ability_firebolt(LPCSTR classname, ability_t *self) {
 ability_t a_thunderbolt = {
     .init = SP_ability_thunderbolt,
     .cmd = thunderbolt_command,
+    .target = UI_ACTION_TARGET_ENTITY,
 };
 
 ability_t a_firebolt = {
     .init = SP_ability_firebolt,
     .cmd = thunderbolt_command,
+    .target = UI_ACTION_TARGET_ENTITY,
 };

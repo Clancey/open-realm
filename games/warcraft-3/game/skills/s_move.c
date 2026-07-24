@@ -354,4 +354,5 @@ void move_command(LPEDICT ent) {
 
 ability_t a_move = {
     .cmd = move_command,
+    .target = UI_ACTION_TARGET_POINT,
 };

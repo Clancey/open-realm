@@ -4,6 +4,21 @@ import RealityKit
 import SwiftUI
 import UIKit
 
+struct TabletopEntityHitComponent: Component {
+    var id: UInt64
+    var generation: UInt64
+    var sessionID: UInt64
+}
+
+enum TabletopSurfaceKind: UInt8 {
+    case board
+    case translationHandle
+}
+
+struct TabletopSurfaceComponent: Component {
+    var kind: TabletopSurfaceKind
+}
+
 @MainActor
 final class RealityTabletopReconciler {
     let root = Entity()
@@ -12,8 +27,6 @@ final class RealityTabletopReconciler {
     private var fog: ModelEntity?
     private var entities: [UInt64: Entity] = [:]
     private var latestEntities: [UInt64: TabletopRenderEntity] = [:]
-    private var positionOverrides: [UInt64: SIMD3<Float>] = [:]
-    private var selectionOverrides: [UInt64: Bool] = [:]
     private var meshCache: [String: MeshResource] = [:]
     private var meshOrder: [String] = []
     private var textureCache: [String: TextureResource] = [:]
@@ -113,16 +126,16 @@ final class RealityTabletopReconciler {
         fog = nil
         entities.removeAll()
         latestEntities.removeAll()
-        positionOverrides.removeAll()
-        selectionOverrides.removeAll()
         generation = nil
         sessionID = nil
         root.children.removeAll()
+        applyTabletopTransform(TabletopBoardTransform())
     }
 
     func apply(_ snapshot: TabletopRenderSnapshot) async {
         if let sessionID, sessionID != snapshot.sessionID { reset() }
         sessionID = snapshot.sessionID
+        ensureInteractionSurfaces()
         guard let warcraft = snapshot.warcraft else {
             diagnose("RealityKit renderer received no descriptor snapshot; scene remains empty.")
             return
@@ -137,13 +150,6 @@ final class RealityTabletopReconciler {
             return
         }
         guard !Task.isCancelled else { return }
-        var expiredOverrides = Set<UInt64>()
-        if snapshot.authoritative, generation != nil, generation != snapshot.generation {
-            expiredOverrides.formUnion(positionOverrides.keys)
-            expiredOverrides.formUnion(selectionOverrides.keys)
-            positionOverrides.removeAll()
-            selectionOverrides.removeAll()
-        }
         generation = snapshot.generation
         latestEntities.removeAll(keepingCapacity: true)
         for entity in snapshot.entities { latestEntities[entity.id] = entity }
@@ -152,43 +158,63 @@ final class RealityTabletopReconciler {
         for id in plan.removedChunkIDs { chunks.removeValue(forKey: id)?.removeFromParent() }
         for id in plan.removedEntityIDs {
             entities.removeValue(forKey: id)?.removeFromParent()
-            positionOverrides.removeValue(forKey: id)
-            selectionOverrides.removeValue(forKey: id)
         }
         for chunk in plan.upsertedChunks { upsert(chunk) }
         if plan.fogRemoved { fog?.removeFromParent(); fog = nil }
         if let fog = plan.fog { upsert(fog) }
         for update in plan.entityUpdates { upsert(update) }
-        for id in expiredOverrides {
-            if let entity = warcraft.entities.first(where: { $0.descriptor.id == id }) {
-                upsert(WarcraftEntityUpdate(entity: entity, geometryChanged: false,
-                                            materialChanged: false, transformChanged: true,
-                                            scaleChanged: false, stateChanged: true))
-            }
+        for (id, entity) in entities {
+            entity.components.set(TabletopEntityHitComponent(
+                id: id, generation: snapshot.generation, sessionID: snapshot.sessionID))
         }
     }
 
-    func fixtureID(for entity: Entity) -> UInt64? {
+    func entityHit(for entity: Entity) -> TabletopEntityHit? {
         var candidate: Entity? = entity
         while let current = candidate {
-            if let id = entities.first(where: { $0.value === current })?.key { return id }
+            if let component = current.components[TabletopEntityHitComponent.self] {
+                return TabletopEntityHit(
+                    entityID: component.id, generation: component.generation, sessionID: component.sessionID)
+            }
             candidate = current.parent
         }
         return nil
     }
 
-    func setSelected(_ id: UInt64) {
-        guard entities[id] != nil else { return }
-        selectionOverrides = Dictionary(uniqueKeysWithValues: entities.keys.map { ($0, $0 == id) })
-        for (entityID, entity) in entities {
-            entity.findEntity(named: "selection")?.isEnabled = entityID == id
+    func surfaceKind(for entity: Entity) -> TabletopSurfaceKind? {
+        var candidate: Entity? = entity
+        while let current = candidate {
+            if let component = current.components[TabletopSurfaceComponent.self] { return component.kind }
+            candidate = current.parent
         }
+        return nil
     }
 
-    func drag(_ id: UInt64, to position: SIMD3<Float>) {
-        guard let entity = entities[id] else { return }
-        entity.position = [position.x, entity.position.y, position.z]
-        positionOverrides[id] = entity.position
+    func applyTabletopTransform(_ value: TabletopBoardTransform) {
+        root.position = [value.translation.x, value.translation.y, value.translation.z]
+        root.orientation = simd_quatf(angle: value.yaw, axis: [0, 1, 0])
+        root.scale = SIMD3(repeating: value.scale)
+    }
+
+    private func ensureInteractionSurfaces() {
+        guard root.findEntity(named: "board-command-surface") == nil else { return }
+        let board = Entity()
+        board.name = "board-command-surface"
+        board.position.y = -0.025
+        board.components.set(InputTargetComponent())
+        board.components.set(CollisionComponent(shapes: [.generateBox(size: [1.12, 0.03, 1.12])]))
+        board.components.set(TabletopSurfaceComponent(kind: .board))
+        root.addChild(board)
+
+        let handle = ModelEntity(
+            mesh: .generateBox(size: [0.025, 0.025, 0.34], cornerRadius: 0.008),
+            materials: [SimpleMaterial(color: UIColor.systemBlue.withAlphaComponent(0.72), isMetallic: false)])
+        handle.name = "board-translation-handle"
+        handle.position = [-0.59, 0.02, 0]
+        handle.components.set(InputTargetComponent())
+        handle.generateCollisionShapes(recursive: false)
+        handle.components.set(TabletopSurfaceComponent(kind: .translationHandle))
+        root.addChild(handle)
     }
 
     private func upsert(_ chunk: WarcraftTerrainChunkDescriptor) {
@@ -237,7 +263,7 @@ final class RealityTabletopReconciler {
             }
         }
         if update.transformChanged || entities[id] == nil {
-            entity.position = positionOverrides[id] ?? simd(item.position)
+            entity.position = simd(item.position)
             entity.orientation = simd_quatf(angle: item.descriptor.heading, axis: [0, 1, 0])
             entity.scale = .one
         }
@@ -248,8 +274,7 @@ final class RealityTabletopReconciler {
             }
         }
         if rebuilt || update.stateChanged {
-            entity.findEntity(named: "selection")?.isEnabled =
-                selectionOverrides[id] ?? item.descriptor.selected
+            entity.findEntity(named: "selection")?.isEnabled = item.descriptor.selected
             updateBar(entity.findEntity(named: "health-background"), value: item.descriptor.health)
             updateBar(entity.findEntity(named: "mana-background"), value: item.descriptor.mana)
             if let animation = item.animation {
@@ -607,8 +632,13 @@ struct TabletopImmersiveView: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var model: TabletopSessionModel
     @State private var reconciler = RealityTabletopReconciler()
-    @State private var dragState = TabletopDragState()
-    @GestureState private var dragActive = false
+    @State private var interaction = TabletopInteractionState()
+    @State private var board = TabletopBoardManipulationState()
+    @State private var boardDragStart: SIMD3<Float>?
+    @State private var boardMagnification: Float = 1
+    @State private var boardYaw: Float = 0
+    @State private var additiveSelection = false
+    @GestureState private var boardDragActive = false
 
     var body: some View {
         RealityView { content in
@@ -618,31 +648,102 @@ struct TabletopImmersiveView: View {
         .task(id: "\(model.renderSnapshot.sessionID):\(model.renderSnapshot.generation)") {
             await reconciler.apply(model.renderSnapshot)
         }
+        .onChange(of: model.renderSnapshot.generation) { _, _ in
+            interaction.reconcile(authoritativeTarget: model.renderSnapshot.actionLayout.currentTarget)
+        }
         .simultaneousGesture(SpatialTapGesture().targetedToAnyEntity().onEnded { value in
-            if let id = reconciler.fixtureID(for: value.entity) {
-                reconciler.setSelected(id)
-                model.select(entityID: id)
+            if let hit = reconciler.entityHit(for: value.entity) {
+                if model.renderSnapshot.actionLayout.currentTarget.acceptsEntity {
+                    model.targetEntity(hit)
+                } else if interaction.beginSelection() {
+                    model.select(hit, mode: additiveSelection ? .additive : .replacement)
+                    additiveSelection = false
+                    interaction.finishTransient()
+                }
+                return
+            }
+            guard reconciler.surfaceKind(for: value.entity) == .board else { return }
+            let local = value.convert(value.location3D, from: .local, to: reconciler.root)
+            do {
+                let point = try TabletopWorldMapping.enginePoint(
+                    TabletopVector3(x: local.x, y: local.y, z: local.z),
+                    bounds: model.renderSnapshot.worldBounds)
+                if model.renderSnapshot.actionLayout.currentTarget.acceptsPoint {
+                    model.targetPoint(x: point.0, y: point.1)
+                } else if interaction.beginSmartPoint() {
+                    model.smartPoint(x: point.0, y: point.1)
+                    interaction.finishTransient()
+                }
+            } catch {
+                FileHandle.standardError.write(Data("OpenRealmTabletopControls: \(error)\n".utf8))
             }
         })
-        .simultaneousGesture(DragGesture(minimumDistance: 8).targetedToAnyEntity()
-            .updating($dragActive) { _, active, _ in active = true }
+        .simultaneousGesture(LongPressGesture(minimumDuration: 0.45).targetedToAnyEntity().onEnded { value in
+            guard interaction.mode == .idle, let hit = reconciler.entityHit(for: value.entity) else { return }
+            model.smartEntity(hit)
+        })
+        .highPriorityGesture(DragGesture(minimumDistance: 8).targetedToAnyEntity()
+            .updating($boardDragActive) { value, active, _ in
+                if reconciler.surfaceKind(for: value.entity) == .translationHandle { active = true }
+            }
             .onChanged { value in
-                guard let id = reconciler.fixtureID(for: value.entity) else { return }
-                if dragState.entityID == nil { _ = dragState.begin(entityID: id) }
-                guard dragState.change(entityID: id) else { return }
-                reconciler.drag(id, to: value.convert(value.location3D, from: .local, to: reconciler.root))
+                guard reconciler.surfaceKind(for: value.entity) == .translationHandle else { return }
+                let point = value.convert(value.location3D, from: .local, to: reconciler.root)
+                if boardDragStart == nil {
+                    guard interaction.beginBoardManipulation(.leftHand), board.begin(.leftHand) else { return }
+                    boardDragStart = point
+                }
+                guard let start = boardDragStart else { return }
+                _ = board.update(.leftHand, translation: TabletopVector3(
+                    x: point.x - start.x, y: point.y - start.y, z: point.z - start.z))
+                reconciler.applyTabletopTransform(board.transform)
             }
             .onEnded { value in
-                guard let id = reconciler.fixtureID(for: value.entity), dragState.end(entityID: id) else { return }
-                reconciler.drag(id, to: value.convert(value.location3D, from: .local, to: reconciler.root))
+                guard reconciler.surfaceKind(for: value.entity) == .translationHandle else { return }
+                _ = board.end(.leftHand)
+                boardDragStart = nil
+                interaction.finishTransient()
             })
-        .onChange(of: dragActive) { _, active in
-            guard !active, let id = dragState.entityID else { return }
-            _ = dragState.end(entityID: id, cancelled: true)
+        .simultaneousGesture(MagnifyGesture(minimumScaleDelta: 0.01).targetedToAnyEntity()
+            .onChanged { value in
+                guard reconciler.surfaceKind(for: value.entity) == .board,
+                      interaction.beginBoardManipulation(.twoHand), board.begin(.twoHand) else { return }
+                boardMagnification = Float(value.magnification)
+                _ = board.update(.twoHand, yaw: boardYaw, magnification: boardMagnification)
+                reconciler.applyTabletopTransform(board.transform)
+            }
+            .onEnded { _ in finishTwoHandManipulation() })
+        .simultaneousGesture(RotateGesture3D(constrainedToAxis: .y).targetedToAnyEntity()
+            .onChanged { value in
+                guard reconciler.surfaceKind(for: value.entity) == .board,
+                      interaction.beginBoardManipulation(.twoHand), board.begin(.twoHand) else { return }
+                boardYaw = Float(value.rotation.angle.radians)
+                _ = board.update(.twoHand, yaw: boardYaw, magnification: boardMagnification)
+                reconciler.applyTabletopTransform(board.transform)
+            }
+            .onEnded { _ in finishTwoHandManipulation() })
+        .onChange(of: boardDragActive) { _, active in
+            guard !active, board.owner == .leftHand else { return }
+            _ = board.cancel(.leftHand)
+            boardDragStart = nil
+            interaction.cancelGesture()
+            reconciler.applyTabletopTransform(board.transform)
         }
         .onDisappear {
+            interaction.reset()
+            board.reset()
             reconciler.reset()
             Task { await model.stop() }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            TabletopActionPanel(
+                layout: model.renderSnapshot.actionLayout,
+                additiveSelection: $additiveSelection,
+                activate: model.activate,
+                cancel: {
+                    if interaction.requestCancel() { model.cancelTargeting() }
+                })
+            .padding()
         }
         .overlay(alignment: .top) {
             if let error = model.errorMessage {
@@ -663,6 +764,57 @@ struct TabletopImmersiveView: View {
                     .padding()
                     .glassBackgroundEffect()
             }
+        }
+    }
+
+    private func finishTwoHandManipulation() {
+        guard board.owner == .twoHand else { return }
+        _ = board.end(.twoHand)
+        boardMagnification = 1
+        boardYaw = 0
+        interaction.finishTransient()
+    }
+}
+
+private struct TabletopActionPanel: View {
+    var layout: TabletopActionLayoutSnapshot
+    @Binding var additiveSelection: Bool
+    var activate: (TabletopActionButtonSnapshot) -> Void
+    var cancel: () -> Void
+
+    private let columns = Array(repeating: GridItem(.fixed(92), spacing: 8), count: 4)
+
+    var body: some View {
+        if layout.present && layout.visible && layout.valid {
+            VStack(alignment: .trailing, spacing: 8) {
+                Toggle("Add selection", isOn: $additiveSelection)
+                    .toggleStyle(.button)
+                LazyVGrid(columns: columns, spacing: 8) {
+                    ForEach(layout.buttons.filter { !$0.hidden }.sorted {
+                        ($0.gridY, $0.gridX) < ($1.gridY, $1.gridX)
+                    }) { button in
+                        Button {
+                            activate(button)
+                        } label: {
+                            VStack(spacing: 3) {
+                                Text(button.tooltip.isEmpty ? button.actionCode : button.tooltip)
+                                    .lineLimit(2)
+                                if button.cooldown > 0 {
+                                    Text(button.cooldown, format: .number.precision(.fractionLength(1)))
+                                        .font(.caption2)
+                                }
+                            }
+                            .frame(width: 84, height: 54)
+                        }
+                        .disabled(button.disabled || button.semantic == .unsupported)
+                    }
+                }
+                if layout.currentTarget != .none {
+                    Button("Cancel", role: .cancel, action: cancel)
+                }
+            }
+            .padding()
+            .glassBackgroundEffect()
         }
     }
 }

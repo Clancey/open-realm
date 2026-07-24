@@ -160,6 +160,104 @@ static void test_unknown_opcode_stops_parsing_without_corrupting_state(void) {
     ASSERT_STR_EQ(cl.configstrings[CS_WORLD], "GoodMap");
 }
 
+static void write_action_frame(sizeBuf_t *msg, uiFrame_t *frame) {
+    uiFrame_t zero = { 0 };
+    MSG_WriteDeltaUIFrame(msg, &zero, frame, true);
+    MSG_WriteByte(msg, 0);
+}
+
+static void test_action_layout_decodes_authoritative_cached_command_bar(void) {
+    reset_all();
+    BYTE buffer[2048];
+    sizeBuf_t msg = { .data = buffer, .maxsize = sizeof(buffer) };
+    uiFrame_t move = { 0 };
+    uiFrame_t unsupported = { 0 };
+    uiFrame_t cancel = { 0 };
+    uiFrame_t injected = { 0 };
+
+    move.number = 1;
+    move.flags.type = FT_COMMANDBUTTON;
+    move.flags.disabled = true;
+    move.flags.target = UI_ACTION_TARGET_POINT;
+    move.tex.index = 17;
+    move.tooltip = "Move somewhere";
+    move.onclick = "button CmdMove";
+    move.hotkey = 'M';
+    move.value = 0.75f;
+    unsupported.number = 2;
+    unsupported.flags.type = FT_COMMANDBUTTON;
+    unsupported.flags.hidden = true;
+    unsupported.tex.index = 18;
+    unsupported.tooltip = "Research";
+    unsupported.onclick = "research A001";
+    cancel.number = 3;
+    cancel.flags.type = FT_COMMANDBUTTON;
+    cancel.tex.index = 19;
+    cancel.onclick = "button CmdCancel";
+    injected.number = 4;
+    injected.flags.type = FT_COMMANDBUTTON;
+    injected.onclick = "button CmdMove extra";
+
+    MSG_WriteByte(&msg, svc_layout);
+    MSG_WriteByte(&msg, LAYER_COMMANDBAR);
+    write_action_frame(&msg, &move);
+    write_action_frame(&msg, &unsupported);
+    write_action_frame(&msg, &cancel);
+    write_action_frame(&msg, &injected);
+    MSG_WriteEntityBits(&msg, 0, 0);
+    CL_ParseServerMessage(&msg);
+
+    cl.playerstate.client_ui_state = CLIENT_UI_GAME;
+    cl.playerstate.client_ui_target = UI_ACTION_TARGET_ENTITY_OR_POINT;
+    BZ_TT_PublishSnapshotFromClient();
+    const bzTTSnapshot_t *snap = BZ_TT_Latest();
+    const bzTTActionLayout_t *layout = BZ_TTSnapshot_ActionLayout(snap);
+    ASSERT(layout->present);
+    ASSERT(layout->valid);
+    ASSERT(layout->visible);
+    ASSERT_EQ_INT(layout->current_target, BZ_TT_ACTION_TARGET_ENTITY_OR_POINT);
+    ASSERT_EQ_INT(layout->num_buttons, 4);
+    ASSERT_EQ_INT(layout->buttons[0].image_index, 17);
+    ASSERT_STR_EQ(layout->buttons[0].tooltip, "Move somewhere");
+    ASSERT_STR_EQ(layout->buttons[0].action_code, "CmdMove");
+    ASSERT_EQ_INT(layout->buttons[0].semantic, BZ_TT_ACTION_BUTTON);
+    ASSERT_EQ_INT(layout->buttons[0].target, BZ_TT_ACTION_TARGET_POINT);
+    ASSERT(layout->buttons[0].disabled);
+    ASSERT(!layout->buttons[0].hidden);
+    ASSERT_EQ_FLOAT(layout->buttons[0].cooldown, 0.75f, 0.0001f);
+    ASSERT_EQ_INT(layout->buttons[0].hotkey, 'M');
+    ASSERT_EQ_INT(layout->buttons[0].grid_x, 0);
+    ASSERT_EQ_INT(layout->buttons[0].grid_y, 0);
+    ASSERT_EQ_INT(layout->buttons[1].semantic, BZ_TT_ACTION_UNSUPPORTED);
+    ASSERT(layout->buttons[1].disabled);
+    ASSERT(layout->buttons[1].hidden);
+    ASSERT_EQ_INT(layout->buttons[1].grid_x, 1);
+    ASSERT_EQ_INT(layout->buttons[2].semantic, BZ_TT_ACTION_CANCEL);
+    ASSERT_STR_EQ(layout->buttons[2].action_code, "CmdCancel");
+    ASSERT_EQ_INT(layout->buttons[3].semantic, BZ_TT_ACTION_UNSUPPORTED);
+    ASSERT(layout->buttons[3].disabled);
+    BZ_TTSnapshot_Release(snap);
+
+    /* The same authoritative cache is decoded on later publishes; uiflags,
+     * not cache presence, controls whether the layer is currently visible. */
+    cl.playerstate.uiflags = 1u << LAYER_COMMANDBAR;
+    BZ_TT_PublishSnapshotFromClient();
+    snap = BZ_TT_Latest();
+    layout = BZ_TTSnapshot_ActionLayout(snap);
+    ASSERT(layout->present);
+    ASSERT(layout->valid);
+    ASSERT(!layout->visible);
+    ASSERT_EQ_INT(layout->num_buttons, 4);
+    BZ_TTSnapshot_Release(snap);
+
+    cl.playerstate.uiflags = 0;
+    cl.playerstate.client_ui_state = CLIENT_UI_LOADING;
+    BZ_TT_PublishSnapshotFromClient();
+    snap = BZ_TT_Latest();
+    ASSERT(!BZ_TTSnapshot_ActionLayout(snap)->visible);
+    BZ_TTSnapshot_Release(snap);
+}
+
 /* --- Typed command -> real loopback server delivery ---------------------- */
 
 static void test_typed_commands_are_delivered_over_real_loopback(void) {
@@ -169,6 +267,7 @@ static void test_typed_commands_are_delivered_over_real_loopback(void) {
     uint32_t ids[2] = { 5, 9 };
     ASSERT_EQ_INT(BZ_TT_PostSelect(BZ_TABLETOP_ABI_VERSION, 0, ids, 2), BZ_TT_OK);
     ASSERT_EQ_INT(BZ_TT_PostSmartPoint(BZ_TABLETOP_ABI_VERSION, 0, 42.0f, -7.0f), BZ_TT_OK);
+    ASSERT_EQ_INT(BZ_TT_PostTargetPoint(BZ_TABLETOP_ABI_VERSION, 0, 11.0f, 23.0f), BZ_TT_OK);
     ASSERT_EQ_INT(BZ_TT_PostCancel(BZ_TABLETOP_ABI_VERSION, 0), BZ_TT_OK);
 
     /* Real engine-thread integration path: drain the queue into the
@@ -194,7 +293,7 @@ static void test_typed_commands_are_delivered_over_real_loopback(void) {
     ASSERT(received > 0);
     ASSERT_EQ_INT(from.type, NA_LOOPBACK);
 
-    /* Decode the three clc_stringcmd entries in order, exactly like
+    /* Decode the four clc_stringcmd entries in order, exactly like
      * SV_ExecuteClientMessage() would. */
     BYTE opcode = (BYTE)MSG_ReadByte(&recv_msg);
     ASSERT_EQ_INT(opcode, clc_stringcmd);
@@ -206,7 +305,11 @@ static void test_typed_commands_are_delivered_over_real_loopback(void) {
 
     opcode = (BYTE)MSG_ReadByte(&recv_msg);
     ASSERT_EQ_INT(opcode, clc_stringcmd);
-    ASSERT_STR_EQ(MSG_ReadString2(&recv_msg), "cancel");
+    ASSERT_STR_EQ(MSG_ReadString2(&recv_msg), "point 11 23");
+
+    opcode = (BYTE)MSG_ReadByte(&recv_msg);
+    ASSERT_EQ_INT(opcode, clc_stringcmd);
+    ASSERT_STR_EQ(MSG_ReadString2(&recv_msg), "button CmdCancel");
 
     /* No more data: the whole message was accounted for. */
     ASSERT_EQ_INT(recv_msg.readcount, recv_msg.cursize);
@@ -232,6 +335,7 @@ static void test_no_transmit_when_queue_is_empty(void) {
 void run_bz_tabletop_transport_client_tests(void) {
     RUN_TEST(test_real_packet_parse_populates_snapshot);
     RUN_TEST(test_unknown_opcode_stops_parsing_without_corrupting_state);
+    RUN_TEST(test_action_layout_decodes_authoritative_cached_command_bar);
     RUN_TEST(test_typed_commands_are_delivered_over_real_loopback);
     RUN_TEST(test_no_transmit_when_queue_is_empty);
 }

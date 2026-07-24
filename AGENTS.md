@@ -16,7 +16,7 @@ This codebase is inspired by **Quake 2** (id Software). The developer is deeply 
 | Entity sound architecture | [doc/architecture/sound.md](doc/architecture/sound.md) |
 | WC3 data model (SLK, unit stats, combat) | [docs/wc3-data-model.md](docs/wc3-data-model.md) |
 | SC2 HUD layout pipeline (sc2BaseFrame_t → uiFrame_t, layer IDs, stat bindings) | [games/starcraft-2/docs/hud-layout-pipeline.md](games/starcraft-2/docs/hud-layout-pipeline.md) |
-| visionOS tabletop static engine runtime, lifecycle bridge, build/test commands | [docs/visionos-tabletop.md](docs/visionos-tabletop.md) |
+| visionOS tabletop runtime, lifecycle, controls, build/test commands | [docs/visionos-tabletop.md](docs/visionos-tabletop.md), [docs/visionos-tabletop-controls.md](docs/visionos-tabletop-controls.md) |
 
 ## Coding Style
 
