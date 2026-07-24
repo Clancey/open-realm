@@ -986,6 +986,17 @@ extern struct game_locals game;
 extern struct game_export globals;
 extern struct game_import gi;
 extern struct level_locals level;
+
+typedef struct metadataMapSnapshot_s metadataMapSnapshot_t;
+void G_MetadataPublishMap(LPCMAPINFO mapinfo);
+const metadataMapSnapshot_t *G_MetadataMapAcquire(void);
+void G_MetadataMapRelease(const metadataMapSnapshot_t *snapshot);
+uint64_t G_MetadataMapToken(const metadataMapSnapshot_t *snapshot);
+DWORD G_MetadataMapClass(const metadataMapSnapshot_t *snapshot, DWORD class_id);
+LPCSTR UnitStringFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name);
+LONG UnitIntegerFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name);
+BOOL UnitBooleanFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name);
+FLOAT UnitRealFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name);
 extern struct edict_s *g_edicts;
 
 extern sheetMetaData_t UnitsMetaData[];

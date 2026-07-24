@@ -41,7 +41,7 @@ static void Tool_DrawString(refExport_t const *re, LPCSTR string, int x, int y) 
 static void usage(void) {
     fprintf(stderr,
         "Usage:\n"
-        "  maptool -mpq <archive.mpq> -map <file.w3m>\n"
+        "  maptool -mpq <archive.mpq> -map <file.w3m> [-inspect]\n"
         "\n"
         "Examples:\n"
         "  maptool -mpq War3.mpq -map Maps\\\\Campaign\\\\Human02.w3m\n");
@@ -133,6 +133,7 @@ static void BuildMapCamera(refExport_t const *re, viewDef_t *viewdef) {
 int main(int argc, char **argv) {
     const char *mpq = NULL;
     const char *mapPath = NULL;
+    bool inspect = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strncmp(argv[i], "-mpq=", 5)) {
@@ -151,6 +152,8 @@ int main(int argc, char **argv) {
                 return 1;
             }
             mapPath = argv[i];
+        } else if (!strcmp(argv[i], "-inspect")) {
+            inspect = true;
         } else if (argv[i][0] != '-' && !mapPath) {
             mapPath = argv[i];
         } else {
@@ -190,6 +193,36 @@ int main(int argc, char **argv) {
         re.Shutdown();
         Viewer_CloseArchives(archives, sizeof(archives) / sizeof(archives[0]));
         return 1;
+    }
+    if (inspect) {
+        size_t corners = (size_t)tr.world->width * tr.world->height;
+        size_t no_cliff_corners = 0;
+        fprintf(stderr,
+                "maptool: terrain width=%u height=%u grounds=%u cliffs=%u vertices=%p "
+                "ground_table=%p cliff_table=%p corners=%zu\n",
+                tr.world->width, tr.world->height, tr.world->num_grounds, tr.world->num_cliffs,
+                tr.world->vertices, tr.world->grounds, tr.world->cliffs, corners);
+        for (DWORD i = 0; i < tr.world->num_grounds; i++)
+            fprintf(stderr, "maptool: ground[%u]=%.4s\n", i, (LPCSTR)(tr.world->grounds + i));
+        for (DWORD i = 0; i < tr.world->num_cliffs; i++)
+            fprintf(stderr, "maptool: cliff[%u]=%.4s\n", i, (LPCSTR)(tr.world->cliffs + i));
+        for (size_t i = 0; i < corners; i++) {
+            LPCWAR3MAPVERTEX corner = (LPCWAR3MAPVERTEX)tr.world->vertices + i;
+            if (corner->cliff == 0x0f) no_cliff_corners++;
+            if (corner->ground >= tr.world->num_grounds ||
+                (corner->cliff != 0x0f && corner->cliff >= tr.world->num_cliffs)) {
+                fprintf(stderr,
+                        "maptool: first exporter-invalid corner index=%zu x=%zu y=%zu "
+                        "ground=%u/%u cliff=%u/%u\n",
+                        i, i % tr.world->width, i / tr.world->width, corner->ground,
+                        tr.world->num_grounds, corner->cliff, tr.world->num_cliffs);
+                break;
+            }
+        }
+        fprintf(stderr, "maptool: no-cliff sentinel corners=%zu\n", no_cliff_corners);
+        re.Shutdown();
+        Viewer_CloseArchives(archives, sizeof(archives) / sizeof(archives[0]));
+        return 0;
     }
 
     VECTOR2 mapSize = GetWar3MapSize(tr.world);

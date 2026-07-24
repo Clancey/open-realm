@@ -558,7 +558,9 @@ exposed, a documented gap rather than fabricated data); the local player
 (`bzTTPlayer_t` — number/team/color/race/uiflags/resources); selected entity
 ids; visible entities (`bzTTEntity_t`, deep-copied subset of
 `entityState_t`, capped at `BZ_TT_MAX_ENTITIES` = 1024 with an explicit
-`EntitiesOverflowCount()` rather than silent truncation); fog-of-war
+`EntitiesOverflowCount()` rather than silent truncation). Visibility matches
+desktop `CL_AddEntities()`: only slots with `ce->current.model != 0` count
+toward the cap; empty parser slots and model2/image-only slots are excluded. Fog-of-war
 dimensions plus visible/explored planes; configstrings by index
 (`BZ_TTSnapshot_ConfigStringCount()` returns the number of captured slots so
 callers can iterate `[0, count)` without importing the engine-private
@@ -677,11 +679,9 @@ configurations, plus the plain build).
   pre-existing protocol characteristic, not a bug.
 - `CL_ReadPacketEntities()` always sets `cl.num_entities =
   MAX_CLIENT_ENTITIES` (16384) regardless of how many entities a packet
-  actually touched. This means any real `svc_packetentities` parse makes
-  `BZ_TTSnapshot_EntityCount()` report exactly `BZ_TT_MAX_ENTITIES` (1024)
-  and `EntitiesOverflowCount()` report exactly `MAX_CLIENT_ENTITIES -
-  BZ_TT_MAX_ENTITIES` (15360) — a pre-existing real-parser characteristic,
-  asserted exactly in the test rather than treated as a bug.
+  actually touched. Most are zero-model slots. Snapshot construction applies
+  the established desktop predicate `ce->current.model != 0` before copy/cap
+  accounting, so overflow reports only active entities beyond 1024.
 - `Netchan_Transmit()` resets `netchan->message.cursize` to 0 after handing
   off to `NET_SendPacket()`, and is a no-op if `cursize == 0` — useful for
   asserting both that a real send actually ran, and that draining an empty

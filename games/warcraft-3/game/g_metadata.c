@@ -1,5 +1,6 @@
 #include "g_local.h"
 #include "g_metadata.h"
+#include <pthread.h>
 
 typedef struct sheet_tail_cache_entry_s {
     sheetRow_t *rows;
@@ -173,14 +174,7 @@ static void warn_unregistered_field(LPCSTR name) {
             name);
 }
 
-LPCSTR UnitStringField(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
-    FOR_LOOP(n, level.mapinfo->num_userCreatedUnits) {
-        if (level.mapinfo->userCreatedUnits[n].newUnitID == unit_id) {
-            unit_id = level.mapinfo->userCreatedUnits[n].originalUnitID;
-//            printf("%.4s\n", &unit_id);
-//            int a= 0;
-        }
-    }
+LPCSTR UnitStringFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
     sheetMetaData_t *metadata = G_FindMetaData(metadatas, name);
     if (!metadata) {
         warn_unregistered_field(name);
@@ -192,14 +186,36 @@ LPCSTR UnitStringField(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
     return NULL;
 }
 
+LPCSTR UnitStringField(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
+    const metadataMapSnapshot_t *snapshot = G_MetadataMapAcquire();
+    unit_id = G_MetadataMapClass(snapshot, unit_id);
+    G_MetadataMapRelease(snapshot);
+    return UnitStringFieldBase(metadatas, unit_id, name);
+}
+
+LONG UnitIntegerFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
+    LPCSTR str = UnitStringFieldBase(metadatas, unit_id, name);
+    return str ? atoi(str) : 0;
+}
+
 LONG UnitIntegerField(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
     LPCSTR str = UnitStringField(metadatas, unit_id, name);
     return str ? atoi(str) : 0;
 }
 
+BOOL UnitBooleanFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
+    LPCSTR str = UnitStringFieldBase(metadatas, unit_id, name);
+    return str && (atoi(str) != 0 || !strcmp(str, "TRUE"));
+}
+
 BOOL UnitBooleanField(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
     LPCSTR str = UnitStringField(metadatas, unit_id, name);
     return str && (atoi(str) != 0 || !strcmp(str, "TRUE"));
+}
+
+FLOAT UnitRealFieldBase(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
+    LPCSTR str = UnitStringFieldBase(metadatas, unit_id, name);
+    return str ? atof(str) : 0;
 }
 
 FLOAT UnitRealField(sheetMetaData_t *metadatas, DWORD unit_id, LPCSTR name) {
@@ -298,7 +314,82 @@ LPCSTR FindConfigValue(LPCSTR category, LPCSTR field) {
 }
 
 LPCSTR GetClassName(DWORD class_id) {
-    static char classname[5] = { 0 };
+    /* Asset metadata may resolve on concurrent Swift readers; keep the legacy
+     * transient buffer contract while preventing cross-thread row corruption. */
+    static _Thread_local char classname[5] = { 0 };
     memcpy(classname, &class_id, 4);
     return classname;
+}
+typedef struct {
+    DWORD original_id, class_id;
+} metadataClassAlias_t;
+
+struct metadataMapSnapshot_s {
+    int refs;
+    uint64_t token;
+    DWORD count;
+    metadataClassAlias_t aliases[];
+};
+
+static pthread_mutex_t metadata_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static metadataMapSnapshot_t *metadata_map;
+static uint64_t metadata_map_token;
+
+/* Publish only class aliases so worker metadata reads never touch mutable world.info storage. */
+void G_MetadataPublishMap(LPCMAPINFO mapinfo) {
+    metadataMapSnapshot_t *snapshot = NULL, *old;
+    DWORD count = mapinfo ? mapinfo->num_userCreatedUnits : 0;
+    size_t alias_bytes, allocation;
+    if (mapinfo && (!count || mapinfo->userCreatedUnits) &&
+        !__builtin_mul_overflow((size_t)count, sizeof(*snapshot->aliases), &alias_bytes) &&
+        !__builtin_add_overflow(sizeof(*snapshot), alias_bytes, &allocation)) {
+        snapshot = calloc(1, allocation);
+        if (snapshot) {
+            snapshot->refs = 1;
+            snapshot->count = count;
+            for (DWORD i = 0; i < count; i++) {
+                snapshot->aliases[i].original_id = mapinfo->userCreatedUnits[i].originalUnitID;
+                snapshot->aliases[i].class_id = mapinfo->userCreatedUnits[i].newUnitID;
+            }
+        }
+    }
+    pthread_mutex_lock(&metadata_map_lock);
+    if (snapshot) {
+        if (!++metadata_map_token) metadata_map_token = 1;
+        snapshot->token = metadata_map_token;
+    }
+    old = metadata_map;
+    metadata_map = snapshot;
+    if (old && !--old->refs) free(old);
+    pthread_mutex_unlock(&metadata_map_lock);
+    if (mapinfo && !snapshot)
+        fprintf(stderr, "G_Metadata: unable to publish map class aliases\n");
+}
+
+const metadataMapSnapshot_t *G_MetadataMapAcquire(void) {
+    pthread_mutex_lock(&metadata_map_lock);
+    metadataMapSnapshot_t *snapshot = metadata_map;
+    if (snapshot) snapshot->refs++;
+    pthread_mutex_unlock(&metadata_map_lock);
+    return snapshot;
+}
+
+void G_MetadataMapRelease(const metadataMapSnapshot_t *snapshot_const) {
+    metadataMapSnapshot_t *snapshot = (metadataMapSnapshot_t *)snapshot_const;
+    if (!snapshot) return;
+    pthread_mutex_lock(&metadata_map_lock);
+    if (!--snapshot->refs) free(snapshot);
+    pthread_mutex_unlock(&metadata_map_lock);
+}
+
+uint64_t G_MetadataMapToken(const metadataMapSnapshot_t *snapshot) {
+    return snapshot ? snapshot->token : 0;
+}
+
+DWORD G_MetadataMapClass(const metadataMapSnapshot_t *snapshot, DWORD class_id) {
+    if (!snapshot) return class_id;
+    for (DWORD i = 0; i < snapshot->count; i++)
+        if (snapshot->aliases[i].class_id == class_id)
+            return snapshot->aliases[i].original_id;
+    return class_id;
 }

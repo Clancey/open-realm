@@ -7,14 +7,27 @@
 
 #include "bz_tabletop_transport.h"
 
+typedef struct bzTTMetadataCache {
+    uintptr_t source_token;
+    uint32_t class_id;
+    bzTTAResult_t status;
+    bzTTAssetMetadata_t metadata;
+    struct bzTTMetadataCache *next;
+} bzTTMetadataCache_t;
+
 static pthread_mutex_t g_assets_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_assets_source_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool g_assets_initialized, g_assets_terminal = true;
 static bzTTAssetSource_t g_assets_source;
 static bzTTAsset_t *g_assets_cache;
+static bzTTMetadataCache_t *g_metadata_cache;
 static bzTTTerrain_t *g_latest_terrain;
-static uint64_t g_cache_hits, g_cache_misses, g_placeholder_logs;
+static uint64_t g_cache_hits, g_cache_misses, g_placeholder_logs, g_metadata_logs;
 static uint64_t g_assets_generation;
-static uintptr_t g_failed_terrain_token;
+static uintptr_t g_failed_terrain_token, g_metadata_token;
+
+static bool terrain_type(const bzTTTerrain_t *terrain, uint32_t index, uint32_t offset,
+                         uint32_t count, uint32_t *out);
 
 static bool metadata_equal(const bzTTAssetMetadata_t *a, const bzTTAssetMetadata_t *b) {
     return a->category == b->category && a->class_id == b->class_id &&
@@ -50,6 +63,15 @@ static void terrain_release_locked(const bzTTTerrain_t *terrain_const) {
         terrain_free(terrain);
 }
 
+static void clear_metadata_locked(void) {
+    bzTTMetadataCache_t *metadata, *next;
+    for (metadata = g_metadata_cache; metadata; metadata = next) {
+        next = metadata->next;
+        free(metadata);
+    }
+    g_metadata_cache = NULL;
+}
+
 /* Drop cache publication references while retained readers keep immutable payloads alive. */
 static void clear_published_locked(void) {
     for (bzTTAsset_t *asset = g_assets_cache, *next; asset; asset = next) {
@@ -58,6 +80,8 @@ static void clear_published_locked(void) {
         asset_release_locked(asset);
     }
     g_assets_cache = NULL;
+    clear_metadata_locked();
+    g_metadata_token = 0;
     if (g_latest_terrain) {
         terrain_release_locked(g_latest_terrain);
         g_latest_terrain = NULL;
@@ -68,7 +92,7 @@ static void clear_published_locked(void) {
 static bzTTAsset_t *find_cached_locked(const char *identity, bzTTAssetKind_t kind,
                                        const bzTTAssetMetadata_t *metadata) {
     for (bzTTAsset_t *asset = g_assets_cache; asset; asset = asset->cache_next)
-        if (asset->kind == kind && !strcmp(asset->identity, identity) &&
+        if (asset->kind == kind && !strcmp(asset->cache_identity, identity) &&
             metadata_equal(&asset->metadata, metadata))
             return asset;
     return NULL;
@@ -111,9 +135,11 @@ bzTTAsset_t *BZ_TTA_AssetAlloc(size_t payload_bytes, bzTTAssetKind_t kind,
     asset->status = BZ_TTA_OK;
     asset->allocation_size = sizeof(*asset) + payload_bytes;
     snprintf(asset->identity, sizeof(asset->identity), "%s", identity ? identity : "");
+    snprintf(asset->cache_identity, sizeof(asset->cache_identity), "%s", identity ? identity : "");
     if (metadata)
         asset->metadata = *metadata;
     else {
+        asset->metadata.team_color = BZ_TTA_TEAM_COLOR_NONE;
         asset->metadata.tint_r = asset->metadata.tint_g = asset->metadata.tint_b = 1.0f;
         asset->metadata.tint_a = 1.0f;
     }
@@ -155,15 +181,17 @@ void *BZ_TTA_TerrainData(bzTTTerrain_t *terrain, uint32_t offset, size_t bytes) 
 void BZ_TTA_Init(void) {
     bzTTAssetSource_t source = { 0 };
     BZ_WC3_TTA_Source(&source);
+    pthread_mutex_lock(&g_assets_source_lock);
     pthread_mutex_lock(&g_assets_lock);
     clear_published_locked();
     g_assets_source = source;
-    g_cache_hits = g_cache_misses = g_placeholder_logs = 0;
+    g_cache_hits = g_cache_misses = g_placeholder_logs = g_metadata_logs = 0;
     g_failed_terrain_token = 0;
     if (!++g_assets_generation) g_assets_generation = 1;
     g_assets_initialized = true;
     g_assets_terminal = false;
     pthread_mutex_unlock(&g_assets_lock);
+    pthread_mutex_unlock(&g_assets_source_lock);
     fprintf(stderr, "BZTabletopAssets: initialized, abi_version=%u\n", BZ_TABLETOP_ASSETS_ABI_VERSION);
 }
 
@@ -172,6 +200,9 @@ void BZ_TTA_Shutdown(void) {
     g_assets_terminal = true;
     clear_published_locked();
     pthread_mutex_unlock(&g_assets_lock);
+    /* Mark terminal first, then drain without holding the cache lock before FS/game teardown. */
+    pthread_mutex_lock(&g_assets_source_lock);
+    pthread_mutex_unlock(&g_assets_source_lock);
     fprintf(stderr, "BZTabletopAssets: shutdown (terminal)\n");
 }
 
@@ -185,10 +216,26 @@ static bool registration_context(uint32_t abi_version, bzTTAssetKind_t kind,
         pthread_mutex_unlock(&g_assets_lock);
         return false;
     }
+
     *source = g_assets_source;
     *generation = g_assets_generation;
     pthread_mutex_unlock(&g_assets_lock);
     return true;
+}
+
+static bzTTAResult_t source_context(uint32_t abi_version, bzTTAssetSource_t *source,
+                                    uint64_t *generation) {
+    bzTTAResult_t status = BZ_TTA_OK;
+    pthread_mutex_lock(&g_assets_lock);
+    if (!g_assets_initialized) status = BZ_TTA_ERR_NOT_INITIALIZED;
+    else if (g_assets_terminal) status = BZ_TTA_ERR_TERMINAL;
+    else if (abi_version != BZ_TABLETOP_ASSETS_ABI_VERSION) status = BZ_TTA_ERR_ABI_VERSION;
+    if (status == BZ_TTA_OK) {
+        *source = g_assets_source;
+        *generation = g_assets_generation;
+    }
+    pthread_mutex_unlock(&g_assets_lock);
+    return status;
 }
 
 /* All authoritative identity sources converge here for one cache and lifecycle contract. */
@@ -196,7 +243,9 @@ static const bzTTAsset_t *register_identity(const char *identity, bzTTAssetKind_
                                             const bzTTAssetMetadata_t *metadata_arg,
                                             bzTTAResult_t status, const bzTTAssetSource_t *source,
                                             uint64_t generation) {
-    bzTTAssetMetadata_t metadata = { .tint_r = 1, .tint_g = 1, .tint_b = 1, .tint_a = 1 };
+    bzTTAssetMetadata_t metadata = {
+        .team_color = BZ_TTA_TEAM_COLOR_NONE, .tint_r = 1, .tint_g = 1, .tint_b = 1, .tint_a = 1,
+    };
     bzTTAsset_t *asset;
     if (metadata_arg)
         metadata = *metadata_arg;
@@ -212,9 +261,26 @@ static const bzTTAsset_t *register_identity(const char *identity, bzTTAssetKind_
         pthread_mutex_unlock(&g_assets_lock);
         return asset;
     }
-    g_cache_misses++;
     pthread_mutex_unlock(&g_assets_lock);
 
+    /* Source archive readers may be process-global; serialize misses through immutable publication. */
+    pthread_mutex_lock(&g_assets_source_lock);
+    pthread_mutex_lock(&g_assets_lock);
+    if (!g_assets_initialized || g_assets_terminal || generation != g_assets_generation) {
+        pthread_mutex_unlock(&g_assets_lock);
+        pthread_mutex_unlock(&g_assets_source_lock);
+        return NULL;
+    }
+    asset = find_cached_locked(identity, kind, &metadata);
+    if (asset) {
+        g_cache_hits++;
+        asset_retain_locked(asset);
+        pthread_mutex_unlock(&g_assets_lock);
+        pthread_mutex_unlock(&g_assets_source_lock);
+        return asset;
+    }
+    g_cache_misses++;
+    pthread_mutex_unlock(&g_assets_lock);
     if (status == BZ_TTA_OK) {
         if (!source->path_is_confined || !source->path_is_confined(identity))
             status = BZ_TTA_ERR_PATH_CONFINEMENT;
@@ -225,12 +291,16 @@ static const bzTTAsset_t *register_identity(const char *identity, bzTTAssetKind_
     }
     if (!asset)
         asset = placeholder_asset(identity, kind, &metadata, status);
-    if (!asset)
+    if (!asset) {
+        pthread_mutex_unlock(&g_assets_source_lock);
         return NULL;
+    }
+    snprintf(asset->cache_identity, sizeof(asset->cache_identity), "%s", identity);
     pthread_mutex_lock(&g_assets_lock);
     if (!g_assets_initialized || g_assets_terminal || generation != g_assets_generation) {
         pthread_mutex_unlock(&g_assets_lock);
         asset_release_locked(asset);
+        pthread_mutex_unlock(&g_assets_source_lock);
         return NULL;
     }
     {
@@ -239,6 +309,7 @@ static const bzTTAsset_t *register_identity(const char *identity, bzTTAssetKind_
             asset_retain_locked(raced);
             pthread_mutex_unlock(&g_assets_lock);
             asset_release_locked(asset);
+            pthread_mutex_unlock(&g_assets_source_lock);
             return raced;
         }
 
@@ -248,6 +319,7 @@ static const bzTTAsset_t *register_identity(const char *identity, bzTTAssetKind_
     asset_retain_locked(asset);
     if (asset->placeholder) g_placeholder_logs++;
     pthread_mutex_unlock(&g_assets_lock);
+    pthread_mutex_unlock(&g_assets_source_lock);
     if (asset->placeholder)
         fprintf(stderr, "BZTabletopAssets: %s asset '%s' unavailable (%d); cached placeholder\n",
                 kind == BZ_TTA_ASSET_MODEL ? "model" : "image", identity, status);
@@ -289,6 +361,139 @@ const bzTTAsset_t *BZ_TTA_RegisterModelTexture(uint32_t abi_version,
     } else
         memcpy(identity, texture.identity, sizeof(identity));
     return register_identity(identity, BZ_TTA_ASSET_IMAGE, &model->metadata, status, &source, generation);
+}
+
+const bzTTAsset_t *BZ_TTA_RegisterTerrainTexture(uint32_t abi_version,
+                                                 const bzTTTerrain_t *terrain,
+                                                 bzTTTerrainTextureKind_t kind,
+                                                 uint32_t type_index) {
+    bzTTAssetSource_t source;
+    bzTTAResult_t status;
+    uint32_t type_id;
+    uint64_t generation;
+    char identity[BZ_TTA_MAX_IDENTITY];
+    if (!terrain || (kind != BZ_TTA_TERRAIN_TEXTURE_GROUND && kind != BZ_TTA_TERRAIN_TEXTURE_CLIFF))
+        return NULL;
+    if (source_context(abi_version, &source, &generation) != BZ_TTA_OK ||
+        terrain->generation != generation || !source.resolve_terrain_identity)
+        return NULL;
+    if (!terrain_type(terrain, type_index,
+                      kind == BZ_TTA_TERRAIN_TEXTURE_GROUND ? terrain->grounds_offset : terrain->cliffs_offset,
+                      kind == BZ_TTA_TERRAIN_TEXTURE_GROUND ? terrain->info.ground_type_count :
+                                                              terrain->info.cliff_type_count,
+                      &type_id))
+        return NULL;
+    snprintf(identity, sizeof(identity), "<terrain:%08x>", type_id);
+    pthread_mutex_lock(&g_assets_source_lock);
+    status = source.resolve_terrain_identity(kind, type_id, terrain->tileset, identity, sizeof(identity));
+    pthread_mutex_unlock(&g_assets_source_lock);
+    return register_identity(identity, BZ_TTA_ASSET_IMAGE, NULL, status, &source, generation);
+}
+
+static bzTTMetadataCache_t *find_metadata_locked(uintptr_t source_token, uint32_t class_id) {
+    for (bzTTMetadataCache_t *entry = g_metadata_cache; entry; entry = entry->next)
+        if (entry->source_token == source_token && entry->class_id == class_id)
+            return entry;
+    return NULL;
+}
+
+/* Cache immutable table results by class ID; runtime overrides remain caller-owned values. */
+bzTTAResult_t BZ_TTA_ResolveEntityMetadata(uint32_t abi_version,
+                                           const bzTTEntityMetadataInput_t *input,
+                                           bzTTAssetMetadata_t *out) {
+    bzTTAssetSource_t source;
+    bzTTMetadataCache_t *entry, *raced;
+    bzTTAssetMetadata_t metadata;
+    bzTTAResult_t status;
+    uint64_t generation;
+    uintptr_t source_token;
+    bool log_failure = false;
+    if (!input || !out || input->override_mask &
+        ~(BZ_TTA_METADATA_OVERRIDE_TEAM_COLOR | BZ_TTA_METADATA_OVERRIDE_TINT))
+        return BZ_TTA_ERR_INVALID_ARGUMENT;
+    status = source_context(abi_version, &source, &generation);
+    if (status != BZ_TTA_OK) return status;
+    if (!source.metadata_token || !source.resolve_entity_metadata) return BZ_TTA_ERR_NOT_INITIALIZED;
+    pthread_mutex_lock(&g_assets_source_lock);
+    source_token = source.metadata_token();
+    if (!source_token) {
+        pthread_mutex_unlock(&g_assets_source_lock);
+        return BZ_TTA_ERR_NOT_INITIALIZED;
+    }
+    pthread_mutex_lock(&g_assets_lock);
+    if (!g_assets_initialized || g_assets_terminal || generation != g_assets_generation) {
+        pthread_mutex_unlock(&g_assets_lock);
+        pthread_mutex_unlock(&g_assets_source_lock);
+        return BZ_TTA_ERR_TERMINAL;
+    }
+    if (g_metadata_token != source_token) {
+        clear_metadata_locked();
+        g_metadata_token = source_token;
+    }
+    entry = find_metadata_locked(source_token, input->class_id);
+    if (entry) {
+        g_cache_hits++;
+        metadata = entry->metadata;
+        status = entry->status;
+        pthread_mutex_unlock(&g_assets_lock);
+        pthread_mutex_unlock(&g_assets_source_lock);
+        goto overrides;
+    }
+    g_cache_misses++;
+    pthread_mutex_unlock(&g_assets_lock);
+    metadata = (bzTTAssetMetadata_t){
+        .class_id = input->class_id, .team_color = BZ_TTA_TEAM_COLOR_NONE,
+        .tint_r = 1, .tint_g = 1, .tint_b = 1, .tint_a = 1,
+    };
+    status = source.resolve_entity_metadata(input->class_id, &metadata);
+    if (source.metadata_token() != source_token) {
+        pthread_mutex_unlock(&g_assets_source_lock);
+        return BZ_TTA_ERR_NOT_INITIALIZED;
+    }
+    entry = malloc(sizeof(*entry));
+    if (!entry) {
+        pthread_mutex_unlock(&g_assets_source_lock);
+        return BZ_TTA_ERR_OUT_OF_MEMORY;
+    }
+    *entry = (bzTTMetadataCache_t){
+        .source_token = source_token, .class_id = input->class_id,
+        .status = status, .metadata = metadata,
+    };
+    pthread_mutex_lock(&g_assets_lock);
+    if (!g_assets_initialized || g_assets_terminal || generation != g_assets_generation) {
+        pthread_mutex_unlock(&g_assets_lock);
+        free(entry);
+        pthread_mutex_unlock(&g_assets_source_lock);
+        return BZ_TTA_ERR_TERMINAL;
+    }
+    raced = find_metadata_locked(source_token, input->class_id);
+    if (raced) {
+        metadata = raced->metadata;
+        status = raced->status;
+        pthread_mutex_unlock(&g_assets_lock);
+        free(entry);
+    } else {
+        entry->next = g_metadata_cache;
+        g_metadata_cache = entry;
+        if (status != BZ_TTA_OK) {
+            g_metadata_logs++;
+            log_failure = true;
+        }
+        pthread_mutex_unlock(&g_assets_lock);
+    }
+    pthread_mutex_unlock(&g_assets_source_lock);
+    if (log_failure)
+        fprintf(stderr, "BZTabletopAssets: class_id 0x%08x metadata unavailable (%d); cached error\n",
+                input->class_id, status);
+overrides:
+    if (input->override_mask & BZ_TTA_METADATA_OVERRIDE_TEAM_COLOR)
+        metadata.team_color = input->team_color;
+    if (input->override_mask & BZ_TTA_METADATA_OVERRIDE_TINT) {
+        metadata.tint_r = input->tint_r; metadata.tint_g = input->tint_g;
+        metadata.tint_b = input->tint_b; metadata.tint_a = input->tint_a;
+    }
+    *out = metadata;
+    return status;
 }
 
 void BZ_TTAsset_Retain(const bzTTAsset_t *asset) {
@@ -406,14 +611,17 @@ void BZ_TTA_PublishTerrainFromGame(void) {
     source = g_assets_source;
     generation = g_assets_generation;
     pthread_mutex_unlock(&g_assets_lock);
+    pthread_mutex_lock(&g_assets_source_lock);
     token = source.terrain_token();
     pthread_mutex_lock(&g_assets_lock);
     if (!g_assets_initialized || g_assets_terminal || generation != g_assets_generation) {
         pthread_mutex_unlock(&g_assets_lock);
+        pthread_mutex_unlock(&g_assets_source_lock);
         return;
     }
     if (!token || (g_latest_terrain && g_latest_terrain->source_token == token)) {
         pthread_mutex_unlock(&g_assets_lock);
+        pthread_mutex_unlock(&g_assets_source_lock);
         return;
     }
     pthread_mutex_unlock(&g_assets_lock);
@@ -430,24 +638,29 @@ void BZ_TTA_PublishTerrainFromGame(void) {
         if (log_failure)
             fprintf(stderr, "BZTabletopAssets: terrain token 0x%llx unavailable (%d)\n",
                     (unsigned long long)token, status);
+        pthread_mutex_unlock(&g_assets_source_lock);
         return;
     }
     pthread_mutex_lock(&g_assets_lock);
     if (!g_assets_initialized || g_assets_terminal || generation != g_assets_generation) {
         pthread_mutex_unlock(&g_assets_lock);
         terrain_release_locked(terrain);
+        pthread_mutex_unlock(&g_assets_source_lock);
         return;
     }
     if (g_latest_terrain && g_latest_terrain->source_token == token) {
         pthread_mutex_unlock(&g_assets_lock);
         terrain_release_locked(terrain);
+        pthread_mutex_unlock(&g_assets_source_lock);
         return;
     }
     terrain->source_token = token;
+    terrain->generation = generation;
     old = g_latest_terrain;
     g_latest_terrain = terrain;
     if (old) terrain_release_locked(old);
     pthread_mutex_unlock(&g_assets_lock);
+    pthread_mutex_unlock(&g_assets_source_lock);
 }
 
 const bzTTTerrain_t *BZ_TTA_LatestTerrain(void) {
@@ -532,5 +745,11 @@ uint64_t BZ_TTA_CacheMisses(void) {
 uint64_t BZ_TTA_PlaceholderLogs(void) {
     uint64_t value;
     pthread_mutex_lock(&g_assets_lock); value = g_placeholder_logs; pthread_mutex_unlock(&g_assets_lock);
+    return value;
+}
+
+uint64_t BZ_TTA_MetadataLogs(void) {
+    uint64_t value;
+    pthread_mutex_lock(&g_assets_lock); value = g_metadata_logs; pthread_mutex_unlock(&g_assets_lock);
     return value;
 }

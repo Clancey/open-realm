@@ -23,6 +23,7 @@ enum {
     BZ_TTA_MAX_SEQUENCE_NAME = 80,
     BZ_TTA_MAX_NODE_NAME = 80,
     BZ_TTA_TERRAIN_CHUNK_TILES = 32,
+    BZ_TTA_TEAM_COLOR_NONE = UINT32_MAX,
 };
 
 typedef struct bzTTSnapshot bzTTSnapshot_t;
@@ -55,6 +56,16 @@ typedef enum {
     BZ_TTA_CATEGORY_DOODAD,
     BZ_TTA_CATEGORY_DESTRUCTABLE,
 } bzTTAssetCategory_t;
+
+typedef enum {
+    BZ_TTA_TERRAIN_TEXTURE_GROUND = 1,
+    BZ_TTA_TERRAIN_TEXTURE_CLIFF = 2,
+} bzTTTerrainTextureKind_t;
+
+enum {
+    BZ_TTA_METADATA_OVERRIDE_TEAM_COLOR = 1u << 0,
+    BZ_TTA_METADATA_OVERRIDE_TINT = 1u << 1,
+};
 
 typedef enum {
     BZ_TTA_PIXEL_RGBA8 = 1,
@@ -96,6 +107,13 @@ typedef struct {
     float tint_r, tint_g, tint_b, tint_a;
     float footprint_x, footprint_y;
 } bzTTAssetMetadata_t;
+
+typedef struct {
+    uint32_t class_id;
+    uint32_t override_mask;
+    uint32_t team_color;
+    float tint_r, tint_g, tint_b, tint_a;
+} bzTTEntityMetadataInput_t;
 
 typedef struct {
     uint32_t width, height;
@@ -195,6 +213,7 @@ enum {
     BZ_TTA_TERRAIN_BLIGHT = 1u << 2,
     BZ_TTA_TERRAIN_WATER = 1u << 3,
     BZ_TTA_TERRAIN_BOUNDARY = 1u << 4,
+    BZ_TTA_TERRAIN_NO_CLIFF = 1u << 5,
 };
 
 void BZ_TTA_Init(void);
@@ -213,6 +232,17 @@ const bzTTAsset_t *BZ_TTA_RegisterConfigString(uint32_t abi_version,
 const bzTTAsset_t *BZ_TTA_RegisterModelTexture(uint32_t abi_version,
                                               const bzTTAsset_t *model,
                                               uint32_t texture_index);
+/* Resolves a W3E terrain type through Terrain.slk or CliffTypes.slk. Cliff
+ * resolution includes the authoritative map-tileset candidate and generic fallback. */
+const bzTTAsset_t *BZ_TTA_RegisterTerrainTexture(uint32_t abi_version,
+                                                const bzTTTerrain_t *terrain,
+                                                bzTTTerrainTextureKind_t kind,
+                                                uint32_t type_index);
+/* Resolves immutable class data without server-edict access. Runtime values replace
+ * table defaults only when their corresponding override bit is present. */
+bzTTAResult_t BZ_TTA_ResolveEntityMetadata(uint32_t abi_version,
+                                           const bzTTEntityMetadataInput_t *input,
+                                           bzTTAssetMetadata_t *out);
 void BZ_TTAsset_Retain(const bzTTAsset_t *asset);
 void BZ_TTAsset_Release(const bzTTAsset_t *asset);
 bool BZ_TTAsset_IsPlaceholder(const bzTTAsset_t *asset);
@@ -257,6 +287,7 @@ bool BZ_TTTerrain_CliffType(const bzTTTerrain_t *terrain, uint32_t index, uint32
 uint64_t BZ_TTA_CacheHits(void);
 uint64_t BZ_TTA_CacheMisses(void);
 uint64_t BZ_TTA_PlaceholderLogs(void);
+uint64_t BZ_TTA_MetadataLogs(void);
 
 #ifdef __cplusplus
 }

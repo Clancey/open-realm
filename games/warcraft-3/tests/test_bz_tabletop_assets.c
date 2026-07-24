@@ -5,12 +5,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "common/common.h"
 #include "platform/bridge/bz_tabletop_assets.h"
 #include "platform/bridge/bz_tabletop_assets_internal.h"
 #include "platform/bridge/bz_tabletop_transport.h"
 #include "test_framework.h"
+#include "../common/wc3_asset_path.h"
 #include "wc3_tabletop_assets_internal.h"
 
 #define FOURCC(a,b,c,d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
@@ -20,11 +22,16 @@ struct bzTTSnapshot {
 };
 
 void test_assets_set_tft(bool enabled);
+void test_assets_set_cliff_specific(bool enabled);
+void test_assets_set_cliff_generic(bool enabled);
+void test_assets_set_metadata_map(unsigned index);
 void test_assets_block_reads(bool blocked);
 void test_assets_wait_for_blocked_reads(unsigned count);
 void test_assets_set_configstring(struct bzTTSnapshot *snapshot, uint32_t index, const char *value);
+static bzTTAssetMetadata_t resolve_metadata(uint32_t class_id, bzTTAResult_t expected);
 
 static void reset_assets(void) {
+    test_assets_set_metadata_map(0);
     BZ_TTA_Shutdown();
     BZ_TTA_Init();
 }
@@ -194,6 +201,105 @@ static void test_mdx_geometry_materials_sequences_and_bounds(void) {
     BZ_TTAsset_Release(image); BZ_TTAsset_Release(asset);
 }
 
+static void test_desktop_model_identity_fallbacks(void) {
+    static const char *identities[] = {
+        "Doodads\\LordaeronSummer\\Plants\\Wheat\\Wheat0.mdx",
+        "Doodads\\Ashenvale\\Plants\\AshenBush0\\AshenBush00.mdx",
+        "Doodads\\LordaeronSummer\\Props\\Cage\\Cage0.mdx",
+        "Doodads\\LordaeronSummer\\Props\\TorchHuman\\TorchHuman0.mdx",
+        "TestUI/Models/quad_sprite.mdl",
+    };
+    static const char *resolved[] = {
+        "Doodads\\LordaeronSummer\\Plants\\Wheat\\Wheat.mdx",
+        "Doodads\\Ashenvale\\Plants\\AshenBush0\\AshenBush0.mdx",
+        "Doodads\\LordaeronSummer\\Props\\Cage\\Cage.mdx",
+        "Doodads\\LordaeronSummer\\Props\\TorchHuman\\TorchHuman.mdx",
+        "TestUI/Models/quad_sprite.mdx",
+    };
+    struct bzTTSnapshot snapshot = { 0 };
+    char identity[BZ_TTA_MAX_IDENTITY];
+    reset_assets();
+    for (uint32_t i = 0; i < sizeof(identities) / sizeof(*identities); i++) {
+        const bzTTAsset_t *asset, *again;
+        test_assets_set_configstring(&snapshot, i + 1, identities[i]);
+        asset = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, i + 1,
+                                             BZ_TTA_ASSET_MODEL, NULL);
+        ASSERT_NOT_NULL(asset);
+        ASSERT(!BZ_TTAsset_IsPlaceholder(asset));
+        ASSERT(BZ_TTAsset_Identity(asset, identity, sizeof(identity)));
+        ASSERT_STR_EQ(identity, resolved[i]);
+        again = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, i + 1,
+                                            BZ_TTA_ASSET_MODEL, NULL);
+        ASSERT(asset == again);
+        BZ_TTAsset_Release(asset); BZ_TTAsset_Release(again);
+    }
+}
+
+typedef struct {
+    const char **identities;
+    uint32_t count;
+} modelProbe_t;
+
+static bool model_probe(const char *identity, void *opaque) {
+    const modelProbe_t *probe = opaque;
+    for (uint32_t i = 0; i < probe->count; i++)
+        if (!strcmp(identity, probe->identities[i])) return true;
+    return false;
+}
+
+static void test_spawn_model_variation_resolution(void) {
+    static const char *authored[] = {
+        "Doodads\\Plants\\Wheat\\Wheat.mdx",
+        "Doodads\\Plants\\AshenBush0\\AshenBush0.mdx",
+        "Doodads\\Props\\Rocks\\Rocks2.mdx",
+        "Doodads\\Props\\Cage\\Cage.mdx",
+    };
+    modelProbe_t probe = { .identities = authored, .count = sizeof(authored) / sizeof(*authored) };
+    char identity[512];
+    wc3SpawnModelResolve_t resolve = {
+        .probe = model_probe, .context = &probe, .out = identity, .cap = sizeof(identity),
+    };
+    resolve.dir = "Doodads\\Plants"; resolve.file = "Wheat"; resolve.variation = 0;
+    resolve.num_variations = 1;
+    ASSERT(wc3_resolve_spawn_model_identity(&resolve));
+    ASSERT_STR_EQ(identity, authored[0]);
+    resolve.file = "AshenBush0"; resolve.variation = 0;
+    ASSERT(wc3_resolve_spawn_model_identity(&resolve));
+    ASSERT_STR_EQ(identity, authored[1]);
+    resolve.dir = "Doodads\\Props"; resolve.file = "Rocks"; resolve.variation = 2;
+    resolve.num_variations = 3;
+    ASSERT(wc3_resolve_spawn_model_identity(&resolve));
+    ASSERT_STR_EQ(identity, authored[2]);
+    resolve.file = "Cage"; resolve.variation = 0; resolve.num_variations = 2;
+    ASSERT(wc3_resolve_spawn_model_identity(&resolve));
+    ASSERT_STR_EQ(identity, authored[3]);
+    resolve.file = "Missing"; resolve.num_variations = 1;
+    ASSERT(!wc3_resolve_spawn_model_identity(&resolve));
+    ASSERT_STR_EQ(identity, "Doodads\\Props\\Missing\\Missing.mdx");
+}
+
+static void test_model_identity_output_bounds(void) {
+    static const char *authored[] = { "LongModel.mdx", "Model.mdx" };
+    modelProbe_t probe = { .identities = authored, .count = sizeof(authored) / sizeof(*authored) };
+    char small[8] = "stale", long_file[600], output[512] = "stale";
+    wc3ModelResolve_t model = {
+        .identity = authored[0], .probe = model_probe, .context = &probe, .out = small, .cap = sizeof(small),
+    };
+    wc3ModelFallback_t fallback = {
+        .identity = "LongModel0.mdx", .fallback = BZ_WC3_MODEL_STRIP_VARIATION,
+        .out = small, .cap = sizeof(small),
+    };
+    wc3SpawnModelResolve_t spawn = {
+        .file = long_file, .num_variations = 1, .probe = model_probe, .context = &probe,
+        .out = output, .cap = sizeof(output),
+    };
+    ASSERT(!wc3_resolve_model_identity(&model)); ASSERT_STR_EQ(small, "");
+    memcpy(small, "stale", 6);
+    ASSERT(!wc3_model_fallback_identity(&fallback)); ASSERT_STR_EQ(small, "");
+    memset(long_file, 'A', sizeof(long_file) - 1); long_file[sizeof(long_file) - 1] = 0;
+    ASSERT(!wc3_resolve_spawn_model_identity(&spawn)); ASSERT_STR_EQ(output, "");
+}
+
 /* Duplicate retail-shaped records inside MTLS/GEOS chunks to exercise inclusive record boundaries. */
 static uint8_t *duplicate_mdx_records(const uint8_t *src, size_t size, size_t *out_size) {
     size_t extra = 0, pos = 4, dst_pos = 4;
@@ -264,7 +370,8 @@ static void test_malformed_blp_and_mdx_bounds(void) {
 
 static void make_terrain(uint32_t width, uint32_t height, uintptr_t salt) {
     LPWAR3MAP map = calloc(1, sizeof(*map));
-    map->width = width; map->height = height; map->center = (VECTOR2){ -2048, -1024 };
+    map->width = width; map->height = height; map->tileset = 'L';
+    map->center = (VECTOR2){ -2048, -1024 };
     map->num_grounds = 2; map->num_cliffs = 1;
     map->grounds = calloc(2, sizeof(DWORD)); map->cliffs = calloc(1, sizeof(DWORD));
     map->vertices = calloc((size_t)width * height, sizeof(WAR3MAPVERTEX));
@@ -318,6 +425,221 @@ static void test_malformed_terrain_type_index(void) {
     terrain = BZ_TTA_LatestTerrain();
     ASSERT_NULL(terrain);
     free_terrain();
+}
+
+static void test_human02_shape_no_cliff_sentinel(void) {
+    const bzTTTerrain_t *terrain;
+    bzTTTerrainCorner_t corner;
+    make_terrain(129, 129, 0);
+    ((LPWAR3MAPVERTEX)world.map->vertices)[2732].cliff = 0x0f;
+    reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    terrain = BZ_TTA_LatestTerrain();
+    ASSERT_NOT_NULL(terrain);
+    ASSERT(BZ_TTTerrain_Corner(terrain, 23, 21, &corner));
+    ASSERT(corner.flags & BZ_TTA_TERRAIN_NO_CLIFF);
+    ASSERT_EQ_INT(corner.cliff_id, 0);
+    BZ_TTTerrain_Release(terrain);
+    free_terrain();
+
+    make_terrain(4, 4, 0);
+    ((LPWAR3MAPVERTEX)world.map->vertices)[5].cliff = 14;
+    reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    ASSERT_NULL(BZ_TTA_LatestTerrain());
+    free_terrain();
+}
+
+static void assert_asset_identity(const bzTTAsset_t *asset, const char *expected) {
+    char identity[BZ_TTA_MAX_IDENTITY];
+    ASSERT(BZ_TTAsset_Identity(asset, identity, sizeof(identity)));
+    ASSERT_STR_EQ(identity, expected);
+}
+
+static void test_terrain_texture_resolution_roc_tft_and_fallback(void) {
+    const bzTTTerrain_t *terrain;
+    const bzTTAsset_t *ground, *again, *cliff;
+    bzTTAssetMetadata_t metadata;
+    test_assets_set_tft(false); test_assets_set_cliff_specific(false);
+    make_terrain(4, 4, 0); reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    terrain = BZ_TTA_LatestTerrain(); ASSERT_NOT_NULL(terrain);
+    ground = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                           BZ_TTA_TERRAIN_TEXTURE_GROUND, 0);
+    again = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                          BZ_TTA_TERRAIN_TEXTURE_GROUND, 0);
+    cliff = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                          BZ_TTA_TERRAIN_TEXTURE_CLIFF, 0);
+    ASSERT_NOT_NULL(ground); ASSERT(!BZ_TTAsset_IsPlaceholder(ground)); ASSERT(ground == again);
+    ASSERT_NOT_NULL(cliff); ASSERT(!BZ_TTAsset_IsPlaceholder(cliff));
+    ASSERT(BZ_TTAsset_Metadata(ground, &metadata));
+    ASSERT_EQ_INT(metadata.team_color, BZ_TTA_TEAM_COLOR_NONE);
+    assert_asset_identity(ground, "TerrainArt\\ROC\\Dirt.blp");
+    assert_asset_identity(cliff, "ReplaceableTextures\\Cliff\\Cliff0.blp");
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 2); ASSERT_EQ_INT(BZ_TTA_CacheHits(), 1);
+    ASSERT_NULL(BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                              BZ_TTA_TERRAIN_TEXTURE_GROUND, 9));
+    BZ_TTAsset_Release(ground); BZ_TTAsset_Release(again); BZ_TTAsset_Release(cliff);
+    BZ_TTTerrain_Release(terrain); free_terrain();
+
+    test_assets_set_tft(true); test_assets_set_cliff_specific(true);
+    make_terrain(4, 4, 1); reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    terrain = BZ_TTA_LatestTerrain();
+    ground = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                           BZ_TTA_TERRAIN_TEXTURE_GROUND, 0);
+    cliff = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                          BZ_TTA_TERRAIN_TEXTURE_CLIFF, 0);
+    assert_asset_identity(ground, "TerrainArt\\TFT\\Dirt.blp");
+    assert_asset_identity(cliff, "ReplaceableTextures\\Cliff\\L_Cliff0.blp");
+    BZ_TTAsset_Release(ground); BZ_TTAsset_Release(cliff); BZ_TTTerrain_Release(terrain);
+    free_terrain();
+
+    test_assets_set_tft(false); test_assets_set_cliff_specific(false); test_assets_set_cliff_generic(false);
+    make_terrain(4, 4, 2); reset_assets(); BZ_TTA_PublishTerrainFromGame();
+    terrain = BZ_TTA_LatestTerrain();
+    cliff = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                          BZ_TTA_TERRAIN_TEXTURE_CLIFF, 0);
+    again = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, terrain,
+                                          BZ_TTA_TERRAIN_TEXTURE_CLIFF, 0);
+    ASSERT_NOT_NULL(cliff); ASSERT(cliff == again); ASSERT(BZ_TTAsset_IsPlaceholder(cliff));
+    ASSERT_EQ_INT(BZ_TTAsset_Status(cliff), BZ_TTA_ERR_NOT_FOUND);
+    ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), 1);
+    BZ_TTAsset_Release(cliff); BZ_TTAsset_Release(again); BZ_TTTerrain_Release(terrain);
+    free_terrain(); test_assets_set_cliff_generic(true);
+}
+
+static void test_entity_metadata_map_readiness_and_cache_scope(void) {
+    bzTTAssetMetadata_t metadata;
+    bzTTEntityMetadataInput_t input = { .class_id = FOURCC('h','p','e','a') };
+    reset_assets();
+    test_assets_set_metadata_map(2);
+    ASSERT_EQ_INT(BZ_TTA_ResolveEntityMetadata(BZ_TABLETOP_ASSETS_ABI_VERSION, &input, &metadata),
+                  BZ_TTA_ERR_NOT_INITIALIZED);
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 0);
+    test_assets_set_metadata_map(0);
+    metadata = resolve_metadata(input.class_id, BZ_TTA_OK);
+    ASSERT_EQ_FLOAT(metadata.footprint_x, 32, 0.001f);
+    test_assets_set_metadata_map(1);
+    metadata = resolve_metadata(input.class_id, BZ_TTA_OK);
+    ASSERT_EQ_FLOAT(metadata.footprint_x, 48, 0.001f);
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 2);
+    test_assets_set_metadata_map(0);
+}
+
+static bzTTAssetMetadata_t resolve_metadata(uint32_t class_id, bzTTAResult_t expected) {
+    bzTTEntityMetadataInput_t input = { .class_id = class_id };
+    bzTTAssetMetadata_t metadata;
+    ASSERT_EQ_INT(BZ_TTA_ResolveEntityMetadata(BZ_TABLETOP_ASSETS_ABI_VERSION, &input, &metadata),
+                  expected);
+    return metadata;
+}
+
+static void test_entity_metadata_categories_footprints_and_overrides(void) {
+    bzTTAssetMetadata_t metadata;
+    bzTTEntityMetadataInput_t override = {
+        .class_id = FOURCC('h','p','e','a'),
+        .override_mask = BZ_TTA_METADATA_OVERRIDE_TEAM_COLOR | BZ_TTA_METADATA_OVERRIDE_TINT,
+        .team_color = 7, .tint_r = 0.1f, .tint_g = 0.2f, .tint_b = 0.3f, .tint_a = 0.4f,
+    };
+    reset_assets();
+    metadata = resolve_metadata(FOURCC('h','p','e','a'), BZ_TTA_OK);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_MOBILE);
+    ASSERT_EQ_FLOAT(metadata.footprint_x, 32, 0.001f);
+    ASSERT_EQ_INT(metadata.team_color, BZ_TTA_TEAM_COLOR_NONE);
+    ASSERT_EQ_INT(BZ_TTA_ResolveEntityMetadata(BZ_TABLETOP_ASSETS_ABI_VERSION, &override, &metadata),
+                  BZ_TTA_OK);
+    ASSERT_EQ_INT(metadata.team_color, 7); ASSERT_EQ_FLOAT(metadata.tint_b, 0.3f, 0.001f);
+    metadata = resolve_metadata(FOURCC('h','t','o','w'), BZ_TTA_OK);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_BUILDING);
+    ASSERT_EQ_FLOAT(metadata.footprint_x, 128, 0.001f);
+    ASSERT_EQ_FLOAT(metadata.footprint_y, 192, 0.001f);
+    ASSERT_EQ_INT(metadata.team_color, 3);
+    metadata = resolve_metadata(FOURCC('n','g','o','l'), BZ_TTA_OK);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_RESOURCE);
+    ASSERT_EQ_FLOAT(metadata.footprint_x, 512, 0.001f);
+    metadata = resolve_metadata(FOURCC('L','T','l','t'), BZ_TTA_OK);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_RESOURCE);
+    ASSERT_EQ_FLOAT(metadata.footprint_x, 64, 0.001f);
+    metadata = resolve_metadata(FOURCC('B','0','0','1'), BZ_TTA_OK);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_DESTRUCTABLE);
+    ASSERT_EQ_FLOAT(metadata.footprint_y, 128, 0.001f);
+    metadata = resolve_metadata(FOURCC('D','O','O','D'), BZ_TTA_OK);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_DOODAD);
+    ASSERT_EQ_FLOAT(metadata.footprint_x, 64, 0.001f);
+    ASSERT_EQ_FLOAT(metadata.footprint_y, 96, 0.001f);
+    ASSERT_EQ_FLOAT(metadata.tint_r, 128.0f / 255.0f, 0.001f);
+}
+
+static void test_entity_metadata_error_log_once_and_cache(void) {
+    bzTTAssetMetadata_t metadata;
+    uint64_t misses, hits;
+    reset_assets();
+    metadata = resolve_metadata(FOURCC('B','b','a','d'), BZ_TTA_ERR_NOT_FOUND);
+    ASSERT_EQ_INT(metadata.category, BZ_TTA_CATEGORY_DESTRUCTABLE);
+    misses = BZ_TTA_CacheMisses(); hits = BZ_TTA_CacheHits();
+    resolve_metadata(FOURCC('B','b','a','d'), BZ_TTA_ERR_NOT_FOUND);
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), misses);
+    ASSERT_EQ_INT(BZ_TTA_CacheHits(), hits + 1);
+    ASSERT_EQ_INT(BZ_TTA_MetadataLogs(), 1);
+    resolve_metadata(FOURCC('M','I','S','S'), BZ_TTA_ERR_NOT_FOUND);
+    resolve_metadata(FOURCC('M','I','S','S'), BZ_TTA_ERR_NOT_FOUND);
+    resolve_metadata(FOURCC('B','m','a','l'), BZ_TTA_ERR_MALFORMED);
+    resolve_metadata(FOURCC('B','e','s','c'), BZ_TTA_ERR_PATH_CONFINEMENT);
+    resolve_metadata(FOURCC('h','f','o','o'), BZ_TTA_ERR_NOT_FOUND);
+    ASSERT_EQ_INT(BZ_TTA_MetadataLogs(), 5);
+}
+
+typedef struct {
+    uint32_t class_id;
+    bzTTAResult_t status;
+} metadataCtx_t;
+
+static void *metadata_resolver(void *opaque) {
+    metadataCtx_t *ctx = opaque;
+    bzTTEntityMetadataInput_t input = { .class_id = ctx->class_id };
+    bzTTAssetMetadata_t metadata;
+    ctx->status = BZ_TTA_ResolveEntityMetadata(BZ_TABLETOP_ASSETS_ABI_VERSION, &input, &metadata);
+    return NULL;
+}
+
+typedef struct {
+    atomic_bool started, finished;
+} restartCtx_t;
+
+static void *restart_assets(void *opaque) {
+    restartCtx_t *ctx = opaque;
+    atomic_store(&ctx->started, true);
+    BZ_TTA_Shutdown();
+    BZ_TTA_Init();
+    atomic_store(&ctx->finished, true);
+    return NULL;
+}
+
+static void test_entity_metadata_concurrency_and_lifecycle(void) {
+    enum { THREADS = 8 };
+    metadataCtx_t ctx[THREADS];
+    pthread_t threads[THREADS];
+    pthread_t restart_thread;
+    restartCtx_t restart = { 0 };
+    struct timespec drain_wait = { .tv_nsec = 10000000 };
+    reset_assets();
+    for (int i = 0; i < THREADS; i++) {
+        ctx[i] = (metadataCtx_t){ .class_id = FOURCC('h','p','e','a') };
+        ASSERT_EQ_INT(pthread_create(threads + i, NULL, metadata_resolver, ctx + i), 0);
+    }
+    for (int i = 0; i < THREADS; i++) {
+        ASSERT_EQ_INT(pthread_join(threads[i], NULL), 0);
+        ASSERT_EQ_INT(ctx[i].status, BZ_TTA_OK);
+    }
+    reset_assets(); test_assets_block_reads(true);
+    ctx[0] = (metadataCtx_t){ .class_id = FOURCC('h','t','o','w') };
+    ASSERT_EQ_INT(pthread_create(threads, NULL, metadata_resolver, ctx), 0);
+    test_assets_wait_for_blocked_reads(1);
+    ASSERT_EQ_INT(pthread_create(&restart_thread, NULL, restart_assets, &restart), 0);
+    while (!atomic_load(&restart.started)) sched_yield();
+    nanosleep(&drain_wait, NULL);
+    ASSERT(!atomic_load(&restart.finished));
+    test_assets_block_reads(false);
+    ASSERT_EQ_INT(pthread_join(threads[0], NULL), 0);
+    ASSERT_EQ_INT(pthread_join(restart_thread, NULL), 0);
+    ASSERT_EQ_INT(ctx[0].status, BZ_TTA_ERR_TERMINAL);
 }
 
 typedef struct {
@@ -377,15 +699,21 @@ static void test_inflight_load_cannot_cross_restart(void) {
     struct bzTTSnapshot snapshot = { 0 };
     registrationCtx_t ctx = { .snapshot = &snapshot };
     const bzTTAsset_t *fresh;
-    pthread_t thread;
+    pthread_t thread, restart_thread;
+    restartCtx_t restart = { 0 };
+    struct timespec drain_wait = { .tv_nsec = 10000000 };
     test_assets_set_configstring(&snapshot, 1, "TestUI/Textures/orientation_2x2.blp");
     reset_assets();
     test_assets_block_reads(true);
     ASSERT_EQ_INT(pthread_create(&thread, NULL, blocked_registration, &ctx), 0);
     test_assets_wait_for_blocked_reads(1);
-    BZ_TTA_Shutdown(); BZ_TTA_Init();
+    ASSERT_EQ_INT(pthread_create(&restart_thread, NULL, restart_assets, &restart), 0);
+    while (!atomic_load(&restart.started)) sched_yield();
+    nanosleep(&drain_wait, NULL);
+    ASSERT(!atomic_load(&restart.finished));
     test_assets_block_reads(false);
     ASSERT_EQ_INT(pthread_join(thread, NULL), 0);
+    ASSERT_EQ_INT(pthread_join(restart_thread, NULL), 0);
     ASSERT_NULL(ctx.asset);
     fresh = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
                                         BZ_TTA_ASSET_IMAGE, NULL);
@@ -404,14 +732,15 @@ static void test_concurrent_missing_asset_logs_once(void) {
         ctx[i] = (registrationCtx_t){ .snapshot = &snapshot };
         ASSERT_EQ_INT(pthread_create(&threads[i], NULL, blocked_registration, ctx + i), 0);
     }
-    test_assets_wait_for_blocked_reads(THREADS);
+    test_assets_wait_for_blocked_reads(1);
     test_assets_block_reads(false);
     for (int i = 0; i < THREADS; i++) ASSERT_EQ_INT(pthread_join(threads[i], NULL), 0);
     for (int i = 0; i < THREADS; i++) {
         ASSERT_NOT_NULL(ctx[i].asset); ASSERT(ctx[i].asset == ctx[0].asset);
         BZ_TTAsset_Release(ctx[i].asset);
     }
-    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), THREADS);
+    ASSERT_EQ_INT(BZ_TTA_CacheMisses(), 1);
+    ASSERT_EQ_INT(BZ_TTA_CacheHits(), THREADS - 1);
     ASSERT_EQ_INT(BZ_TTA_PlaceholderLogs(), 1);
 }
 
@@ -467,11 +796,20 @@ void run_bz_tabletop_assets_tests(void) {
     RUN_TEST(test_roc_tft_resolution_and_cache);
     RUN_TEST(test_placeholder_path_confinement_and_log_once_cache);
     RUN_TEST(test_mdx_geometry_materials_sequences_and_bounds);
+    RUN_TEST(test_desktop_model_identity_fallbacks);
+    RUN_TEST(test_spawn_model_variation_resolution);
+    RUN_TEST(test_model_identity_output_bounds);
     RUN_TEST(test_mdx_multiple_inclusive_records);
     RUN_TEST(test_mdx_zero_counted_array_is_malformed);
     RUN_TEST(test_malformed_blp_and_mdx_bounds);
     RUN_TEST(test_terrain_dimensions_corners_water_cliffs_and_chunks);
     RUN_TEST(test_malformed_terrain_type_index);
+    RUN_TEST(test_human02_shape_no_cliff_sentinel);
+    RUN_TEST(test_terrain_texture_resolution_roc_tft_and_fallback);
+    RUN_TEST(test_entity_metadata_categories_footprints_and_overrides);
+    RUN_TEST(test_entity_metadata_map_readiness_and_cache_scope);
+    RUN_TEST(test_entity_metadata_error_log_once_and_cache);
+    RUN_TEST(test_entity_metadata_concurrency_and_lifecycle);
     RUN_TEST(test_concurrent_readers_and_shutdown_lifetime);
     RUN_TEST(test_inflight_load_cannot_cross_restart);
     RUN_TEST(test_concurrent_missing_asset_logs_once);

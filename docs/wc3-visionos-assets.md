@@ -17,6 +17,10 @@ asset = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION,
                                     BZ_TTA_ASSET_MODEL, &metadata);
 texture = BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
                                       asset, texture_index);
+ground = BZ_TTA_RegisterTerrainTexture(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                       terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND, type_index);
+status = BZ_TTA_ResolveEntityMetadata(BZ_TABLETOP_ASSETS_ABI_VERSION,
+                                      &entity_input, &metadata);
 ```
 
 The Warcraft source validates that the configstring is a confined relative
@@ -27,9 +31,34 @@ rejected before filesystem lookup. Model textures can only be registered from
 their parsed MDX `TEXS` record; the ABI does not expose a guessed-path
 registration entry point.
 
-The cache key is asset kind, canonical configstring identity, and the POD
+Spawn registration uses Doodads/Destructable `numVar`: single-variation rows
+register the authored file stem, while multi-variation rows append the map's
+variation index. A shared archive-probed resolver then applies the desktop
+fallback order after an exact miss: case-insensitive `.mdl` to `.mdx`, then
+removal of one trailing variation digit before `.mdx`. Server configstrings,
+desktop loading, and export therefore cannot use divergent path walkers. Exact,
+fallback, and generated spawn identities that exceed their destination bound are
+rejected before archive probing rather than truncated.
+Retail `War3.mpq` checks confirm the resulting archive identities
+`Doodads\LordaeronSummer\Plants\Wheat\wheat.mdx`,
+`Doodads\Ashenvale\Plants\AshenBush0\AshenBush0.mdx`, and
+`Doodads\LordaeronSummer\Props\Cage\Cage.mdx` and
+`Doodads\LordaeronSummer\Props\TorchHuman\TorchHuman.mdx`;
+their generated `Wheat0.mdx`, `AshenBush00.mdx`, `Cage0.mdx`, and
+`TorchHuman0.mdx` identities do not exist.
+
+The asset cache key is asset kind, authoritative registration identity, and the POD
 metadata (class/category, team color, tint, and footprint). A cache entry owns
 one reference and each registration/`LatestTerrain` call returns another.
+Entity metadata requires an active published map because custom unit fields
+are map-local. `G_SpawnEntities` publishes an immutable retained custom-class
+alias snapshot; worker readers never dereference mutable `world.info`. Metadata
+is cached by class ID and snapshot generation, with the old cache discarded
+when that generation changes. Runtime team-color and tint override bits are
+applied after the immutable table result is read from cache. Generic bridge
+serialization keeps source callbacks from concurrently entering the
+process-global filesystem/archive readers. Shutdown drains active source
+callbacks before runtime filesystem teardown.
 Shutdown removes publication references; outstanding readers remain valid
 until they release their own references. Each initialization advances a
 generation, so a filesystem load or terrain copy started before shutdown cannot
@@ -56,9 +85,39 @@ Each corner exports:
 - ground/cliff variations and cliff level;
 - ramp, water, blight, boundary, and map-edge flags.
 
+The W3E cliff nibble reserves value 15 as a no-cliff sentinel rather than a
+cliff-table index. `BZ_TTA_TERRAIN_NO_CLIFF` preserves that state and
+`cliff_id` is zero for those corners. A bounded retail Human02 inspection found
+2,349 sentinel corners; the first is corner 2732 (`x=23`, `y=21`) in its
+129x129 corner grid. Other out-of-range ground/cliff indices remain malformed.
+
 The publication token includes the map identity, vertex storage, dimensions,
 and type-table storage. Repeated snapshots of an unchanged map reuse the
 published immutable terrain.
+
+Terrain image paths are resolved only inside the Warcraft source callback.
+Ground FourCCs use `TerrainArt\Terrain.slk` fields `dir` and `file`, forming
+`<dir>\<file>.blp`. Cliff FourCCs use `CliffTypes.slk` fields `texDir` and
+`texFile`: the source first checks `<texDir>\<map tileset>_<texFile>.blp`, then
+the generic `<texDir>\<texFile>.blp`. The returned retained image therefore
+uses the same tileset fallback and MPQ override order as the desktop renderer.
+
+## Entity metadata
+
+Class IDs are resolved with the game spawn-table precedence: Doodad,
+Destructable, then Unit. No network struct is widened and no server edict is
+read. Unit `buffType=resource` identifies gold-mine resources without hardcoded
+unit IDs; destructable `targType=tree` identifies lumber resources. Buildings,
+resources, destructables, and pathing doodads derive footprint dimensions from
+bounded TGA width/height multiplied by the 32-world-unit routing cell size.
+Mobile units use twice the authentic `ucol` collision radius as their
+world-unit footprint diameter. Missing required
+path/collision data returns an explicit cached/log-once error instead of
+guessing from selection radius or model bounds.
+
+Table tint and custom team-color values are defaults. Callers can replace team
+color and/or runtime tint with the corresponding `override_mask` bits;
+`BZ_TTA_TEAM_COLOR_NONE` means the table defines no custom team color.
 
 ## BLP decoding
 
@@ -95,9 +154,6 @@ is read.
 
 Known model gaps are MDX 1000/1500, full animation curves and skinning
 matrices, geoset animations, particle/ribbon emitters, and event/camera data.
-The metadata fields carry authoritative category/team/tint/footprint values
-when supplied by the game-facing registration call; automatic classification
-of every doodad/destructable/resource identity is not yet wired.
 
 ## Validation
 
@@ -115,6 +171,23 @@ path confinement, malformed spans and zero arrays, lifecycle-crossing loads,
 retained concurrent readers, and cleanup/publication races. The fixtures are
 generated data; retail MPQs and decoded proprietary outputs must never enter
 the repository.
+
+Retail ROC/TFT checks use the existing diagnostic tool without extracting data:
+
+```sh
+build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep Ldrt TerrainArt
+build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep pathTex Doodads
+build/bin/mpqtool -data "/Users/clancey/Downloads/Warcraft III" grep ngol Units
+build/bin/mpqtool -mpq "/Users/clancey/Downloads/Warcraft III/War3.mpq" \
+  info "Maps/Campaign/Human02.w3m"
+```
+
+The retail rows confirm ROC `Ldrt` as
+`TerrainArt\LordaeronSummer\Lords_Dirt.blp`, `CLdi` as
+`ReplaceableTextures\Cliff` + `Cliff0`, and both ROC/TFT `ngol` as
+`PathTextures\16x16Goldmine.tga` with `buffType=resource`. The final command
+confirms the campaign-map archive identity without copying the map from
+`War3.mpq`.
 
 `make run-sc2` currently hardcodes `-data data/StarCraft2` and exposes no
 external-data variable. Validation with a legal install outside the repository

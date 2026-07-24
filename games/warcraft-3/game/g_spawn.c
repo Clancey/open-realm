@@ -1,9 +1,62 @@
 #include "g_local.h"
+#include "../common/wc3_asset_path.h"
 #include "jass/jass.h"
 
 #define MAX_SPAWN_ITERATIONS 10
 
 extern JASSMODULE jass_funcs[];
+
+typedef struct {
+    LPEDICT edict;
+    LPCSTR dir, file;
+    DWORD num_variations;
+} spawnModelParams_t;
+
+typedef struct {
+    DWORD class_id, variation;
+    PATHSTR identity;
+} spawnModelCache_t;
+
+static spawnModelCache_t spawn_model_cache[MAX_MODELS];
+static DWORD num_spawn_model_cache;
+
+static bool G_ModelExists(LPCSTR identity, void *context) {
+    DWORD size;
+    HANDLE data;
+    (void)context;
+    data = gi.ReadFile(identity, &size);
+    if (data) gi.MemFree(data);
+    return data && size;
+}
+
+/* Table variation count selects the authored stem; archive probing applies the shared fallback contract. */
+static void G_RegisterSpawnModel(const spawnModelParams_t *params) {
+    static PATHSTR last_missing;
+    PATHSTR identity;
+    snprintf(identity, sizeof(identity), "<class:%08x>", params->edict->class_id);
+    for (DWORD i = 0; i < num_spawn_model_cache; i++)
+        if (spawn_model_cache[i].class_id == params->edict->class_id &&
+            spawn_model_cache[i].variation == params->edict->variation) {
+            params->edict->s.model = G_RegisterModel(spawn_model_cache[i].identity);
+            return;
+        }
+    wc3SpawnModelResolve_t resolve = {
+        .dir = params->dir, .file = params->file, .variation = params->edict->variation,
+        .num_variations = params->num_variations, .probe = G_ModelExists,
+        .out = identity, .cap = sizeof(identity),
+    };
+    if (!wc3_resolve_spawn_model_identity(&resolve) && strcmp(last_missing, identity)) {
+        fprintf(stderr, "G_Spawn: authored model '%s' unavailable\n", identity);
+        snprintf(last_missing, sizeof(last_missing), "%s", identity);
+    }
+    if (num_spawn_model_cache < MAX_MODELS) {
+        spawn_model_cache[num_spawn_model_cache++] = (spawnModelCache_t){
+            .class_id = params->edict->class_id, .variation = params->edict->variation,
+        };
+        snprintf(spawn_model_cache[num_spawn_model_cache - 1].identity, sizeof(PATHSTR), "%s", identity);
+    }
+    params->edict->s.model = G_RegisterModel(identity);
+}
 
 static void G_InitJassHost(void) {
     jass_sethost(&MAKE(JASSHOST,
@@ -112,13 +165,12 @@ static void SP_SpawnDoodad(LPEDICT edict) {
     LPCSTR class_id = GetClassName(edict->class_id);
     LPCSTR dir = FS_FindSheetCell(Doodads, class_id, "dir");
     LPCSTR file = FS_FindSheetCell(Doodads, class_id, "file");
-    PATHSTR buffer;
-    if (dir) {
-        snprintf(buffer, sizeof(buffer), "%s\\%s\\%s%d.mdx", dir, file, file, edict->variation);
-    } else {
-        snprintf(buffer, sizeof(buffer), "%s%d.mdx", file, edict->variation);
-    }
-    edict->s.model = G_RegisterModel(buffer);
+    LPCSTR num_variations = FS_FindSheetCell(Doodads, class_id, "numVar");
+    spawnModelParams_t model = {
+        .edict = edict, .dir = dir, .file = file,
+        .num_variations = num_variations ? (DWORD)strtoul(num_variations, NULL, 10) : 0,
+    };
+    G_RegisterSpawnModel(&model);
     edict->movetype = MOVETYPE_NONE;
 }
 
@@ -128,14 +180,13 @@ static void SP_SpawnDestructable(LPEDICT edict) {
     LPCSTR path_tex = DESTRUCTABLE_PATH_TEX(edict->class_id);
     FLOAT radius = DESTRUCTABLE_RADIUS(edict->class_id);
     PATHSTR buffer;
+    spawnModelParams_t model = {
+        .edict = edict, .dir = dir, .file = file,
+        .num_variations = (DWORD)UnitIntegerField(DestructableMetaData, edict->class_id, "bvar"),
+    };
     snprintf(buffer, sizeof(buffer), "%s.blp", DESTRUCTABLE_TEXTURE(edict->class_id));
     edict->s.image = gi.ImageIndex(buffer);
-    if (dir) {
-        snprintf(buffer, sizeof(buffer), "%s\\%s\\%s%d.mdx", dir, file, file, edict->variation);
-    } else {
-        snprintf(buffer, sizeof(buffer), "%s%d.mdx", file, edict->variation);
-    }
-    edict->s.model = G_RegisterModel(buffer);
+    G_RegisterSpawnModel(&model);
     edict->pathtex = M_LoadPathTex(path_tex);
     edict->s.radius = radius > 0.0f ? radius : 50.0f;  /* selection/UI circle only */
     /* WC3 trees have collisionSize 0 and block solely via their baked pathing
@@ -295,8 +346,10 @@ void G_SpawnEntities(void) {
 
     G_FowShutdown();
     memset(&level, 0, sizeof(level));
+    num_spawn_model_cache = 0;
 
     level.mapinfo = mapinfo;
+    G_MetadataPublishMap(mapinfo);
     G_FowInit();
     G_InitJassHost();
     level.vm = jass_newstate();

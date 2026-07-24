@@ -482,6 +482,9 @@ static void BuildEntity(bzTTEntity_t *out, centity_t const *ce) {
 static void BuildEntities(bzTTSnapshot_t *snap) {
     uint32_t written = 0, overflow = 0;
     for (DWORD i = 0; i < cl.num_entities && i < MAX_CLIENT_ENTITIES; i++) {
+        /* Match CL_AddEntities: zero-model slots are inactive, not dropped entities. */
+        if (!cl.ents[i].current.model)
+            continue;
         if (written < BZ_TT_MAX_ENTITIES) {
             BuildEntity(&snap->entities[written], &cl.ents[i]);
             written++;

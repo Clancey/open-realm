@@ -1,4 +1,5 @@
 #include "renderer/r_game.h"
+#include "../common/wc3_asset_path.h"
 #include "mdx/r_mdx.h"
 #include "w3m/r_war3map.h"
 
@@ -45,6 +46,17 @@ static BOOL R_GamePathHasExtension(LPCSTR path, LPCSTR extension) {
         return false;
     }
     return !strcasecmp(path + pathLen - extLen, extension);
+}
+
+typedef struct {
+    void *buffer;
+    int size;
+} gameModelRead_t;
+
+static bool R_GameReadModel(LPCSTR identity, void *opaque) {
+    gameModelRead_t *read = opaque;
+    read->size = ri.FS_ReadFile(identity, &read->buffer);
+    return read->size >= 0 && read->buffer;
 }
 
 void R_GameLoadAssets(void) {
@@ -114,66 +126,32 @@ VECTOR2 R_GameWorldSize(void) {
 }
 
 LPMODEL R_GameLoadModel(LPCSTR modelFilename) {
-    void *buffer = NULL;
-    int fileSize = ri.FS_ReadFile(modelFilename, &buffer);
+    gameModelRead_t read = { 0 };
+    PATHSTR resolved;
+    wc3ModelResolve_t resolve = {
+        .identity = modelFilename, .probe = R_GameReadModel, .context = &read,
+        .out = resolved, .cap = sizeof(resolved),
+    };
     LPMODEL model = NULL;
 
-    if (fileSize < 0 && R_GamePathHasExtension(modelFilename, ".mdl")) {
-        /* R_GamePathHasExtension uses strcasecmp, so the extension may be any
-         * case variant (e.g. ".MDL").  strstr() is case-sensitive, so we must
-         * not use it here; instead compute the stem length directly. */
-        PATHSTR tempFileName = { 0 };
-        size_t stemLen = strlen(modelFilename) - 4; /* ".mdl" = 4 chars */
-
-        if (stemLen > sizeof(tempFileName) - 5) {
-            stemLen = sizeof(tempFileName) - 5;
-        }
-        memcpy(tempFileName, modelFilename, stemLen);
-        memcpy(tempFileName + stemLen, ".mdx", 5);
-        fileSize = ri.FS_ReadFile(tempFileName, &buffer);
-    }
-    if (fileSize < 0) {
-        size_t nameLen = strlen(modelFilename);
-        if (nameLen >= 4) {
-            PATHSTR tempFileName = { 0 };
-            LPCSTR end = modelFilename + nameLen - 4;
-            size_t stemLen;
-
-            if (end > modelFilename && isdigit((unsigned char)*(end - 1))) {
-                end--;
-            }
-            stemLen = (size_t)(end - modelFilename);
-            if (stemLen > sizeof(tempFileName) - 5) {
-                stemLen = sizeof(tempFileName) - 5;
-            }
-            memcpy(tempFileName, modelFilename, stemLen);
-            memcpy(tempFileName + stemLen, ".mdx", 5);
-            fileSize = ri.FS_ReadFile(tempFileName, &buffer);
-        }
-    }
-    if (fileSize < 0 || !buffer) {
-        return NULL;
-    }
-    if (*(DWORD *)buffer == ID_MDLX) {
+    if (!wc3_resolve_model_identity(&resolve)) return NULL;
+    if (*(DWORD *)read.buffer == ID_MDLX) {
         model = ri.MemAlloc(sizeof(model_t));
-        model->mdx = R_LoadModelMDLX(buffer, fileSize);
+        model->mdx = R_LoadModelMDLX(read.buffer, read.size);
         model->modeltype = ID_MDLX;
-    } else if (R_GamePathHasExtension(modelFilename, ".mdl")) {
-        /* Same case-insensitive issue: use stem length, not strstr. */
+    } else if (R_GamePathHasExtension(resolved, ".mdl")) {
         PATHSTR tempFileName = { 0 };
-        size_t stemLen = strlen(modelFilename) - 4;
-
-        if (stemLen > sizeof(tempFileName) - 5) {
-            stemLen = sizeof(tempFileName) - 5;
-        }
-        memcpy(tempFileName, modelFilename, stemLen);
-        memcpy(tempFileName + stemLen, ".mdx", 5);
-        ri.FS_FreeFile(buffer);
+        wc3ModelFallback_t fallback = {
+            .identity = resolved, .fallback = BZ_WC3_MODEL_MDL_TO_MDX,
+            .out = tempFileName, .cap = sizeof(tempFileName),
+        };
+        wc3_model_fallback_identity(&fallback);
+        ri.FS_FreeFile(read.buffer);
         return R_LoadModel(tempFileName);
     } else {
-        fprintf(stderr, "Unknown model format %.4s in file %s\n", (LPSTR)buffer, modelFilename);
+        fprintf(stderr, "Unknown model format %.4s in file %s\n", (LPSTR)read.buffer, resolved);
     }
-    ri.FS_FreeFile(buffer);
+    ri.FS_FreeFile(read.buffer);
     return model;
 }
 

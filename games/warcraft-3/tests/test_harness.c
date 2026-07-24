@@ -293,6 +293,7 @@ void setup_game(void) {
 
     /* Provide a minimal mapinfo so level.mapinfo is never NULL. */
     level.mapinfo = &_test_mapinfo;
+    G_MetadataPublishMap(level.mapinfo);
 
     /* Set up unit stats tables with test data. */
     setup_test_unit_data();
@@ -306,6 +307,7 @@ void teardown_game(void) {
      * Clear the pool so subsequent setup_game() / reset_entities()
      * calls start from a fully zeroed state. */
     memset(_test_edicts, 0, sizeof(_test_edicts));
+    G_MetadataPublishMap(NULL);
     globals.num_edicts = 0;
 }
 

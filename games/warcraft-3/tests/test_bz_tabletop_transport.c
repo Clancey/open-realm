@@ -297,7 +297,9 @@ static void test_map_bounds_only_valid_when_refresh_prepped(void) {
 static void test_snapshot_reflects_entities_and_selection(void) {
     reset_all();
     cl.num_entities = 3;
-    cl.ents[0].current.number = 0; /* world/none entity; still copied verbatim */
+    cl.ents[0].current.number = 0; /* Empty model slot is not desktop-visible. */
+    cl.ents[0].current.model2 = 9;
+    cl.ents[0].current.image = 10;
     cl.ents[1].current.number = 1;
     cl.ents[1].current.class_id = 42;
     cl.ents[1].current.origin.x = 100.0f;
@@ -308,6 +310,7 @@ static void test_snapshot_reflects_entities_and_selection(void) {
     cl.ents[1].selected = true;
     cl.ents[2].current.number = 2;
     cl.ents[2].current.class_id = 43;
+    cl.ents[2].current.model2 = 11; /* Attachments do not activate an empty base-model slot. */
 
     cl.selection.num_selected = 1;
     cl.selection.entity_nums[0] = 1;
@@ -315,11 +318,11 @@ static void test_snapshot_reflects_entities_and_selection(void) {
     BZ_TT_PublishSnapshotFromClient();
     const bzTTSnapshot_t *snap = BZ_TT_Latest();
     ASSERT_NOT_NULL(snap);
-    ASSERT_EQ_INT(BZ_TTSnapshot_EntityCount(snap), 3);
+    ASSERT_EQ_INT(BZ_TTSnapshot_EntityCount(snap), 1);
     ASSERT_EQ_INT(BZ_TTSnapshot_EntitiesOverflowCount(snap), 0);
 
     bzTTEntity_t ent;
-    ASSERT(BZ_TTSnapshot_EntityAt(snap, 1, &ent));
+    ASSERT(BZ_TTSnapshot_EntityAt(snap, 0, &ent));
     ASSERT_EQ_INT(ent.number, 1);
     ASSERT_EQ_INT(ent.class_id, 42);
     ASSERT_EQ_FLOAT(ent.origin_x, 100.0f, 0.01f);
@@ -327,7 +330,7 @@ static void test_snapshot_reflects_entities_and_selection(void) {
     ASSERT_EQ_INT(ent.player, 2);
     ASSERT_EQ_INT(ent.model, 7);
     ASSERT(ent.selected);
-    ASSERT(!BZ_TTSnapshot_EntityAt(snap, 3, &ent)); /* out of range */
+    ASSERT(!BZ_TTSnapshot_EntityAt(snap, 1, &ent)); /* Empty slots were excluded. */
 
     uint32_t selected_ids[BZ_TT_MAX_SELECTED_ENTITIES];
     uint32_t n = BZ_TTSnapshot_SelectedEntityIds(snap, selected_ids, BZ_TT_MAX_SELECTED_ENTITIES);
@@ -342,9 +345,14 @@ static void test_entity_overflow_is_reported_not_truncated_silently(void) {
     /* cl.num_entities can legitimately be as large as MAX_CLIENT_ENTITIES;
      * exceed the transport's BZ_TT_MAX_ENTITIES cap and confirm the excess
      * is reported via EntitiesOverflowCount(), not silently dropped. */
-    cl.num_entities = BZ_TT_MAX_ENTITIES + 5;
-    FOR_LOOP(i, cl.num_entities) {
+    cl.num_entities = MAX_CLIENT_ENTITIES;
+    FOR_LOOP(i, BZ_TT_MAX_ENTITIES) {
         cl.ents[i].current.number = (DWORD)i;
+        cl.ents[i].current.model = 1;
+    }
+    for (DWORD i = BZ_TT_MAX_ENTITIES + 100; i < BZ_TT_MAX_ENTITIES + 105; i++) {
+        cl.ents[i].current.number = i;
+        cl.ents[i].current.model = 1;
     }
 
     BZ_TT_PublishSnapshotFromClient();

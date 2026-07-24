@@ -124,16 +124,13 @@ static void test_real_packet_parse_populates_snapshot(void) {
     ASSERT_EQ_INT(player->resource_food_cap, 40);
     ASSERT_STR_EQ(player->name, "P1");
 
-    /* CL_ReadPacketEntities always sets cl.num_entities = MAX_CLIENT_ENTITIES
-     * regardless of how many entities the packet actually touched (a
-     * pre-existing characteristic of the real parser, not something this
-     * transport can or should change) - so the snapshot legitimately caps
-     * at BZ_TT_MAX_ENTITIES and reports the rest as overflow. */
-    ASSERT_EQ_INT(BZ_TTSnapshot_EntityCount(snap), BZ_TT_MAX_ENTITIES);
-    ASSERT_EQ_INT(BZ_TTSnapshot_EntitiesOverflowCount(snap), MAX_CLIENT_ENTITIES - BZ_TT_MAX_ENTITIES);
+    /* The parser deliberately exposes MAX_CLIENT_ENTITIES slots; the transport
+     * matches CL_AddEntities and publishes only slots with an active base model. */
+    ASSERT_EQ_INT(BZ_TTSnapshot_EntityCount(snap), 1);
+    ASSERT_EQ_INT(BZ_TTSnapshot_EntitiesOverflowCount(snap), 0);
 
     bzTTEntity_t ent;
-    ASSERT(BZ_TTSnapshot_EntityAt(snap, 1, &ent));
+    ASSERT(BZ_TTSnapshot_EntityAt(snap, 0, &ent));
     ASSERT_EQ_INT(ent.number, 1);
     ASSERT_EQ_INT(ent.class_id, 42);
     ASSERT_EQ_FLOAT(ent.origin_x, 100.0f, 0.01f);
