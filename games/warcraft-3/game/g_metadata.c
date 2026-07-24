@@ -1,5 +1,6 @@
 #include "g_local.h"
 #include "g_metadata.h"
+#include "g_metadata_schema.h"
 #include <pthread.h>
 
 typedef struct sheet_tail_cache_entry_s {
@@ -257,6 +258,7 @@ void InitUnitData(void) {
     }
     sheetRow_t *DestructableData = FS_ParseSLK("Units\\DestructableData.slk");
     Doodads = FS_ParseSLK("Doodads\\Doodads.slk");
+    G_ApplyMetaDataSchema(UnitsMetaData, FS_ParseSLK("Units\\UnitMetaData.slk"));
     G_SetConfigTable(UnitsMetaData, "Profile", Profile);
     G_SetConfigTable(UnitsMetaData, "UnitAbilities", FS_ParseSLK("Units\\UnitAbilities.slk"));
     G_SetConfigTable(UnitsMetaData, "UnitBalance", FS_ParseSLK("Units\\UnitBalance.slk"));

@@ -21,6 +21,7 @@
 
 #include "test_framework.h"
 #include "test_harness.h"
+#include "g_metadata_schema.h"
 
 /* Defined in g_metadata.c; swaps the sheet backing one metadata table. */
 void G_SetConfigTable(sheetMetaData_t *metadatas, LPCSTR slk, sheetRow_t *table);
@@ -182,6 +183,102 @@ static void test_unit_unknown_id_returns_zero(void) {
     ASSERT_FLOAT_EQ(UNIT_SPEED(UNIT_ID("xxxx")),      0.0f);
     ASSERT_FLOAT_EQ(UNIT_HP(UNIT_ID("xxxx")),         0.0f);
     ASSERT_EQ_INT  (UNIT_BUILD_TIME(UNIT_ID("xxxx")), 0);
+}
+
+/* UnitMetaData.slk, not the ROC-generated registry, owns expansion sheet placement. */
+static void test_unit_metadata_schema_tracks_archive_variant(void) {
+    sheetField_t roc_ucol_slk = { "slk", "UnitData" };
+    sheetField_t roc_ucol_field = { "field", "collision", &roc_ucol_slk };
+    sheetRow_t roc_ucol = { "ucol", &roc_ucol_field };
+    sheetField_t tft_ubdg_slk = { "slk", "UnitBalance" };
+    sheetField_t tft_ubdg_field = { "field", "isbldg", &tft_ubdg_slk };
+    sheetField_t tft_ucol_slk = { "slk", "UnitBalance" };
+    sheetField_t tft_ucol_field = { "field", "collision", &tft_ucol_slk };
+    sheetField_t tft_umpm_slk = { "slk", "UnitBalance" };
+    sheetField_t tft_umpm_field = { "field", "manaN", &tft_umpm_slk };
+    sheetRow_t tft_umpm = { "umpm", &tft_umpm_field };
+    sheetRow_t tft_ubdg = { "ubdg", &tft_ubdg_field, &tft_umpm };
+    sheetRow_t tft_ucol = { "ucol", &tft_ucol_field, &tft_ubdg };
+    sheetField_t malformed_field = { "field", "collision" };
+    sheetRow_t malformed = { "ucol", &malformed_field };
+    sheetField_t htow_building = { "isbldg", "1" }, hfoo_collision = { "collision", "31" };
+    sheetRow_t htow = { "htow", &htow_building }, hfoo = { "hfoo", &hfoo_collision, &htow };
+    sheetMetaData_t metadata[] = {
+        { "ucol", "collision", "UnitData", (sheetRow_t *)1 },
+        { "ubdg", "isbldg", "UnitUI", (sheetRow_t *)1 },
+        { "umpm", "realM", "UnitBalance", (sheetRow_t *)1 },
+        { NULL },
+    };
+
+    G_ApplyMetaDataSchema(metadata, &roc_ucol);
+    ASSERT_STR_EQ(metadata[0].slk, "UnitData");
+    ASSERT_STR_EQ(metadata[1].slk, "UnitUI");
+    ASSERT_NULL(metadata[0].table);
+    ASSERT_NULL(metadata[1].table);
+
+    G_ApplyMetaDataSchema(metadata, &tft_ucol);
+    ASSERT_STR_EQ(metadata[0].field, "collision");
+    ASSERT_STR_EQ(metadata[0].slk, "UnitBalance");
+    ASSERT_STR_EQ(metadata[1].field, "isbldg");
+    ASSERT_STR_EQ(metadata[1].slk, "UnitBalance");
+    ASSERT_STR_EQ(metadata[2].field, "realM");
+    ASSERT_STR_EQ(metadata[2].slk, "UnitBalance");
+    G_SetConfigTable(metadata, "UnitBalance", &hfoo);
+    ASSERT_FLOAT_EQ(UnitRealFieldBase(metadata, UNIT_ID("hfoo"), "ucol"), 31.0f);
+    ASSERT(UnitBooleanFieldBase(metadata, UNIT_ID("htow"), "ubdg"));
+    G_ApplyMetaDataSchema(metadata, &malformed);
+    ASSERT_STR_EQ(metadata[0].slk, "");
+    ASSERT_NULL(metadata[0].table);
+    G_ApplyMetaDataSchema(metadata, NULL);
+    ASSERT_STR_EQ(metadata[0].slk, "");
+    ASSERT_NULL(metadata[0].table);
+}
+
+/* Every unit that failed real TFT Human02 must read the replacement UnitBalance columns. */
+static void test_tft_metadata_schema_resolves_human02_units(void) {
+    static LPCSTR ids[] = {
+        "ngnw", "nmrl", "nmrm", "ngt2", "ngnh", "ofor", "nogr", "ohun", "ogru",
+        "ngna", "ngno", "nC03", "nshe", "npig", "nmh0", "npgf", "nmh1", "hfoo",
+        "nser", "obea", "hpea", "hbla", "hC02", "nvil", "Obla", "orai", "hrif",
+        "nomg", "hwtw", "obar", "nmrr", "htow", "hlum", "halt", "nvlw", "Huth",
+    };
+    sheetField_t schema_slk[] = { { "slk", "UnitBalance" }, { "slk", "UnitBalance" } };
+    sheetField_t schema_field[] = {
+        { "field", "collision", &schema_slk[0] }, { "field", "isbldg", &schema_slk[1] },
+    };
+    sheetRow_t schema[] = { { "ucol", &schema_field[0], &schema[1] }, { "ubdg", &schema_field[1] } };
+    sheetMetaData_t metadata[] = {
+        { "ucol", "collision", "UnitData" }, { "ubdg", "isbldg", "UnitUI" }, { NULL },
+    };
+    unitData_t aliases[] = {
+        { .originalUnitID = UNIT_ID("nrdk"), .newUnitID = UNIT_ID("nC03") },
+        { .originalUnitID = UNIT_ID("hmtm"), .newUnitID = UNIT_ID("hC02") },
+    };
+    struct mapInfo_s map = { .num_userCreatedUnits = 2, .userCreatedUnits = aliases };
+    const metadataMapSnapshot_t *snapshot;
+    sheetField_t fields[sizeof(ids) / sizeof(ids[0])][2];
+    sheetRow_t rows[sizeof(ids) / sizeof(ids[0])];
+
+    for (DWORD i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        fields[i][0] = (sheetField_t){ "collision", "31", &fields[i][1] };
+        fields[i][1] = (sheetField_t){ "isbldg", !strcmp(ids[i], "htow") ? "1" : "0" };
+        rows[i] = (sheetRow_t){ ids[i], fields[i], i + 1 < sizeof(ids) / sizeof(ids[0]) ? &rows[i + 1] : NULL };
+        if (!strcmp(ids[i], "nC03")) rows[i].name = "nrdk";
+        else if (!strcmp(ids[i], "hC02")) rows[i].name = "hmtm";
+    }
+    G_ApplyMetaDataSchema(metadata, schema);
+    G_SetConfigTable(metadata, "UnitBalance", rows);
+    G_MetadataPublishMap(&map);
+    snapshot = G_MetadataMapAcquire();
+    for (DWORD i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        DWORD table_id = G_MetadataMapClass(snapshot, UNIT_ID(ids[i]));
+        ASSERT_NOT_NULL(UnitStringFieldBase(metadata, table_id, "ucol"));
+        ASSERT_NOT_NULL(UnitStringFieldBase(metadata, table_id, "ubdg"));
+    }
+    ASSERT_FLOAT_EQ(UnitRealFieldBase(metadata, UNIT_ID("hfoo"), "ucol"), 31.0f);
+    ASSERT(UnitBooleanFieldBase(metadata, UNIT_ID("htow"), "ubdg"));
+    G_MetadataMapRelease(snapshot);
+    G_MetadataPublishMap(level.mapinfo);
 }
 
 typedef struct {
@@ -381,6 +478,8 @@ BEGIN_SUITE(slk)
     RUN_TEST(test_unit_build_time_footman);
     RUN_TEST(test_unit_collision_peasant);
     RUN_TEST(test_unit_unknown_id_returns_zero);
+    RUN_TEST(test_unit_metadata_schema_tracks_archive_variant);
+    RUN_TEST(test_tft_metadata_schema_resolves_human02_units);
     RUN_TEST(test_class_name_is_thread_local);
     RUN_TEST(test_metadata_map_snapshot_survives_republication);
     RUN_TEST(test_metadata_map_snapshot_concurrent_publication);

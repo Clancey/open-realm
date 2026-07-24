@@ -84,6 +84,18 @@ All reads go through `UnitIntegerField` / `UnitRealField` / `UnitBooleanField` /
 | `UNIT_BUILD_TIME` | `ubld` | seconds; multiply by 1000 for ms |
 | `UNIT_IS_BUILDING` | `ubdg` | boolean |
 
+The backing SLK for a metadata ID is archive-version data, not a fixed engine mapping. Retail ROC
+`Units\UnitMetaData.slk` maps `ucol` (`collision`) to `UnitData.slk`, while ROC `ubdg` (`isbldg`)
+comes from `UnitUI.slk`. Retail TFT replaces the schema and maps both IDs to `UnitBalance.slk`.
+`InitUnitData()` applies the active `UnitMetaData.slk` backing-sheet placement before binding parsed
+tables. Generated entries remain the field registry: intentional computed-column mappings such as
+`uhpm` to `realHP` and `umpm` to `realM` must not be replaced by editor-facing schema fields.
+
+The TFT Human02 regression set is `ngnw nmrl nmrm ngt2 ngnh ofor nogr ohun ogru ngna ngno nC03 nshe
+npig nmh0 npgf nmh1 hfoo nser obea hpea hbla hC02 nvil Obla orai hrif nomg hwtw obar nmrr htow hlum
+halt nvlw Huth`. The map-authored `nC03` and `hC02` IDs resolve through the immutable class-alias
+snapshot to `nrdk` and `hmtm` before static-table lookup.
+
 ### Misc
 | Macro | Code | Notes |
 |---|---|---|
