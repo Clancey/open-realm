@@ -47,6 +47,10 @@
     BZ_TabletopResume(_lc);
 }
 
+- (BOOL)submitMap:(NSString *)map {
+    return BZ_TabletopSubmitMap(_lc, map.UTF8String);
+}
+
 - (void)stop {
     BZ_TabletopStop(_lc);
 }

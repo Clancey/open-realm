@@ -13,9 +13,6 @@ static struct {
     int num_decals;
 } view_state;
 
-static bool world_loaded = false;
-static bool begin_sent = false;
-
 VECTOR3 lightAngles = {-40,0,60};
 
 static void CL_SendBegin(void) {
@@ -157,7 +154,7 @@ static void Matrix4_getPreviewLightMatrix(LPCVECTOR3 sunangles, LPCVECTOR3 targe
 }
 
 void Matrix4_getCameraMatrix(LPMATRIX4 output) {
-    if (!world_loaded) {
+    if (!cl.refresh_prepped) {
         Matrix4_identity(output);
         return;
     }
@@ -381,22 +378,18 @@ static void CL_AddEntities(void) {
 }
 
 void CL_PrepRefresh(void) {
-    if (!*cl.configstrings[CS_WORLD]) {
-        world_loaded = false;
-        begin_sent = false;
+    if (!*cl.configstrings[CS_WORLD])
         return;
-    }
 
-    if (!world_loaded) {
+    if (!cl.refresh_prepped) {
         if (!CM_IsMapLoaded(cl.configstrings[CS_WORLD])) {
             CM_LoadMap(cl.configstrings[CS_WORLD]);
         }
         re.RegisterMap(cl.configstrings[CS_WORLD]);
-        world_loaded = true;
     }
 
 #ifdef SC2
-    if (world_loaded && cls.state != ca_active) {
+    if (!cl.refresh_prepped) {
         sc2MapCamera_t map_camera;
         viewCamera_t camera = { 0 };
 
@@ -471,13 +464,14 @@ void CL_PrepRefresh(void) {
         }
     }
 
-    if (world_loaded && !begin_sent) {
+    if (!cl.refresh_prepped) {
         CL_SendBegin();
-        begin_sent = true;
-    }
-
-    if (world_loaded && !cl.refresh_prepped) {
         cl.refresh_prepped = true;
+        /* A cleared client generation must register assets and send begin before it can expose an active world. */
+        cls.state = ca_active;
+        cl.playerstate.client_ui_state = CLIENT_UI_GAME;
+        SCR_EndLoadingPlaque();
+        CL_SetGameplayInput();
     }
 }
 
@@ -489,7 +483,7 @@ void V_RenderView(void) {
 #endif
     
     static DWORD lastTime = 0;
-    if (!world_loaded || cls.state != ca_active) {
+    if (!cl.refresh_prepped || cls.state != ca_active) {
         VECTOR3 target = { 0, 0, 90 };
 
         cl.viewDef.viewport = (RECT) { 0, 0, 1, 1 };
@@ -558,5 +552,4 @@ void V_AddDecal(renderDecal_t *decal) {
     view_state.decals[view_state.num_decals++] = *decal;
 }
 
-void V_Shutdown(void) {
-}
+void V_Shutdown(void) {}

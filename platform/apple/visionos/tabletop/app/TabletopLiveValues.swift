@@ -16,6 +16,8 @@ struct TabletopEntityMetadata: Equatable, Sendable {
     var splat: UInt32 = 0
     var shadow: UInt32 = 0
     var shadowRect: UInt32 = 0
+
+    var hasClassIdentity: Bool { classID != 0 }
 }
 
 struct TabletopPlayerSnapshot: Equatable, Sendable {
@@ -34,6 +36,7 @@ struct TabletopPlayerSnapshot: Equatable, Sendable {
     var heroTokens: UInt32
     var name: String
     var target: TabletopActionTarget = .none
+    var gameResult: TabletopGameResult = .none
 }
 
 struct TabletopFogSnapshot: Equatable, Sendable {

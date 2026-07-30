@@ -177,6 +177,16 @@ bool BZ_RuntimeFrame(DWORD elapsed_msec) {
     return bz_runtime_state == BZ_RUNTIME_STATE_RUNNING;
 }
 
+/* Executes host-submitted commands on the same serialized thread as engine frames. */
+bool BZ_RuntimeExecuteCommand(LPCSTR command) {
+    if (bz_runtime_state != BZ_RUNTIME_STATE_RUNNING || !command || !*command)
+        return false;
+    Cbuf_AddText(command);
+    Cbuf_AddText("\n");
+    Cbuf_Execute();
+    return bz_runtime_state == BZ_RUNTIME_STATE_RUNNING;
+}
+
 /*
  * BZ_RuntimeShutdown — orderly, idempotent teardown. Com_Quit() calls this
  * before Sys_Quit(), and BZ_RuntimeFrame() calls Com_Quit() at the frame

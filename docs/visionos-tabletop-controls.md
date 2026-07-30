@@ -39,7 +39,8 @@ Warcraft server/game
   -> server acknowledgement in a later snapshot
 ```
 
-`BZ_TABLETOP_ABI_VERSION` 2 adds copied target mode, semantic action visibility,
+`BZ_TABLETOP_ABI_VERSION` 3 includes ABI v2 target/action data and adds the
+authoritative player game result used by the native terminal flow. Target mode, semantic action visibility,
 disabled state, cooldown, target kind, and bounded action tokens. Point
 targeting uses the distinct `point` command; ordinary ground orders continue to
 use `smartpoint`. Cancel never uses the cinematic `cancel` console command.
@@ -75,7 +76,7 @@ BZ_WC3_DATA_DIR="/Users/clancey/Downloads/Warcraft III" \
   OPENREALM_TABLETOP_TFT=1 make visionos-tabletop-simulator-acceptance
 ```
 
-For each Human02 run, verify entity replacement/additive selection, smart entity
+For each catalog-selected ROC/TFT map, verify entity replacement/additive selection, smart entity
 and ground orders, every visible command-panel state, entity/point targeting,
 cancel acknowledgement, stale-hit rejection after a new generation, left-rail
 translation, two-hand rotation and scale bounds, and lifecycle placement reset.

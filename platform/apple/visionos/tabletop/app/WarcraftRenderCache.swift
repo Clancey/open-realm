@@ -123,8 +123,11 @@ final class WarcraftDiskCache {
     let byteLimit: Int
     private(set) var counters = WarcraftCacheCounters()
 
-    init(applicationSupport: URL, byteLimit: Int) throws {
-        root = applicationSupport.appendingPathComponent("OpenRealm/WarcraftRenderer/v\(WarcraftCacheKey.version)",
+    init(applicationSupport: URL, byteLimit: Int, editionScope: String = "shared") throws {
+        let safeScope = editionScope.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" } ?
+            editionScope : "invalid"
+        root = applicationSupport.appendingPathComponent(
+            "OpenRealm/WarcraftRenderer/v\(WarcraftCacheKey.version)/\(safeScope)",
                                                          isDirectory: true).standardizedFileURL
         self.byteLimit = max(byteLimit, 0)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

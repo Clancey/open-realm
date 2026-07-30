@@ -95,12 +95,13 @@ final class RealityTabletopReconciler {
         var color: SIMD4<Float>
     }
 
-    init() {
+    init(cacheScope: String) {
         root.name = "open-realm-warcraft-descriptor-scene"
         root.position = [0, 1.0, -1.1]
         do {
             diskCache = try WarcraftDiskCache(
-                applicationSupport: WarcraftCacheRoot.applicationSupport(), byteLimit: 64 * 1_024 * 1_024)
+                applicationSupport: WarcraftCacheRoot.applicationSupport(), byteLimit: 64 * 1_024 * 1_024,
+                editionScope: cacheScope)
         } catch {
             FileHandle.standardError.write(Data(
                 "OpenRealmTabletopRenderer: cache initialization failed: \(error)\n".utf8))
@@ -630,8 +631,9 @@ final class RealityTabletopReconciler {
 struct TabletopImmersiveView: View {
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var model: TabletopSessionModel
-    @State private var reconciler = RealityTabletopReconciler()
+    @State private var reconciler: RealityTabletopReconciler
     @State private var interaction = TabletopInteractionState()
     @State private var board = TabletopBoardManipulationState()
     @State private var boardDragStart: SIMD3<Float>?
@@ -639,6 +641,11 @@ struct TabletopImmersiveView: View {
     @State private var boardYaw: Float = 0
     @State private var additiveSelection = false
     @GestureState private var boardDragActive = false
+
+    init(model: TabletopSessionModel) {
+        self.model = model
+        _reconciler = State(initialValue: RealityTabletopReconciler(cacheScope: model.selectedEdition.rawValue))
+    }
 
     var body: some View {
         RealityView { content in
@@ -652,6 +659,7 @@ struct TabletopImmersiveView: View {
             interaction.reconcile(authoritativeTarget: model.renderSnapshot.actionLayout.currentTarget)
         }
         .simultaneousGesture(SpatialTapGesture().targetedToAnyEntity().onEnded { value in
+            guard model.acceptsGameplayInput else { return }
             if let hit = reconciler.entityHit(for: value.entity) {
                 if model.renderSnapshot.actionLayout.currentTarget.acceptsEntity {
                     model.targetEntity(hit)
@@ -679,7 +687,8 @@ struct TabletopImmersiveView: View {
             }
         })
         .simultaneousGesture(LongPressGesture(minimumDuration: 0.45).targetedToAnyEntity().onEnded { value in
-            guard interaction.mode == .idle, let hit = reconciler.entityHit(for: value.entity) else { return }
+            guard model.acceptsGameplayInput, interaction.mode == .idle,
+                  let hit = reconciler.entityHit(for: value.entity) else { return }
             model.smartEntity(hit)
         })
         .highPriorityGesture(DragGesture(minimumDistance: 8).targetedToAnyEntity()
@@ -687,7 +696,8 @@ struct TabletopImmersiveView: View {
                 if reconciler.surfaceKind(for: value.entity) == .translationHandle { active = true }
             }
             .onChanged { value in
-                guard reconciler.surfaceKind(for: value.entity) == .translationHandle else { return }
+                guard model.acceptsGameplayInput,
+                      reconciler.surfaceKind(for: value.entity) == .translationHandle else { return }
                 let point = value.convert(value.location3D, from: .local, to: reconciler.root)
                 if boardDragStart == nil {
                     guard interaction.beginBoardManipulation(.leftHand), board.begin(.leftHand) else { return }
@@ -706,7 +716,7 @@ struct TabletopImmersiveView: View {
             })
         .simultaneousGesture(MagnifyGesture(minimumScaleDelta: 0.01).targetedToAnyEntity()
             .onChanged { value in
-                guard reconciler.surfaceKind(for: value.entity) == .board,
+                guard model.acceptsGameplayInput, reconciler.surfaceKind(for: value.entity) == .board,
                       interaction.beginBoardManipulation(.twoHand), board.begin(.twoHand) else { return }
                 boardMagnification = Float(value.magnification)
                 _ = board.update(.twoHand, yaw: boardYaw, magnification: boardMagnification)
@@ -715,7 +725,7 @@ struct TabletopImmersiveView: View {
             .onEnded { _ in finishTwoHandManipulation() })
         .simultaneousGesture(RotateGesture3D(constrainedToAxis: .y).targetedToAnyEntity()
             .onChanged { value in
-                guard reconciler.surfaceKind(for: value.entity) == .board,
+                guard model.acceptsGameplayInput, reconciler.surfaceKind(for: value.entity) == .board,
                       interaction.beginBoardManipulation(.twoHand), board.begin(.twoHand) else { return }
                 boardYaw = Float(value.rotation.angle.radians)
                 _ = board.update(.twoHand, yaw: boardYaw, magnification: boardMagnification)
@@ -733,7 +743,16 @@ struct TabletopImmersiveView: View {
             interaction.reset()
             board.reset()
             reconciler.reset()
-            Task { await model.stop() }
+            Task { await model.returnToMenu() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            Task {
+                switch phase {
+                case .active: await model.setPaused(false, reason: .background)
+                case .inactive, .background: await model.setPaused(true, reason: .background)
+                @unknown default: await model.setPaused(true, reason: .background)
+                }
+            }
         }
         .overlay(alignment: .bottomTrailing) {
             TabletopActionPanel(
@@ -750,11 +769,7 @@ struct TabletopImmersiveView: View {
                 VStack {
                     Text(error)
                     Button("Return to Launcher") {
-                        Task {
-                            await model.stop()
-                            await dismissImmersiveSpace()
-                            openWindow(id: "launcher")
-                        }
+                        Task { await returnToLauncher() }
                     }
                 }
                 .padding()
@@ -765,6 +780,49 @@ struct TabletopImmersiveView: View {
                     .glassBackgroundEffect()
             }
         }
+        .overlay(alignment: .topLeading) {
+            if case .playing = model.productState {
+                Button("Pause") { Task { await model.setPaused(true, reason: .user) } }
+                    .padding()
+                    .glassBackgroundEffect()
+            }
+        }
+        .overlay { productOverlay }
+    }
+
+    @ViewBuilder private var productOverlay: some View {
+        switch model.productState {
+        case .paused:
+            VStack(spacing: 14) {
+                Text("Paused").font(.title)
+                Button("Resume") { Task { await model.setPaused(false, reason: .user) } }
+                    .buttonStyle(.borderedProminent)
+                Text("Graphics, key bindings, and difficulty changes are not supported during a match.")
+                    .font(.caption).multilineTextAlignment(.center)
+                Button("Return to Menu", role: .destructive) { Task { await returnToLauncher() } }
+            }
+            .padding(24).frame(maxWidth: 420).glassBackgroundEffect()
+        case .terminal(_, let result):
+            VStack(spacing: 14) {
+                Text(result == .victory ? "Victory" : result == .defeat ? "Defeat" : "Map Complete")
+                    .font(.largeTitle)
+                Button("Retry") { Task { await model.retry() } }
+                if model.nextMap != nil {
+                    Button("Next Map") { Task { await model.startNextMap() } }
+                        .buttonStyle(.borderedProminent)
+                }
+                Button("Return to Menu") { Task { await returnToLauncher() } }
+            }
+            .padding(24).glassBackgroundEffect()
+        default:
+            EmptyView()
+        }
+    }
+
+    private func returnToLauncher() async {
+        await model.returnToMenu()
+        await dismissImmersiveSpace()
+        openWindow(id: "launcher")
     }
 
     private func finishTwoHandManipulation() {

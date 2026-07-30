@@ -209,13 +209,6 @@ void CL_ParseFrame(LPSIZEBUF msg) {
     cl.frame.oldclientframe = MSG_ReadLong(msg);
     cl.time = cl.frame.servertime;
     
-    if (cls.state != ca_active && cl.refresh_prepped) {
-        cls.state = ca_active;
-        cl.playerstate.client_ui_state = CLIENT_UI_GAME;
-        SCR_EndLoadingPlaque();
-        CL_SetGameplayInput();
-    }
-    
     FOR_LOOP(index, MAX_CLIENT_ENTITIES) {
         centity_t *ce = &cl.ents[index];
         if (!ce->current.model)
@@ -232,6 +225,7 @@ void CL_ParsePlayerInfo(LPSIZEBUF msg) {
     FLOAT znear;
     FLOAT zfar;
     MSG_ReadDeltaPlayerState(msg, &cl.playerstate, plnum, bits);
+    cl.playerstate_valid = true;
     VECTOR2 server_origin = cl.playerstate.origin;
     if (cl.playerstate.client_ui_state == CLIENT_UI_GAME) {
         CL_SetGameplayInput();

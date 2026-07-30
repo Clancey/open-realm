@@ -50,7 +50,7 @@ fi
 xcrun --sdk "$SDK" swiftc -parse-as-library -O -target "$TRIPLE" -sdk "$SDK_PATH" \
     -module-name OpenRealmTabletop \
     -I "$TABLETOP/bridge" \
-    -framework SwiftUI -framework RealityKit \
+    -framework SwiftUI -framework RealityKit -framework AVFoundation \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$APP/Info.plist" \
     $LINK_FLAGS \
     "$TABLETOP"/app/*.swift \

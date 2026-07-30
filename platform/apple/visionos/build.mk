@@ -162,7 +162,7 @@ visionos: xrsimulator xros
 # promises).
 # ---------------------------------------------------------------------------
 BZ_XR_BRIDGE_DIR      := platform/apple/visionos/tabletop/bridge
-BZ_XR_BRIDGE_CFLAGS    := $(BZ_XR_BASE_CFLAGS)
+BZ_XR_BRIDGE_CFLAGS    := $(BZ_XR_BASE_CFLAGS) -I$(WC3_DIR) -I$(WC3_DIR)/common -I$(BZ_XR_BRIDGE_TRANSPORT_DIR)
 BZ_XR_BRIDGE_CXXFLAGS  := -Wall -fobjc-arc -std=c++17 -I$(BZ_XR_BRIDGE_DIR)
 
 # $(1)=target .o  $(2)=source .c  $(3)=sdk  $(4)=triple
@@ -186,9 +186,10 @@ BZ_XR_$(1)_BRIDGE_ARCHIVE := $$(BZ_XR_$(1)_DIR)/libopenwarcraft3-bridge.a
 BZ_XR_$(1)_BRIDGE_SMOKE   := $$(BZ_XR_$(1)_DIR)/bridge-link-smoke
 
 $$(eval $$(call bz_xr_bridge_c_o,$$(BZ_XR_$(1)_DIR)/bz_tabletop_lifecycle.o,$$(BZ_XR_BRIDGE_DIR)/bz_tabletop_lifecycle.c,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+$$(eval $$(call bz_xr_bridge_c_o,$$(BZ_XR_$(1)_DIR)/bz_tabletop_catalog.o,$$(BZ_XR_BRIDGE_TRANSPORT_DIR)/bz_tabletop_catalog.c,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_bridge_mm_o,$$(BZ_XR_$(1)_DIR)/bz_tabletop_bridge.o,$$(BZ_XR_BRIDGE_DIR)/bz_tabletop_bridge.mm,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 
-$$(BZ_XR_$(1)_BRIDGE_ARCHIVE): $$(BZ_XR_$(1)_DIR)/bz_tabletop_lifecycle.o $$(BZ_XR_$(1)_DIR)/bz_tabletop_bridge.o
+$$(BZ_XR_$(1)_BRIDGE_ARCHIVE): $$(BZ_XR_$(1)_DIR)/bz_tabletop_lifecycle.o $$(BZ_XR_$(1)_DIR)/bz_tabletop_catalog.o $$(BZ_XR_$(1)_DIR)/bz_tabletop_bridge.o
 	@mkdir -p $$(@D)
 	@echo "[archive $(1)-bridge]"
 	@ar rcs $$@ $$^

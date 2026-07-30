@@ -3,60 +3,114 @@ import SwiftUI
 struct TabletopLauncherView: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
-    @State private var state = TabletopLauncherState.waiting
     @ObservedObject var model: TabletopSessionModel
+    var automatedLaunch = false
+    @State private var launcherState = TabletopLauncherState.waiting
+    @State private var source = TabletopMapSource.campaign
+    @State private var attemptedAutomatedLaunch = false
+
+    private var maps: [TabletopMapRecord] {
+        let filtered = model.availableMaps.filter { $0.source == source }
+        return filtered.isEmpty ? model.availableMaps : filtered
+    }
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(alignment: .leading, spacing: 18) {
             Text("Open Realm Tabletop").font(.largeTitle)
-            Text("\(model.modeName) mode")
-            switch state {
-            case .waiting, .opening:
-                ProgressView("Opening mixed immersive space...")
-            case .open:
-                Text("Immersive space opened.")
-            case .failed(let message):
-                Text(message).multilineTextAlignment(.center)
-                Button("Retry") { Task { await openTabletop(retry: true) } }
-                    .buttonStyle(.borderedProminent)
+            Text("\(model.modeName) mode").foregroundStyle(.secondary)
+            if case .missingData(let message) = model.productState {
+                ContentUnavailableView("Warcraft III data unavailable",
+                                       systemImage: "externaldrive.badge.exclamationmark",
+                                       description: Text(message))
+            } else {
+                Picker("Game", selection: Binding(
+                    get: { model.selectedEdition },
+                    set: { model.selectEdition($0) })) {
+                    ForEach(TabletopEdition.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+
+                Picker("Source", selection: $source) {
+                    Text("Campaign").tag(TabletopMapSource.campaign)
+                    Text("Archive maps").tag(TabletopMapSource.archive)
+                }
+                .pickerStyle(.segmented)
+
+                Picker("Playable map", selection: Binding(
+                    get: { model.selectedMapID ?? "" },
+                    set: { model.selectMap($0) })) {
+                    ForEach(maps) { map in
+                        VStack(alignment: .leading) {
+                            Text(map.title.isEmpty ? map.mapPath : map.title)
+                            if !map.campaign.isEmpty { Text(map.campaign).font(.caption) }
+                        }.tag(map.id)
+                    }
+                }
+
+                mapDetails
+                launchControls
             }
         }
         .padding(32)
-        .frame(minWidth: 460, minHeight: 260)
+        .frame(minWidth: 560, minHeight: 430)
+        .onChange(of: source) { _, _ in
+            if let first = maps.first, !maps.contains(where: { $0.id == model.selectedMapID }) {
+                model.selectMap(first.id)
+            }
+        }
         .task {
-            if let error = model.errorMessage { state = .failed(error) }
-            else { await openTabletop(retry: false) }
+            guard automatedLaunch, !attemptedAutomatedLaunch else { return }
+            attemptedAutomatedLaunch = true
+            await openTabletop()
+        }
+    }
+
+    @ViewBuilder private var mapDetails: some View {
+        if let map = model.selectedMap {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(map.title.isEmpty ? "Untitled map" : map.title).font(.headline)
+                if !map.subtitle.isEmpty { Text(map.subtitle) }
+                Text(map.mapPath).font(.caption.monospaced()).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder private var launchControls: some View {
+        switch model.productState {
+        case .loading(let map):
+            ProgressView("Loading \(map.title.isEmpty ? map.mapPath : map.title)…")
+        case .failed(let message):
+            Text(message).foregroundStyle(.red)
+            Button("Retry") { Task { await openTabletop() } }.buttonStyle(.borderedProminent)
+        default:
+            Button("Play") { Task { await openTabletop() } }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.selectedMap == nil || launcherState == .opening)
         }
     }
 
     @MainActor
-    private func openTabletop(retry: Bool) async {
-        let current = state
-        let next = TabletopLauncherReducer.reduce(current, retry ? .retryRequested : .launchRequested)
-        guard current != .opening, next == .opening else { return }
-        state = next
-        do {
-            try await model.prepare()
-        } catch {
-            state = TabletopLauncherReducer.reduce(
-                state, .openFailed("Tabletop startup failed: \(error). Check live data/mode settings, then Retry."))
+    private func openTabletop() async {
+        guard launcherState != .opening else { return }
+        launcherState = .opening
+        do { try await model.prepare() }
+        catch {
+            launcherState = .failed(String(describing: error))
             return
         }
         switch await openImmersiveSpace(id: "tabletop") {
         case .opened:
-            state = TabletopLauncherReducer.reduce(state, .openSucceeded)
+            launcherState = .open
             dismissWindow(id: "launcher")
         case .userCancelled:
-            await model.stop()
-            state = TabletopLauncherReducer.reduce(state, .openCancelled)
+            await model.returnToMenu()
+            launcherState = .failed("Opening the immersive space was cancelled.")
         case .error:
-            await model.stop()
-            state = TabletopLauncherReducer.reduce(
-                state, .openFailed("The immersive space could not open. Check system permissions, then Retry."))
+            await model.returnToMenu()
+            launcherState = .failed("The immersive space could not open.")
         @unknown default:
-            await model.stop()
-            state = TabletopLauncherReducer.reduce(
-                state, .openFailed("The immersive space returned an unknown result. Retry or relaunch the app."))
+            await model.returnToMenu()
+            launcherState = .failed("The immersive space returned an unknown result.")
         }
     }
 }

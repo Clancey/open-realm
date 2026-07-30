@@ -185,6 +185,9 @@ static void test_snapshot_reflects_player_and_configstrings(void) {
     cl.playerstate.stats[PLAYERSTATE_RESOURCE_FOOD_USED] = 12;
     cl.playerstate.stats[PLAYERSTATE_RESOURCE_FOOD_CAP] = 40;
     cl.playerstate.stats[PLAYERSTATE_RESOURCE_HERO_TOKENS] = 1;
+    cl.playerstate.stats[PLAYERSTATE_GAME_RESULT] = 0;
+    cl.playerstate_valid = true;
+    cls.state = ca_active;
     snprintf(cl.configstrings[CS_WORLD], sizeof(cl.configstrings[CS_WORLD]), "%s", "Human02");
 
     BZ_TT_PublishSnapshotFromClient();
@@ -207,6 +210,7 @@ static void test_snapshot_reflects_player_and_configstrings(void) {
     ASSERT_EQ_INT(player->resource_food_used, 12);
     ASSERT_EQ_INT(player->resource_food_cap, 40);
     ASSERT_EQ_INT(player->resource_hero_tokens, 1);
+    ASSERT_EQ_INT(player->game_result, BZ_TT_GAME_RESULT_VICTORY);
 
     char map_name[64] = {0};
     ASSERT(BZ_TTSnapshot_MapName(snap, map_name, sizeof(map_name)));
@@ -219,6 +223,31 @@ static void test_snapshot_reflects_player_and_configstrings(void) {
      * masquerading as success. */
     ASSERT(!BZ_TTSnapshot_ConfigString(snap, CS_WORLD + 1, cs, sizeof(cs)));
 
+    BZ_TTSnapshot_Release(snap);
+}
+
+static void test_game_result_requires_active_authoritative_state(void) {
+    reset_all();
+    cl.playerstate.stats[PLAYERSTATE_GAME_RESULT] = 1;
+    cls.state = ca_connected;
+    BZ_TT_PublishSnapshotFromClient();
+    const bzTTSnapshot_t *snap = BZ_TT_Latest();
+    ASSERT_NOT_NULL(snap);
+    ASSERT_EQ_INT(BZ_TTSnapshot_Player(snap)->game_result, BZ_TT_GAME_RESULT_NONE);
+    BZ_TTSnapshot_Release(snap);
+
+    cls.state = ca_active;
+    BZ_TT_PublishSnapshotFromClient();
+    snap = BZ_TT_Latest();
+    ASSERT_NOT_NULL(snap);
+    ASSERT_EQ_INT(BZ_TTSnapshot_Player(snap)->game_result, BZ_TT_GAME_RESULT_NONE);
+    BZ_TTSnapshot_Release(snap);
+
+    cl.playerstate_valid = true;
+    BZ_TT_PublishSnapshotFromClient();
+    snap = BZ_TT_Latest();
+    ASSERT_NOT_NULL(snap);
+    ASSERT_EQ_INT(BZ_TTSnapshot_Player(snap)->game_result, BZ_TT_GAME_RESULT_DEFEAT);
     BZ_TTSnapshot_Release(snap);
 }
 
@@ -770,6 +799,7 @@ void run_bz_tabletop_transport_tests(void) {
     RUN_TEST(test_retained_snapshot_is_immutable_across_a_later_publish);
     RUN_TEST(test_retain_and_release_are_reference_counted);
     RUN_TEST(test_snapshot_reflects_player_and_configstrings);
+    RUN_TEST(test_game_result_requires_active_authoritative_state);
     RUN_TEST(test_configstring_count_is_zero_for_null_snapshot);
     RUN_TEST(test_configstring_count_and_iteration_bounds);
     RUN_TEST(test_map_bounds_only_valid_when_refresh_prepped);

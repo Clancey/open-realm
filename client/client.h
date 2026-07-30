@@ -79,6 +79,7 @@ struct client_state {
     struct frame frame;
     VECTOR2 startingPosition;
     PLAYER playerstate;
+    BOOL playerstate_valid;
     struct {
         BOOL active;
         VECTOR2 origin;

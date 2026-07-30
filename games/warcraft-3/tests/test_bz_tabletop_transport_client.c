@@ -104,6 +104,8 @@ static void test_real_packet_parse_populates_snapshot(void) {
 
     ASSERT_EQ_INT(cl.frame.serverframe, 1);
     ASSERT_STR_EQ(cl.configstrings[CS_WORLD], "TestMap");
+    ASSERT(cl.playerstate_valid);
+    ASSERT(cls.state != ca_active); /* only CL_PrepRefresh may publish active after assets register */
 
     BZ_TT_PublishSnapshotFromClient();
     const bzTTSnapshot_t *snap = BZ_TT_Latest();

@@ -15,6 +15,7 @@
  */
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
@@ -32,6 +33,7 @@ static int cl_init_calls;
 static int cl_frame_calls;
 static int cl_shutdown_calls;
 static int sv_init_calls;
+static atomic_int sv_map_calls;
 static int sv_shutdown_calls;
 static volatile bool cl_init_delay_requested; /* see test_stop_during_starting_skips_running below */
 
@@ -59,12 +61,13 @@ void SCR_UpdateScreen(DWORD msec) { (void)msec; }
 
 void SV_Init(void) { sv_init_calls++; svs.initialized = true; }
 void SV_Frame(DWORD msec) { (void)msec; }
-void SV_Map(LPCSTR pFilename) { (void)pFilename; }
+void SV_Map(LPCSTR pFilename) { (void)pFilename; atomic_fetch_add(&sv_map_calls, 1); }
 void SV_Shutdown(void) { sv_shutdown_calls++; svs.initialized = false; }
 
 static void reset_counters(void) {
     cl_init_calls = cl_frame_calls = cl_shutdown_calls = 0;
     sv_init_calls = sv_shutdown_calls = 0;
+    atomic_store(&sv_map_calls, 0);
     svs.initialized = false;
     cl_init_delay_requested = false;
 }
@@ -84,6 +87,16 @@ static bool wait_for_state(bzTabletopLifecycle_t *lc, bzTabletopState_t want, in
         waited_ms += 5;
     }
     return BZ_TabletopGetState(lc) == want;
+}
+
+static bool wait_for_map_calls(int want, int timeout_ms) {
+    struct timespec step = { 0, 5L * 1000L * 1000L };
+    int waited_ms = 0;
+    while (atomic_load(&sv_map_calls) < want && waited_ms < timeout_ms) {
+        nanosleep(&step, NULL);
+        waited_ms += 5;
+    }
+    return atomic_load(&sv_map_calls) >= want;
 }
 
 static void test_valid_init_reaches_running(void) {
@@ -142,6 +155,21 @@ static void test_suspend_resume_transitions(void) {
 
     BZ_TabletopStop(lc);
     ASSERT_EQ_INT(BZ_TabletopGetState(lc), BZ_TABLETOP_STATE_STOPPED);
+    BZ_TabletopDestroy(lc);
+}
+
+static void test_map_queue_runs_only_on_engine_thread(void) {
+    reset_counters();
+    const char *argv[] = { "test_bz_tabletop_lifecycle", "-data", "build/tests", "+com_frame_limit", "0" };
+    bzTabletopLifecycle_t *lc = BZ_TabletopCreate(5, argv);
+    BZ_TabletopStart(lc);
+
+    ASSERT(BZ_TabletopSubmitMap(lc, "Maps\\Campaign\\Human02.w3m"));
+    ASSERT(wait_for_map_calls(1, 2000));
+    ASSERT(!BZ_TabletopSubmitMap(lc, "bad\"map"));
+
+    BZ_TabletopStop(lc);
+    ASSERT(!BZ_TabletopSubmitMap(lc, "Maps\\Campaign\\Human02.w3m"));
     BZ_TabletopDestroy(lc);
 }
 
@@ -329,6 +357,7 @@ void run_bz_tabletop_lifecycle_tests(void) {
     RUN_TEST(test_valid_init_reaches_running);
     RUN_TEST(test_bad_init_reaches_failed_with_error);
     RUN_TEST(test_suspend_resume_transitions);
+    RUN_TEST(test_map_queue_runs_only_on_engine_thread);
     RUN_TEST(test_stop_blocks_until_stopped_and_is_idempotent);
     RUN_TEST(test_concurrent_stop_calls_do_not_crash_or_hang);
     RUN_TEST(test_start_after_terminal_state_is_rejected);

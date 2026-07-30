@@ -5,6 +5,11 @@
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    char text[BZ_TABLETOP_MAP_PATH_MAX + 8];
+} bzTabletopCommand_t;
 
 struct bzTabletopLifecycle_s {
     int argc;
@@ -22,6 +27,8 @@ struct bzTabletopLifecycle_s {
     bzTabletopState_t state;
     volatile bool stop_requested;
     LPCSTR last_error; /* points at a BZ_RuntimeInitResultString() literal, or NULL */
+    bzTabletopCommand_t commands[BZ_TABLETOP_COMMAND_QUEUE_CAPACITY];
+    unsigned command_read, command_count;
 };
 
 /* Sys_Quit() runs synchronously on whichever thread calls Com_Quit() —
@@ -31,6 +38,25 @@ struct bzTabletopLifecycle_s {
  * process-wide singleton, and correctly scopes multiple concurrent
  * lifecycle instances to their own engine thread. */
 static __thread bzTabletopLifecycle_t *tls_current_lc = NULL;
+
+/* Drains commands under the lifecycle lock, then executes without holding it. */
+static void run_queued_commands(bzTabletopLifecycle_t *lc) {
+    bzTabletopCommand_t command;
+
+    for (;;) {
+        pthread_mutex_lock(&lc->lock);
+        if (!lc->command_count) {
+            pthread_mutex_unlock(&lc->lock);
+            return;
+        }
+        command = lc->commands[lc->command_read];
+        lc->command_read = (lc->command_read + 1) % BZ_TABLETOP_COMMAND_QUEUE_CAPACITY;
+        lc->command_count--;
+        pthread_mutex_unlock(&lc->lock);
+        if (!BZ_RuntimeExecuteCommand(command.text))
+            fprintf(stderr, "BZ_Tabletop: engine rejected command '%s'\n", command.text);
+    }
+}
 
 void Sys_Quit(void) {
     bzTabletopLifecycle_t *lc = tls_current_lc;
@@ -108,6 +134,8 @@ static void *EngineThreadMain(void *arg) {
         if (stop) {
             break;
         }
+
+        run_queued_commands(lc);
 
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -278,6 +306,29 @@ void BZ_TabletopResume(bzTabletopLifecycle_t *lc) {
         pthread_cond_broadcast(&lc->cond);
     }
     pthread_mutex_unlock(&lc->lock);
+}
+
+bool BZ_TabletopSubmitMap(bzTabletopLifecycle_t *lc, LPCSTR map) {
+    size_t length;
+
+    if (!lc || !map || !(length = strlen(map)) || length >= BZ_TABLETOP_MAP_PATH_MAX ||
+        strpbrk(map, "\"\r\n;")) {
+        fprintf(stderr, "BZ_TabletopSubmitMap: invalid map path\n");
+        return false;
+    }
+    pthread_mutex_lock(&lc->lock);
+    if ((lc->state != BZ_TABLETOP_STATE_RUNNING && lc->state != BZ_TABLETOP_STATE_SUSPENDED) ||
+        lc->command_count == BZ_TABLETOP_COMMAND_QUEUE_CAPACITY) {
+        fprintf(stderr, "BZ_TabletopSubmitMap: lifecycle unavailable or command queue full\n");
+        pthread_mutex_unlock(&lc->lock);
+        return false;
+    }
+    unsigned write = (lc->command_read + lc->command_count) % BZ_TABLETOP_COMMAND_QUEUE_CAPACITY;
+    snprintf(lc->commands[write].text, sizeof(lc->commands[write].text), "map \"%s\"", map);
+    lc->command_count++;
+    pthread_cond_broadcast(&lc->cond);
+    pthread_mutex_unlock(&lc->lock);
+    return true;
 }
 
 void BZ_TabletopStop(bzTabletopLifecycle_t *lc) {
