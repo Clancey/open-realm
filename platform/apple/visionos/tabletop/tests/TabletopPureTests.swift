@@ -50,6 +50,7 @@ enum TabletopPureTests {
         testDiskCache()
         testDescriptorErrorPaths()
         await testRenderPipeline()
+        await testSessionModelLifecycle()
         guard failures == 0 else {
             print("TabletopPureTests: \(failures) failure(s)")
             fatalError("TabletopPureTests failed")
@@ -1764,6 +1765,59 @@ enum TabletopPureTests {
             expect(false, "render pipeline actor failed: \(error)")
         }
     }
+
+    @MainActor
+    private static func testSessionModelLifecycle() async {
+        let first = TabletopMapRecord(
+            edition: .roc, source: .campaign, campaignIndex: 1, missionIndex: 1,
+            campaign: "Campaign", title: "First", subtitle: "", mapPath: "Maps/First.w3m")
+        let second = TabletopMapRecord(
+            edition: .roc, source: .campaign, campaignIndex: 1, missionIndex: 2,
+            campaign: "Campaign", title: "Second", subtitle: "", mapPath: "Maps/Second.w3m")
+        let transport = SessionTestTransport()
+        let model = TabletopSessionModel(
+            modeName: "test", transport: transport,
+            renderProvider: FixtureWarcraftRenderProvider(), commands: transport,
+            catalogs: [.roc: [first, second]])
+        do {
+            try await model.prepare()
+            expect(model.productState == .playing(first) && model.renderSnapshot.sessionID == 1,
+                   "session preparation configures, starts, submits, and publishes the first active snapshot")
+            model.selectMap(second.id)
+            expect(model.selectedMapID == first.id, "running sessions reject map selection changes")
+            await model.setPaused(true, reason: .background)
+            await model.setPaused(true, reason: .user)
+            await model.setPaused(false, reason: .background)
+            expect(model.productState == .paused(first), "one remaining pause owner keeps simulation suspended")
+            await model.setPaused(false, reason: .user)
+            expect(model.productState == .playing(first), "last pause owner resumes simulation")
+            model.smartPoint(x: 1, y: 2)
+            let posted = await withTaskGroup(of: Bool.self) { group in
+                group.addTask { await transport.waitForCommand() }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(1))
+                    return false
+                }
+                let result = await group.next() ?? false
+                group.cancelAll()
+                return result
+            }
+            let running = await transport.state()
+            expect(posted && running.starts == 1 && running.configured == [.roc] &&
+                   running.maps == [first.mapPath] && running.suspends == 1 &&
+                   running.resumes == 1 && running.commands == 1,
+                   "session lifecycle owns product transport and typed command calls exactly once")
+            await model.stop()
+            let stopped = await transport.state()
+            expect(stopped.stops == 1 && model.renderSnapshot == .empty,
+                   "session stop cancels workers, stops transport once, and clears copied render state")
+            model.selectMap(second.id)
+            expect(model.selectedMapID == second.id, "stopped sessions accept a new map generation")
+        } catch {
+            expect(false, "session model lifecycle failed: \(error)")
+            await model.stop()
+        }
+    }
 }
 
 private actor PollingTestTransport: TabletopSnapshotTransport {
@@ -1785,6 +1839,60 @@ private actor EmptyPollingTransport: TabletopSnapshotTransport {
     private var polls = 0
     func poll() async throws -> TabletopSnapshot? { polls += 1; return nil }
     func pollCount() -> Int { polls }
+}
+
+private struct SessionTransportState: Sendable {
+    var starts = 0
+    var stops = 0
+    var suspends = 0
+    var resumes = 0
+    var configured: [TabletopEdition] = []
+    var maps: [String] = []
+    var commands = 0
+}
+
+private actor SessionTestTransport: TabletopProductTransport, TabletopCommandTransport {
+    private var value = SessionTransportState()
+    private var active = false
+    private var sessionID: UInt64 = 0
+    private var generation: UInt64 = 0
+    private let commandEvents: AsyncStream<Void>
+    private let commandContinuation: AsyncStream<Void>.Continuation
+
+    init() {
+        (commandEvents, commandContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+    }
+
+    func configure(edition: TabletopEdition) async throws { value.configured.append(edition) }
+    func start() async throws {
+        value.starts += 1; active = true; sessionID &+= 1; generation = 0
+    }
+    func submitMap(_ map: String) async throws { value.maps.append(map) }
+    func poll() async throws -> TabletopSnapshot? {
+        guard active else { return nil }
+        generation &+= 1
+        var snapshot = FixtureSnapshotSource.snapshot(generation: generation)
+        snapshot.sessionID = sessionID
+        snapshot.mapName = value.maps.last
+        return snapshot
+    }
+    func suspend() async { value.suspends += 1 }
+    func resume() async { value.resumes += 1 }
+    func stop() async {
+        guard active else { return }
+        active = false; value.stops += 1
+    }
+    func post(_ command: TabletopCommand) async throws {
+        guard active else { throw TabletopTransportError.terminal }
+        guard command.sessionID == sessionID else { throw TabletopTransportError.staleSession }
+        value.commands += 1
+        commandContinuation.yield()
+    }
+    func waitForCommand() async -> Bool {
+        var iterator = commandEvents.makeAsyncIterator()
+        return await iterator.next() != nil
+    }
+    func state() -> SessionTransportState { value }
 }
 
 private enum TestLeaseError: Error { case failed }

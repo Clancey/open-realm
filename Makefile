@@ -87,6 +87,8 @@ UI_WOW_LIB       := $(LIB_DIR)/libui-wow$(LIB_EXT)
 UI_SC2_LIB       := $(LIB_DIR)/libui-sc2$(LIB_EXT)
 WOW_BINARY   := $(BIN_DIR)/openwow$(EXE_EXT)
 SC2_BINARY   := $(BIN_DIR)/opensc2$(EXE_EXT)
+SC2DATA      ?= data/StarCraft2
+export SC2_DATA := $(SC2DATA)
 WOW_CFLAGS   := $(CFLAGS) -I$(WOW_DIR) -DWOW -DOW3_LOAD_ALL_MPQS -Wno-unused-function
 WOW_TEST_CFLAGS := $(WOW_CFLAGS) -DTOOL_COMMON_NO_MPQ -Itests
 LUA_CFLAGS   := $(shell pkg-config --cflags lua5.4 2>/dev/null || pkg-config --cflags lua 2>/dev/null)
@@ -172,10 +174,10 @@ build-run-wow-map: openwow
 	$(WOW_BINARY) -data $(WOW_INSTALL_DATA_DIR) +map World/Maps/Azeroth/Azeroth.wdt
 
 run-sc2: $(SC2_BINARY)
-	$(SC2_BINARY) -data data/StarCraft2 +map TRaynor01 $(ARGS)
+	$(SC2_BINARY) -data "$$SC2_DATA" +map TRaynor01 $(ARGS)
 
 build-run-sc2: opensc2
-	$(SC2_BINARY) -data data/StarCraft2 +map TRaynor01
+	$(SC2_BINARY) -data "$$SC2_DATA" +map TRaynor01
 
 m2tool-wow-orcmale-player: m2tool
 	$(BIN_DIR)/m2tool$(EXE_EXT) \
@@ -362,14 +364,15 @@ SC2_HUD_LIVE_BIN := $(BIN_DIR)/test_sc2_hud_live$(EXE_EXT)
 SC2_HUD_LIVE_SRC := $(SC2_TEST_DIR)/test_sc2_hud_live.c
 
 $(SC2_HUD_LIVE_BIN): $(SC2_HUD_LIVE_SRC) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -I. -Itests -DSC2_BINARY=\"$(SC2_BINARY)\" -DSC2_DATA=\"data/StarCraft2\" \
+	$(CC) $(CFLAGS) -I. -Itests -DSC2_BINARY=\"$(SC2_BINARY)\" \
 	    -o $@ $(SC2_HUD_LIVE_SRC) -lm
 
 # Requires Blizzard SC2 archives under data/StarCraft2/ — local-only.
 test-sc2-live: opensc2 $(SC2_HUD_LIVE_BIN)
-	@if [ ! -d data/StarCraft2 ]; then \
-	    echo "SKIP test-sc2-live: data/StarCraft2 not found"; exit 0; \
+	@if [ ! -d "$$SC2_DATA" ]; then \
+	    echo "SKIP test-sc2-live: $$SC2_DATA not found"; exit 0; \
+	else \
+	    $(SC2_HUD_LIVE_BIN); \
 	fi
-	$(SC2_HUD_LIVE_BIN)
 
 .PHONY: default build shared tools font $(TOOL_NAMES) diag clean download renderer-wow game-wow ui-wow openwow renderer-sc2 game-sc2 opensc2 run run-sc2 build-run-sc2 m2tool-wow-orcmale-player install-wow test-wow-appearance test-wow-combat test-wow-abilities test-wow-game test-wow-ui test-wow-assets test-sc2 test-sc2-assets test-sc2-live $(WC3_PHONY)
