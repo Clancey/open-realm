@@ -38,6 +38,7 @@ xcrun swiftc -parse-as-library \
     "$TABLETOP/app/TabletopReconciliation.swift" \
     "$TABLETOP/app/TabletopGesture.swift" \
     "$TABLETOP/app/TabletopControls.swift" \
+    "$TABLETOP/app/TabletopSessionModel.swift" \
     "$TABLETOP/tests/TabletopPureTests.swift" \
     -o "$OUT"
 "$OUT"
@@ -53,6 +54,14 @@ fi
 bz_tabletop_exact_item_classes '34656472,66696c72,66746172,676e6b63,74767270,7a697772'
 if bz_tabletop_exact_item_classes '34656472,66696c72,66746172,676e6b63,74767270,7a697772,12345678'; then
     echo "test-host.sh: late item class check accepted an unexpected class" >&2
+    exit 1
+fi
+if ! bz_tabletop_item_summary_valid '' ''; then
+    echo "test-host.sh: an exact empty item set incorrectly required an item publication phase" >&2
+    exit 1
+fi
+if bz_tabletop_item_summary_valid '34656472' ''; then
+    echo "test-host.sh: a non-empty expected item set accepted a missing item publication phase" >&2
     exit 1
 fi
 

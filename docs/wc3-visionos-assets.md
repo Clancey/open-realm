@@ -297,6 +297,11 @@ channel spread 5), so Swift converts them exactly to unlit black alpha masks.
 Colored modulate textures remain explicit unsupported materials; mode 6 applies
 the documented 2x luminance before conversion.
 
+A bounded TFT `HumanX01` simulator probe found 60 explicit colored-modulate
+placeholder materials, primarily on `ArcaneObservatory.mdx` and `Ziggurat.mdx`.
+Use `NightElfX01` for zero-placeholder TFT acceptance until RealityKit gains an
+authoritative colored destination-modulate equivalent.
+
 MDX texture records contain a 260-byte path field. The ABI identity buffer is
 therefore 260 bytes; treating it as a conventional 256-byte path truncates
 valid `TEXS` records. Material, layer, geoset, and node record sizes include

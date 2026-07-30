@@ -21,6 +21,7 @@
 
 #include "test_framework.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,13 +52,25 @@ static int g_frame_start[16];
 static int g_frame_end[16];
 static int g_nframes;
 
+/* popen() needs shell quoting; reject expansion syntax instead of silently running a different path. */
+static bool safe_shell_path(const char *path) { return path && !strpbrk(path, "\"\\$`"); }
+static const char *sc2_data_path(void) {
+    const char *path = getenv("SC2_DATA");
+    return path && *path ? path : SC2_DATA;
+}
+
 static void capture_output(void) {
     if (g_nlines > 0) return;  /* already captured */
 
+    const char *data = sc2_data_path();
+    if (!safe_shell_path(SC2_BINARY) || !safe_shell_path(data)) {
+        fprintf(stderr, "FATAL: unsafe SC2 binary or data path\n");
+        return;
+    }
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
-             "%s -data %s +r_module stdout +map TRaynor01 +com_frame_limit 5 2>/dev/null",
-             SC2_BINARY, SC2_DATA);
+             "\"%s\" -data \"%s\" +r_module stdout +map TRaynor01 +com_frame_limit 5 2>/dev/null",
+             SC2_BINARY, data);
 
     FILE *fp = popen(cmd, "r");
     if (!fp) { fprintf(stderr, "FATAL: popen failed for: %s\n", cmd); return; }
@@ -400,7 +413,7 @@ static void test_hud_no_unbound_text_in_resource_bar(void) {
 int main(void) {
     printf("=== SC2 HUD Live Integration Tests ===\n");
     printf("Binary : %s\n", SC2_BINARY);
-    printf("Data   : %s\n\n", SC2_DATA);
+    printf("Data   : %s\n\n", sc2_data_path());
 
     printf("[binary runs + frames]\n");
     RUN_TEST(test_binary_runs_and_emits_frames);
