@@ -374,6 +374,16 @@ private enum LiveWarcraftAssetCopy {
 
     private static func resolveMetadata(_ abiVersion: UInt32, entity: TabletopEntitySnapshot)
         -> (UInt32, bzTTAssetMetadata_t) {
+        /* Model-only effects have no object-data row; class lookup previously replaced valid missiles with placeholders. */
+        guard entity.metadata.hasClassIdentity else {
+            var output = bzTTAssetMetadata_t()
+            output.team_color = UInt32(entity.metadata.player)
+            output.tint_r = 1
+            output.tint_g = 1
+            output.tint_b = 1
+            output.tint_a = 1
+            return (UInt32(BZ_TTA_OK.rawValue), output)
+        }
         var input = bzTTEntityMetadataInput_t()
         input.class_id = entity.metadata.classID
         input.override_mask = UInt32(BZ_TTA_METADATA_OVERRIDE_TEAM_COLOR)

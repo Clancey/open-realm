@@ -4,9 +4,11 @@ import SwiftUI
 @main
 struct OpenRealmTabletopApp: App {
     @StateObject private var model: TabletopSessionModel
+    private let automatedLaunch: Bool
 
     init() {
         let environment = ProcessInfo.processInfo.environment
+        automatedLaunch = environment["BZ_TABLETOP_AUTOSTART"] == "1"
         do {
             let runtimeMode = try TabletopRuntimeModeResolver.resolve(
                 environment: environment, bundlePath: Bundle.main.bundlePath)
@@ -30,10 +32,11 @@ struct OpenRealmTabletopApp: App {
                     throw TabletopTransportError.configuration(
                         "Remote connect is not supported by the native single-player product flow")
                 }
-                guard TabletopDataPreflight.isUsable(
-                    entries: try Self.dataEntries(dataPath), localMapRequired: true) else {
+                let dataEntries = try Self.dataEntries(dataPath)
+                guard TabletopDataPreflight.isUsable(entries: dataEntries, localMapRequired: true),
+                      TabletopDataPreflight.supportsProductCatalog(entries: dataEntries) else {
                     throw TabletopTransportError.configuration(
-                        "Live data path '\(dataPath)' is missing required Warcraft III data; " +
+                        "Live data path '\(dataPath)' requires root-level Warcraft III MPQ archives; " +
                         "run the production bundle staging target or set BZ_TABLETOP_DATA_PATH")
                 }
                 let arguments = [TabletopProduct.executable, "-data", dataPath]
@@ -65,11 +68,13 @@ struct OpenRealmTabletopApp: App {
                     renderProvider: provider, commands: live, catalogs: catalogs,
                     initialEdition: initialEdition,
                     progressStore: TabletopProgressStore(applicationSupport: applicationSupport))
-                if let map, let match = session.availableMaps.first(where: {
-                    $0.mapPath.caseInsensitiveCompare(map) == .orderedSame ||
-                    URL(fileURLWithPath: $0.mapPath).deletingPathExtension().lastPathComponent
-                        .caseInsensitiveCompare(map) == .orderedSame
-                }) { session.selectMap(match.id) }
+                if let map {
+                    guard let match = session.availableMaps.first(where: { $0.matches(map) }) else {
+                        throw TabletopTransportError.configuration(
+                            "Requested map '\(map)' is not present in the \(initialEdition.title) catalog")
+                    }
+                    session.selectMap(match.id)
+                }
                 _model = StateObject(wrappedValue: session)
             }
         } catch {
@@ -102,7 +107,7 @@ struct OpenRealmTabletopApp: App {
 
     var body: some Scene {
         WindowGroup(id: "launcher") {
-            TabletopLauncherView(model: model)
+            TabletopLauncherView(model: model, automatedLaunch: automatedLaunch)
         }
         .windowResizability(.contentSize)
 

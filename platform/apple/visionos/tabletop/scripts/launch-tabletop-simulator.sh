@@ -15,6 +15,10 @@ BOOT_OUT="$LOG_DIR/boot.out"
 BOOT_ERR="$LOG_DIR/boot.err"
 UDID=
 LAUNCH_PID=
+MAP="${OPENREALM_TABLETOP_MAP:-Human02}"
+EXPECTED_ITEM_CLASSES="${OPENREALM_TABLETOP_EXPECTED_ITEM_CLASSES:-$BZ_TABLETOP_EXPECTED_ITEM_CLASSES}"
+STRICT_HUMAN02=0
+test "$MAP" != Human02 || STRICT_HUMAN02=1
 
 wait_bounded() {
     wait_pid=$1
@@ -90,9 +94,10 @@ APP_CONTAINER=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" app)
 "$WC3_DATA_TOOL" stage "$APP_CONTAINER"
 
 SIMCTL_CHILD_BZ_TABLETOP_MODE=live \
-SIMCTL_CHILD_BZ_TABLETOP_MAP=Human02 \
+SIMCTL_CHILD_BZ_TABLETOP_MAP="$MAP" \
 SIMCTL_CHILD_BZ_TABLETOP_TFT="${OPENREALM_TABLETOP_TFT:-0}" \
 SIMCTL_CHILD_BZ_TABLETOP_ACCEPTANCE=1 \
+SIMCTL_CHILD_BZ_TABLETOP_AUTOSTART=1 \
 xcrun simctl launch --console --terminate-running-process "$UDID" "$BUNDLE_ID" >"$STDOUT" 2>"$STDERR" &
 LAUNCH_PID=$!
 RESIDENT=0
@@ -138,8 +143,8 @@ if ! grep -Fq "OpenRealmTabletop: first snapshot generation" "$LOG_DIR/combined.
     cat "$STDERR" >&2
     exit 1
 fi
-if ! grep -Fq 'CL_SendBegin: sending begin world="Maps\Campaign\Human02.w3m"' "$LOG_DIR/combined.log"; then
-    echo "launch-tabletop-simulator.sh: Human02 startup evidence is missing" >&2
+if ! grep -F 'CL_SendBegin: sending begin world="' "$LOG_DIR/combined.log" | grep -Fiq "$MAP"; then
+    echo "launch-tabletop-simulator.sh: $MAP startup evidence is missing" >&2
     cat "$STDERR" >&2
     exit 1
 fi
@@ -166,33 +171,36 @@ if [ -z "$INITIAL_SUMMARY" ] || [ -z "$STABLE_SUMMARY" ] || [ -z "$ITEM_SUMMARY"
     cat "$STDERR" >&2
     exit 1
 fi
-printf '%s\n' "$STABLE_SUMMARY" | awk '
+printf '%s\n' "$STABLE_SUMMARY" | awk -v strict="$STRICT_HUMAN02" '
 {
     for (i = 1; i <= NF; i++) {
         split($i, pair, "=")
         value[pair[1]] = pair[2]
     }
     split(value["terrain"], terrain, "x")
-    if (terrain[1] != 128 || terrain[2] != 128 || value["chunks"] != 16 ||
+    if (value["placeholders"] != 0 || value["placeholder_logs"] != 0 ||
+        value["metadata_logs"] != 0 || value["models"] < 1 ||
+        value["geosets"] < 1 || value["textured_materials"] < 1 ||
+        value["hits"] < 1 || value["misses"] < 1) exit 1
+    if (strict && (terrain[1] != 128 || terrain[2] != 128 || value["chunks"] != 16 ||
         value["terrain_textures"] != 9 || value["no_cliff"] != 2349 ||
         value["fog"] != 1 || value["entities"] != 1024 || value["active_visible"] != 2397 ||
-        value["overflow"] != 1373 || value["models"] < 1 ||
-        value["geosets"] < 1 || value["textured_materials"] < 1 ||
-        value["placeholders"] != 0 || value["placeholder_logs"] != 0 ||
-        value["metadata_logs"] != 0 || value["hits"] < 1 || value["misses"] < 1) exit 1
+        value["overflow"] != 1373)) exit 1
 }' || {
     echo "launch-tabletop-simulator.sh: asset/chunk/fog/cache thresholds failed: $STABLE_SUMMARY" >&2
     exit 1
 }
 CATEGORIES=$(printf '%s\n' "$STABLE_SUMMARY" | sed -nE 's/.* categories=([^ ]+).*/\1/p')
-for CATEGORY in unit building resource doodad destructable; do
+REQUIRED_CATEGORIES="unit building resource doodad"
+test "$STRICT_HUMAN02" = 0 || REQUIRED_CATEGORIES="$REQUIRED_CATEGORIES destructable"
+for CATEGORY in $REQUIRED_CATEGORIES; do
     case ",$CATEGORIES," in
         *,"$CATEGORY",*) ;;
         *) echo "launch-tabletop-simulator.sh: category $CATEGORY is missing" >&2; exit 1 ;;
     esac
 done
 ITEM_CLASSES=$(printf '%s\n' "$ITEM_SUMMARY" | sed -nE 's/.* item_classes=([^ ]+).*/\1/p')
-if ! bz_tabletop_exact_item_classes "$ITEM_CLASSES"; then
+if [ "$ITEM_CLASSES" != "$EXPECTED_ITEM_CLASSES" ]; then
     echo "launch-tabletop-simulator.sh: late item class set is incorrect: $ITEM_SUMMARY" >&2
     exit 1
 fi

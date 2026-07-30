@@ -4,8 +4,10 @@ struct TabletopLauncherView: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @ObservedObject var model: TabletopSessionModel
+    var automatedLaunch = false
     @State private var launcherState = TabletopLauncherState.waiting
     @State private var source = TabletopMapSource.campaign
+    @State private var attemptedAutomatedLaunch = false
 
     private var maps: [TabletopMapRecord] {
         let filtered = model.availableMaps.filter { $0.source == source }
@@ -55,6 +57,11 @@ struct TabletopLauncherView: View {
             if let first = maps.first, !maps.contains(where: { $0.id == model.selectedMapID }) {
                 model.selectMap(first.id)
             }
+        }
+        .task {
+            guard automatedLaunch, !attemptedAutomatedLaunch else { return }
+            attemptedAutomatedLaunch = true
+            await openTabletop()
         }
     }
 

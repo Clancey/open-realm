@@ -69,6 +69,14 @@ enum TabletopDataPreflight {
         let hasLooseMap = paths.contains(where: { $0.hasSuffix(".w3m") || $0.hasSuffix(".w3x") })
         return hasCommonJ && (!localMapRequired || hasLooseMap)
     }
+
+    static func supportsProductCatalog(entries: [TabletopDataEntry]) -> Bool {
+        entries.contains {
+            guard $0.isRegularFile else { return false }
+            let path = String($0.relativePath.lowercased().map { $0 == "\\" ? "/" : $0 })
+            return !path.contains("/") && path.hasSuffix(".mpq")
+        }
+    }
 }
 
 enum TabletopSnapshotValueValidator {

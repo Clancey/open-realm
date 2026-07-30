@@ -234,8 +234,9 @@ Resolution errors remain `unknown` with explicit placeholder diagnostics.
   scene delegate on this lane.
 
 Live mode is the production default. `BZ_TABLETOP_DATA_PATH` defaults to the
-app's `Resources/Warcraft III` directory and `BZ_TABLETOP_MAP` defaults to
-`Human02`; an explicit `BZ_TABLETOP_CONNECT` without a map selects remote mode.
+app's `Resources/Warcraft III` directory. The native catalog owns product map
+selection; an explicit acceptance `BZ_TABLETOP_MAP` must match that catalog or
+startup fails rather than launching another map.
 `BZ_TABLETOP_TFT=1` passes `-tft` to the embedded engine; omitted or `0` keeps
 ROC archive precedence, and other values fail configuration.
 Set `BZ_TABLETOP_MODE=fixture` only for deterministic tests.
@@ -244,7 +245,9 @@ accepts a regular MPQ file, or the exact root-relative loose
 `Scripts/common.j` plus a regular `.w3m`/`.w3x` for local-map startup
 (`common.j` alone is sufficient for a remote connect). Arbitrary nonempty
 directories are rejected in the launcher rather than producing a fake empty
-live session. An unknown mode is surfaced as an error, never silently demoted
+live session. Product catalog discovery additionally requires root-level MPQs;
+nested archives and loose maps remain valid only for the generic engine preflight
+contracts above. An unknown mode is surfaced as an error, never silently demoted
 to fixtures. Production builds invoke `wc3_data.sh stage` and fail unless
 `${BZ_WC3_DATA_DIR:-$HOME/Downloads/Warcraft III}` contains exactly
 `War3.mpq`, `War3x.mpq`, and `War3xLocal.mpq`; the bundle verifier requires
@@ -331,15 +334,18 @@ output. It also requires the linked lifecycle class, snapshot getter,
 configstring-count accessor, typed select-post, terrain-texture registration,
 and entity-metadata resolution symbols. No Xcode project is used.
 
-`launch-tabletop-simulator.sh` clones only a shutdown Apple Vision Pro device or,
-when none is available, creates a fresh disposable device from the available
-xrOS runtime. It boots that isolated device with a 120-second bound, installs identical signed
+`launch-tabletop-simulator.sh` creates a fresh disposable device from the
+available xrOS runtime. It boots that isolated device with a 120-second bound, installs identical signed
 code, and stages the same three real MPQs into the clone's private app-data
 container through `wc3_data.sh`. This avoids an unbounded CoreSimulator import
 of the roughly 717 MB sealed production bundle without weakening either bundle
 gate. It launches with `SIMCTL_CHILD_*`, captures stdout/stderr directly,
+selects the requested catalog map, and sets `BZ_TABLETOP_AUTOSTART=1` so the
+acceptance build invokes the same native Play/loading path without restoring
+command-line `+map` behavior. This generic flag is not set by product builds.
+The gate
 requires five seconds of residency plus a bounded wait for stable copied assets,
-transport initialization, first snapshot, and `Human02` begin evidence. The real-art gate also requires exactly
+transport initialization, first snapshot, and selected-map begin evidence. The default Human02 gate also requires exactly
 16 chunks for 128x128 tiles, one fog entity, 2,349 no-cliff sentinels, 2,397
 active transport entities before the explicit 1,024 cap (plus the documented
 desktop-only `model2` attachment render entity), authoritative terrain
@@ -347,7 +353,13 @@ and model textures with no placeholders, representative categories, and stable
 misses with increasing cache hits on a subsequent snapshot. Placeholder counts
 include both missing models and explicit placeholder-role materials; C
 placeholder/log-once counters remain separate and must also be zero. The
-production summary contains generic counts only. Canonical fixture identities
+late item summary must contain exactly the six expected item classes with zero
+placeholders, placeholder logs, and metadata logs in both ROC and TFT. Set
+`OPENREALM_TABLETOP_MAP` and `OPENREALM_TABLETOP_EXPECTED_ITEM_CLASSES` for a
+non-Human02 map; generic geometry remains bounded while the same zero-diagnostic
+contract applies. Model-only effects with class ID zero bypass object-data
+metadata resolution because they have no UnitData/ItemData row; their model
+configstring remains authoritative. Production summaries contain generic counts only. Canonical fixture identities
 and map-specific thresholds live in tests and this disposable acceptance
 script rather than as proprietary literals in the app binary. The launcher
 then terminates the app and deletes the clone. It never addresses `booted` or

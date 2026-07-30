@@ -7,6 +7,7 @@ enum TabletopPureTests {
     static func main() async {
         testLauncherReduction()
         testProductFlowReduction()
+        testProductMapSelection()
         testProductTransitionEffects()
         testAudioLifetime()
         testProgressPersistence()
@@ -20,6 +21,7 @@ enum TabletopPureTests {
         testConfigStringCopy()
         testSnapshotDiagnostics()
         testSnapshotValueValidation()
+        testEntityClassIdentity()
         testCommandLowering()
         testSpatialControls()
         testSemanticActions()
@@ -100,6 +102,16 @@ enum TabletopPureTests {
                "terminal state can return to product menu")
         expect(TabletopProductReducer.reduce(.menu, .resume) == .menu,
                "invalid inverse transitions are ignored")
+    }
+
+    private static func testProductMapSelection() {
+        let map = TabletopMapRecord(
+            edition: .roc, source: .campaign, campaignIndex: 1, missionIndex: 2,
+            campaign: "Campaign", title: "Mission", subtitle: "",
+            mapPath: "Maps\\Campaign\\Human02.w3m")
+        expect(map.matches("Human02"), "bare acceptance map name matches a Warcraft backslash path")
+        expect(map.matches("maps\\campaign\\human02.w3m"), "full map matching is case-insensitive")
+        expect(!map.matches("Prologue01"), "a different bare map name does not match")
     }
 
     private static func testProductTransitionEffects() {
@@ -400,6 +412,15 @@ enum TabletopPureTests {
         expect(!TabletopDataPreflight.isUsable(
             entries: [TabletopDataEntry(relativePath: "NotScripts/common.j", isRegularFile: true)],
             localMapRequired: false), "misleading script suffixes do not pass preflight")
+        expect(TabletopDataPreflight.supportsProductCatalog(
+            entries: [TabletopDataEntry(relativePath: "War3.mpq", isRegularFile: true)]),
+            "root-level MPQ archives support native catalog discovery")
+        expect(!TabletopDataPreflight.supportsProductCatalog(
+            entries: [TabletopDataEntry(relativePath: "nested/War3.mpq", isRegularFile: true)]),
+            "nested archives are rejected before catalog discovery")
+        expect(!TabletopDataPreflight.supportsProductCatalog(
+            entries: [TabletopDataEntry(relativePath: "Maps/Test.w3m", isRegularFile: true)]),
+            "loose maps are rejected before catalog discovery")
     }
 
     private static func testSnapshotValueValidation() {
@@ -414,6 +435,7 @@ enum TabletopPureTests {
             } catch TabletopTransportError.malformedSnapshot {
                 expect(true, "fog dimension overflow is explicit")
             }
+
             do {
                 try TabletopSnapshotValueValidator.layoutCounts(buttons: 13, inventory: 0, queue: 0)
                 expect(false, "oversized unit layout was accepted")
@@ -423,6 +445,13 @@ enum TabletopPureTests {
         } catch {
             expect(false, "valid snapshot value unexpectedly failed: \(error)")
         }
+    }
+
+    private static func testEntityClassIdentity() {
+        expect(!TabletopEntityMetadata().hasClassIdentity,
+               "model-only effects do not request object-data metadata")
+        expect(TabletopEntityMetadata(classID: fourCC("hfoo")).hasClassIdentity,
+               "gameplay classes request authoritative object-data metadata")
     }
 
     private static func testCommandLowering() {

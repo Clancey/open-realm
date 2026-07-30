@@ -22,6 +22,12 @@ struct TabletopMapRecord: Identifiable, Codable, Equatable, Sendable {
     var subtitle: String
     var mapPath: String
     var id: String { "\(edition.rawValue):\(mapPath.lowercased())" }
+
+    func matches(_ selection: String) -> Bool {
+        if mapPath.caseInsensitiveCompare(selection) == .orderedSame { return true }
+        let name = mapPath.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map(String.init) ?? ""
+        return (name as NSString).deletingPathExtension.caseInsensitiveCompare(selection) == .orderedSame
+    }
 }
 
 enum TabletopGameResult: UInt8, Codable, Equatable, Sendable {
