@@ -159,6 +159,21 @@ static void test_menu_mode_runs_client_only_until_shutdown(void) {
     ASSERT_EQ_INT(cl_frame_calls, 2);
 }
 
+static void test_bare_map_command_starts_selected_map(void) {
+    LPCSTR argv[] = { "test_bz_runtime", "-data", "build/tests", "+com_frame_limit", "0" };
+    bzRuntimeArgs_t args = { 5, argv };
+
+    reset_counters();
+    ASSERT_EQ_INT(BZ_RuntimeInit(&args), BZ_RUNTIME_INIT_OK);
+    ASSERT(BZ_RuntimeExecuteCommand("map \"Maps\\Campaign\\Human02.w3m\""));
+    ASSERT_EQ_INT(cl_begin_loading_map_calls, 1);
+    ASSERT_EQ_INT(sv_map_calls, 1);
+    ASSERT_STR_EQ(last_loading_map, "Maps\\Campaign\\Human02.w3m");
+    ASSERT_STR_EQ(last_sv_map, "Maps\\Campaign\\Human02.w3m");
+    BZ_RuntimeShutdown();
+    ASSERT(!BZ_RuntimeExecuteCommand("map Human02"));
+}
+
 static void test_listen_server_mode_resolves_map_and_stops_at_frame_limit(void) {
     LPCSTR argv[] = {
         "test_bz_runtime", "-data", "build/tests",
@@ -276,6 +291,7 @@ void run_bz_runtime_tests(void) {
     RUN_TEST(test_missing_data_dir_is_explicit_error);
     RUN_TEST(test_bad_data_dir_is_explicit_error);
     RUN_TEST(test_menu_mode_runs_client_only_until_shutdown);
+    RUN_TEST(test_bare_map_command_starts_selected_map);
     RUN_TEST(test_listen_server_mode_resolves_map_and_stops_at_frame_limit);
     RUN_TEST(test_remote_connect_mode_skips_local_map_load);
     RUN_TEST(test_dedicated_mode_without_map_fails_and_tears_itself_down);

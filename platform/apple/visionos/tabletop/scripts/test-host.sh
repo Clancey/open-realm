@@ -24,6 +24,7 @@ xcrun swiftc -parse-as-library \
     "$TABLETOP/app/TabletopSnapshot.swift" \
     "$TABLETOP/app/TabletopCommand.swift" \
     "$TABLETOP/app/TabletopAdapter.swift" \
+    "$TABLETOP/app/TabletopProductFlow.swift" \
     "$TABLETOP/app/TabletopLiveValues.swift" \
     "$TABLETOP/app/WarcraftRenderDescriptors.swift" \
     "$TABLETOP/app/WarcraftAssetAdapter.swift" \

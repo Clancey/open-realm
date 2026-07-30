@@ -39,6 +39,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)start;
 - (void)suspend;
 - (void)resume;
+- (BOOL)submitMap:(NSString *)map;
 // Blocks until the engine thread has shut down and been joined.
 - (void)stop;
 

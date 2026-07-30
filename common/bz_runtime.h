@@ -34,6 +34,7 @@ typedef enum {
 bzRuntimeInitResult_t BZ_RuntimeInit(const bzRuntimeArgs_t *args);
 LPCSTR BZ_RuntimeInitResultString(bzRuntimeInitResult_t result);
 bool BZ_RuntimeFrame(DWORD elapsed_msec);
+bool BZ_RuntimeExecuteCommand(LPCSTR command);
 void BZ_RuntimeShutdown(void);
 
 #endif

@@ -7,7 +7,6 @@ enum TabletopProduct {
     static let bundleIdentifier = "org.openrealm.visionos.tabletop"
     static let executable = "OpenRealmTabletop"
     static let bundledDataRelativePath = "Resources/Warcraft III"
-    static let defaultMap = "Human02"
 }
 
 enum TabletopRuntimeModeResolver {
@@ -21,7 +20,7 @@ enum TabletopRuntimeModeResolver {
                     "Live mode requires bundled Warcraft III data or BZ_TABLETOP_DATA_PATH")
             }
             let connect = nonEmpty(environment["BZ_TABLETOP_CONNECT"])
-            let map = nonEmpty(environment["BZ_TABLETOP_MAP"]) ?? (connect == nil ? TabletopProduct.defaultMap : nil)
+            let map = nonEmpty(environment["BZ_TABLETOP_MAP"])
             let tft: Bool
             switch environment["BZ_TABLETOP_TFT"] {
             case nil, "0": tft = false

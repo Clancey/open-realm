@@ -30,6 +30,63 @@ TabletopSceneState (pure reconciliation plan)
 RealityTabletopReconciler (RealityKit ownership)
 ```
 
+## Layer 7 native single-player product flow
+
+The app starts in a native launcher; it never supplies a default `+map`. Before
+the engine starts, `BZ_TTCatalog_Discover()` opens staged MPQs in engine
+precedence order, excludes `War3x*` archives for ROC, prefers
+`UI\CampaignStrings_exp.txt` for TFT, falls back to
+`UI\CampaignStrings.txt`, and enumerates `.w3m`/`.w3x` entries. The shared
+`games/warcraft-3/common/campaign.c` keyed-text parser supplies campaign,
+mission, and authoritative map paths to both desktop UI and the native catalog.
+No campaign container parser is needed: retail archive inspection proved these
+text files are the metadata source.
+
+```text
+menu -> loading -> playing <-> paused -> victory|defeat|draw
+  ^         |          |                    |
+  +---------+----------+---- error ----------+
+  ^                                      retry / next map
+  +---------------- return to menu ------------+
+```
+
+`TabletopProductState` owns the mutually exclusive native states.
+`TabletopPauseReason` separately tracks user and background suspension so
+foregrounding never resumes a user-paused match. Retry and next-map stop the
+single-shot lifecycle and create a fresh bridge generation; no engine thread is
+restarted. A selected map is queued with `BZ_TabletopSubmitMap()` and executed
+on the engine thread as the bare command `map "<path>"`. In-code commands never
+use the command-line-only `+` prefix.
+
+Loading remains client-owned: `CL_BeginLoadingMap()` sets the loading state, and
+only `CL_PrepRefresh()` publishes `ca_active` after required map/model/image/font
+registration. Swift waits for an active copied snapshot and does not infer
+readiness from visible entities.
+
+Victory/defeat originates in JASS `RemovePlayer`, is retained in
+`playerState_t.stats[PLAYERSTATE_GAME_RESULT]`, crosses the normal player-state
+delta, and is copied as `bzTTPlayer_t.game_result` in transport ABI v3. Swift
+does not inspect entities to infer a result. Campaign `next` is offered only
+when catalog metadata contains the next mission in the same campaign.
+
+Progress is a versioned JSON envelope written atomically under:
+
+```text
+<Application Support>/OpenRealm/WarcraftTabletop/v1/{roc,tft}/progress.json
+<Application Support>/OpenRealm/WarcraftRenderer/v2/{roc,tft}/
+```
+
+ROC/TFT state and caches are isolated. Corrupt or unknown-version progress is
+reported; it is never silently reset.
+
+Entity-event sounds retain the existing server/configstring/client resolution
+path. The visionOS backend copies bounded WAV payloads into the
+`bz_tabletop_audio.h` queue. Device builds drain it into `AVAudioPlayer`;
+simulator builds configure an explicit dummy sink and count dropped events.
+Pause/resume pauses both engine frames and active native players. Missing audio,
+oversized payloads, queue overflow, initialization, and decode failures are
+reported without per-frame logging.
+
 Layer 6 controls, command flow, state ownership, and simulator checks are
 documented in [visionos-tabletop-controls.md](visionos-tabletop-controls.md).
 
@@ -89,7 +146,7 @@ animation selection, and generation reconciliation. RealityKit only consumes
 versioned cache under:
 
 ```text
-<Application Support>/OpenRealm/WarcraftRenderer/v2/
+<Application Support>/OpenRealm/WarcraftRenderer/v2/{roc,tft}/
 ```
 
 Writes are atomic. Reloads validate the versioned key, full fingerprint, and
@@ -622,8 +679,9 @@ output, or eventually running a built binary):
   never moved locally; the separate tabletop transform supports bounded
   translation, rotation, and scale without emitting game commands.
 - No SDL/OpenGL window, no SDL input polling, no Xcode project.
-- No audio output: Layer 2 supplies the explicit, log-once no-op backend
-  `platform/apple/visionos/tabletop/client/s_tabletop_null.c`.
+- Simulator audio uses an explicit dummy sink. Device audio uses AVFoundation;
+  sound-kit-name playback remains explicitly unsupported while entity-event WAV
+  playback is supported.
 - No device code signing: the `xros` static targets and production app are
   deliberately unsigned; the xrsimulator app is ad-hoc signed.
   Producing an installable device build requires an external provisioning
@@ -666,12 +724,12 @@ partial reimplementation of the excluded module:
 | File | Replaces | What it does |
 |---|---|---|
 | `r_tabletop_null.c` | `renderer/` (SDL/OpenGL) | `R_GetAPI()`/`R_StdoutGetAPI()` — every entry point is a harmless placeholder or named no-op; creates no window/GL context; logs only one-time Init/Shutdown/RegisterMap events, never per-frame. Also owns `BZ_TT_Init()`/`BZ_TT_Shutdown()` pairing (bracketed by `re.Init()`/`re.Shutdown()`, the one seam guaranteed to bracket exactly one client session). |
-| `s_tabletop_null.c` | `sound/` (SDL audio) | `S_Init()` logs once ("no audio backend (no-op)"); `S_PlaySound*()` are silent no-ops (called per-event, must not spam). |
+| `s_tabletop_null.c` | `sound/` (SDL audio) | Bounded copied-WAV queue for the AVFoundation host; explicit simulator dummy mode and drop counters. |
 | `ui_tabletop_null.c` | per-game `ui/` (menu/glue UI) | No-op `UI_GetAPI()`, plus a same-thread cache fed by `ui.UpdateUnitUI()` (from `CL_ParseUnitUI()`) that `BZTT_CopyCachedUnitUI()` reads back into `bzTTUnitLayout_t` — the one UI callback that carries data the transport's snapshot needs. |
 | `cl_input_tabletop_null.c` | `cl_input.c`/`cl_input_w3.c`/`cl_input_wow.c` (SDL input) | Only the input-facing symbols other linked files call unconditionally; calls `BZ_TT_Drain()` from `CL_Input()` — the same point real mouse-driven commands would otherwise queue, always before `CL_SendCommand()`. |
 | `cl_scrn_tabletop_null.c` | `cl_scrn.c` (SDL draw calls) | "Draw the frame" → `BZ_TT_PublishSnapshotFromClient()`; `svc_unit_ui` decode is forwarded verbatim to the UI glue cache. |
 | `cl_console_tabletop_null.c` | `console.c` (SDL text input + ring buffer) | `CON_printf()` → `stderr` directly (more useful than the original, which was only visible if the in-game console screen was drawn). |
-| `cl_fx_tabletop_null.c` | `cl_fx.c` (particle/sound entity events) | `CL_EntityEvent()` is a no-op — the event is still visible to the transport via `entityState_t.event`. |
+| `cl_fx_tabletop_null.c` | `cl_fx.c` (particle/sound entity events) | Resolves authoritative sound configstrings and forwards WAV paths to the native queue; particles remain omitted. |
 | `bz_tabletop_client_glue.h` | — | Internal (non-ABI) seam declaring `BZTT_CopyCachedUnitUI()`; free to use engine types, unlike `bz_tabletop_transport.h`. |
 
 `platform/apple/visionos/build.mk`'s `BZ_XR_CLIENT_SRCS` lists these files
@@ -685,7 +743,7 @@ without a header-visible prototype (e.g. `cl_view.c` calls
 
 ## `bz_tabletop_transport.{h,c}` — the public ABI
 
-`BZ_TABLETOP_ABI_VERSION` (currently `1`) must be bumped on any incompatible
+`BZ_TABLETOP_ABI_VERSION` (currently `3`) must be bumped on any incompatible
 struct/enum/function-signature change; the ABI is append-only (existing
 fields/values are never renumbered or removed). The header includes nothing
 but `<stdbool.h>`/`<stddef.h>`/`<stdint.h>` and no engine headers — every

@@ -483,6 +483,14 @@ static void BuildPlayer(bzTTPlayer_t *out) {
         snprintf(out->name, sizeof(out->name), "%s", ps->name);
     }
     out->target = (bzTTActionTarget_t)ps->client_ui_target;
+    if (cls.state == ca_active && cl.playerstate_valid) {
+        switch (ps->stats[PLAYERSTATE_GAME_RESULT]) {
+            case 0: out->game_result = BZ_TT_GAME_RESULT_VICTORY; break;
+            case 1: out->game_result = BZ_TT_GAME_RESULT_DEFEAT; break;
+            case 2: out->game_result = BZ_TT_GAME_RESULT_DRAW; break;
+            default: out->game_result = BZ_TT_GAME_RESULT_NONE; break;
+        }
+    }
 }
 
 static void BuildEntity(bzTTEntity_t *out, centity_t const *ce) {

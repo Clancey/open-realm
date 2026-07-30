@@ -18,31 +18,66 @@ struct OpenRealmTabletopApp: App {
             switch runtimeMode {
             case .fixture:
                 let fixture = FixtureSnapshotTransport()
+                let map = TabletopMapRecord(
+                    edition: .roc, source: .archive, campaignIndex: 0, missionIndex: 0,
+                    campaign: "Fixture", title: "Fixture battlefield", subtitle: "",
+                    mapPath: "fixture")
                 _model = StateObject(wrappedValue: TabletopSessionModel(
                     modeName: "Fixture / \(providerName)", transport: fixture,
-                    renderProvider: provider, commands: fixture))
+                    renderProvider: provider, commands: fixture, catalogs: [.roc: [map]]))
             case .live(let dataPath, let map, let connect, let tft):
+                guard connect == nil else {
+                    throw TabletopTransportError.configuration(
+                        "Remote connect is not supported by the native single-player product flow")
+                }
                 guard TabletopDataPreflight.isUsable(
-                    entries: try Self.dataEntries(dataPath), localMapRequired: map != nil) else {
+                    entries: try Self.dataEntries(dataPath), localMapRequired: true) else {
                     throw TabletopTransportError.configuration(
                         "Live data path '\(dataPath)' is missing required Warcraft III data; " +
                         "run the production bundle staging target or set BZ_TABLETOP_DATA_PATH")
                 }
-                var arguments = [TabletopProduct.executable, "-data", dataPath]
-                if tft { arguments.append("-tft") }
-                if let map { arguments += ["+map", map] }
-                if let connect { arguments += ["+connect", connect] }
+                let arguments = [TabletopProduct.executable, "-data", dataPath]
                 let live = LiveTabletopTransport(
                     arguments: arguments, logItemPublication: environment["BZ_TABLETOP_ACCEPTANCE"] == "1")
-                _model = StateObject(wrappedValue: TabletopSessionModel(
+                var catalogs: [TabletopEdition: [TabletopMapRecord]] = [:]
+                for edition in TabletopEdition.allCases {
+                    do {
+                        let maps = try LiveTabletopCatalog.discover(dataPath: dataPath, edition: edition)
+                        catalogs[edition] = maps
+                        let campaignCount = maps.filter { $0.source == .campaign }.count
+                        let message = "OpenRealmTabletopCatalog[\(edition.rawValue)]: \(maps.count) maps, " +
+                            "\(campaignCount) campaign\n"
+                        FileHandle.standardError.write(Data(message.utf8))
+                    }
+                    catch {
+                        catalogs[edition] = []
+                        FileHandle.standardError.write(Data(
+                            "OpenRealmTabletopCatalog[\(edition.rawValue)]: \(error)\n".utf8))
+                    }
+                }
+                guard let applicationSupport = FileManager.default.urls(
+                    for: .applicationSupportDirectory, in: .userDomainMask).first else {
+                    throw TabletopTransportError.configuration("Application Support directory is unavailable")
+                }
+                let initialEdition: TabletopEdition = tft ? .tft : .roc
+                let session = TabletopSessionModel(
                     modeName: "Live / \(providerName)", transport: live,
-                    renderProvider: provider, commands: live))
+                    renderProvider: provider, commands: live, catalogs: catalogs,
+                    initialEdition: initialEdition,
+                    progressStore: TabletopProgressStore(applicationSupport: applicationSupport))
+                if let map, let match = session.availableMaps.first(where: {
+                    $0.mapPath.caseInsensitiveCompare(map) == .orderedSame ||
+                    URL(fileURLWithPath: $0.mapPath).deletingPathExtension().lastPathComponent
+                        .caseInsensitiveCompare(map) == .orderedSame
+                }) { session.selectMap(match.id) }
+                _model = StateObject(wrappedValue: session)
             }
         } catch {
             let unavailable = UnavailableTabletopTransport(String(describing: error))
             _model = StateObject(wrappedValue: TabletopSessionModel(
                 modeName: "Unavailable", transport: unavailable,
-                renderProvider: ProductionWarcraftRenderProvider()))
+                renderProvider: ProductionWarcraftRenderProvider(),
+                unavailableReason: String(describing: error)))
         }
     }
 

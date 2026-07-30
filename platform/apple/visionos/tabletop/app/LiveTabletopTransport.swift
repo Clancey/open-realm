@@ -83,7 +83,8 @@ private struct LiveSnapshotLease: TabletopSnapshotLease {
             startLocation: raw.start_location, gold: raw.resource_gold, lumber: raw.resource_lumber,
             foodUsed: raw.resource_food_used, foodCap: raw.resource_food_cap,
             heroTokens: raw.resource_hero_tokens, name: tupleString(raw.name),
-            target: actionTarget(raw.target))
+            target: actionTarget(raw.target),
+            gameResult: TabletopGameResult(rawValue: UInt8(raw.game_result.rawValue)) ?? .none)
     }
 
     private func copySelection() -> [UInt32] {
@@ -691,20 +692,29 @@ private enum LiveWarcraftAssetCopy {
 
 }
 
-actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport {
-    private let arguments: [String]
+actor LiveTabletopTransport: TabletopProductTransport, TabletopCommandTransport {
+    private let baseArguments: [String]
+    private var edition = TabletopEdition.roc
     private let logItemPublication: Bool
     private var bridge: BZTabletopBridge?
     private var sessionID: UInt64 = 0
     private let assetCache = LiveWarcraftCopyCache()
+    private let audio = LiveTabletopAudio()
     private var initialAssetCounters: WarcraftAssetCacheCounters?
     private var loggedStableAssetCache = false
     private var observedItemClasses = Set<UInt32>()
     private var loggedItemClassCount = 0
 
     init(arguments: [String], logItemPublication: Bool = false) {
-        self.arguments = arguments
+        self.baseArguments = arguments.filter { $0 != "-tft" }
         self.logItemPublication = logItemPublication
+    }
+
+    func configure(edition: TabletopEdition) async throws {
+        guard bridge == nil else {
+            throw TabletopTransportError.runtime("Edition cannot change while the engine is running")
+        }
+        self.edition = edition
     }
 
     func start() async throws {
@@ -715,6 +725,8 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
         loggedStableAssetCache = false
         observedItemClasses.removeAll()
         loggedItemClassCount = 0
+        try await audio.start()
+        let arguments = edition == .tft ? baseArguments + ["-tft"] : baseArguments
         let bridge = BZTabletopBridge(arguments: arguments)
         self.bridge = bridge
         bridge.start()
@@ -725,12 +737,14 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
             bridge.stop()
             self.bridge = nil
             assetCache.reset()
+            await audio.stop()
             throw TabletopTransportError.runtime(message)
         default:
             let message = "Tabletop engine entered unexpected state \(bridge.state.rawValue)"
             bridge.stop()
             self.bridge = nil
             assetCache.reset()
+            await audio.stop()
             throw TabletopTransportError.runtime(message)
         }
     }
@@ -751,6 +765,7 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
         guard let retained = BZ_TT_Latest() else { return nil }
         let snapshot = try TabletopSnapshotLeaseConsumer.consume(
             LiveSnapshotLease(retained: retained, sessionID: sessionID, assetCache: assetCache))
+        try await audio.drain()
         logAssetSummary(snapshot)
         return snapshot
     }
@@ -764,7 +779,18 @@ actor LiveTabletopTransport: TabletopSnapshotTransport, TabletopCommandTransport
         observedItemClasses.removeAll()
         loggedItemClassCount = 0
         active?.stop()
+        await audio.stop()
     }
+
+    func submitMap(_ map: String) async throws {
+        guard let bridge else { throw TabletopTransportError.terminal }
+        guard bridge.submitMap(map) else {
+            throw TabletopTransportError.commandRejected(UInt32(BZ_TT_ERR_INVALID_ARGUMENT.rawValue))
+        }
+    }
+
+    func suspend() async { bridge?.suspend(); await audio.suspend() }
+    func resume() async { bridge?.resume(); await audio.resume() }
 
     func post(_ command: TabletopCommand) async throws {
         guard bridge != nil else { throw TabletopTransportError.terminal }

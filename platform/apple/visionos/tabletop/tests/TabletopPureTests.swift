@@ -6,6 +6,10 @@ enum TabletopPureTests {
 
     static func main() async {
         testLauncherReduction()
+        testProductFlowReduction()
+        testProductTransitionEffects()
+        testAudioLifetime()
+        testProgressPersistence()
         testGenerationDeduplication()
         testPlacement()
         testFixtureConversionAndReconciliation()
@@ -73,6 +77,77 @@ enum TabletopPureTests {
                "retry cannot authorize a second concurrent opening transition")
         expect(TabletopLauncherReducer.reduce(.open, .retryRequested) == .open,
                "retry is ignored outside a failed state")
+    }
+
+    private static func testProductFlowReduction() {
+        let map = TabletopMapRecord(
+            edition: .roc, source: .campaign, campaignIndex: 1, missionIndex: 2,
+            campaign: "Campaign", title: "Mission", subtitle: "", mapPath: "Maps/Test.w3m")
+        var state = TabletopProductReducer.reduce(.menu, .launch(map))
+        expect(state == .loading(map), "map selection enters explicit loading")
+        state = TabletopProductReducer.reduce(state, .loaded)
+        expect(state == .playing(map), "loaded map enters playing")
+        state = TabletopProductReducer.reduce(state, .pause)
+        expect(state == .paused(map), "pause leaves an explicit resumable state")
+        expect(TabletopProductReducer.reduce(state, .result(.victory)) == state,
+               "terminal results cannot bypass authoritative simulation while paused")
+        state = TabletopProductReducer.reduce(state, .resume)
+        state = TabletopProductReducer.reduce(state, .result(.victory))
+        expect(state == .terminal(map, .victory), "authoritative victory reaches terminal state")
+        expect(TabletopProductReducer.reduce(state, .retry) == .loading(map),
+               "retry creates a new loading generation")
+        expect(TabletopProductReducer.reduce(state, .returnToMenu) == .menu,
+               "terminal state can return to product menu")
+        expect(TabletopProductReducer.reduce(.menu, .resume) == .menu,
+               "invalid inverse transitions are ignored")
+    }
+
+    private static func testProductTransitionEffects() {
+        let map = TabletopMapRecord(
+            edition: .roc, source: .campaign, campaignIndex: 1, missionIndex: 2,
+            campaign: "Campaign", title: "Mission", subtitle: "", mapPath: "Maps/Test.w3m")
+        let playing = TabletopProductState.playing(map)
+        let victory = TabletopProductState.terminal(map, .victory)
+        expect(TabletopProductReducer.recordsCompletion(from: playing, to: victory),
+               "first authoritative victory records completion")
+        expect(!TabletopProductReducer.recordsCompletion(from: victory, to: victory),
+               "duplicate victory snapshots do not rewrite progress")
+        expect(!TabletopProductReducer.recordsCompletion(
+            from: playing, to: .terminal(map, .defeat)), "defeat does not record completion")
+    }
+
+    private static func testAudioLifetime() {
+        expect(TabletopAudioLifetime.shouldRetain(isPlaying: true, intentionallyPaused: false),
+               "playing native audio is retained")
+        expect(TabletopAudioLifetime.shouldRetain(isPlaying: false, intentionallyPaused: true),
+               "intentionally paused native audio survives polling")
+        expect(!TabletopAudioLifetime.shouldRetain(isPlaying: false, intentionallyPaused: false),
+               "completed native audio is released")
+    }
+
+    private static func testProgressPersistence() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("openrealm-progress-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TabletopProgressStore(applicationSupport: root)
+        do {
+            var progress = TabletopProgress(selectedMap: "Maps/One.w3m")
+            progress.completedMaps.insert("Maps/Zero.w3m")
+            try store.save(progress, edition: .roc)
+            let loadedROC = try store.load(.roc), loadedTFT = try store.load(.tft)
+            expect(loadedROC == progress, "versioned progress round trips atomically")
+            expect(loadedTFT == TabletopProgress(), "ROC and TFT progress remain isolated")
+            let corrupt = root.appendingPathComponent("OpenRealm/WarcraftTabletop/v1/roc/progress.json")
+            try Data("not-json".utf8).write(to: corrupt, options: [.atomic])
+            do {
+                _ = try store.load(.roc)
+                expect(false, "corrupt progress was silently accepted")
+            } catch {
+                expect(true, "corrupt progress is surfaced")
+            }
+        } catch {
+            expect(false, "progress persistence failed: \(error)")
+        }
     }
 
     private static func testGenerationDeduplication() {
@@ -250,15 +325,15 @@ enum TabletopPureTests {
             let tft = try TabletopRuntimeModeResolver.resolve(
                 environment: ["BZ_TABLETOP_TFT": "1"], bundlePath: "/app")
             expect(liveDefault == .live(
-                dataPath: "/app/Resources/Warcraft III", map: "Human02", connect: nil, tft: false),
-                "production defaults to bundled live data and the standard acceptance map")
+                dataPath: "/app/Resources/Warcraft III", map: nil, connect: nil, tft: false),
+                "production defaults to bundled live data without hardcoding a product map")
             expect(fixture == .fixture, "fixture mode requires explicit selection")
             expect(live == .live(dataPath: "/data", map: "map.w3m", connect: nil, tft: false),
                 "live mode lowers environment settings without fixture fallback")
             expect(TabletopCoordinateConversion.heading(.pi / 2) == -.pi / 2,
                    "engine yaw is negated when the Y/Z axis swap changes handedness")
             expect(tft == .live(
-                dataPath: "/app/Resources/Warcraft III", map: "Human02", connect: nil, tft: true),
+                dataPath: "/app/Resources/Warcraft III", map: nil, connect: nil, tft: true),
                 "TFT mode is an explicit live-engine argument")
             expect(TabletopProduct.bundleIdentifier == "org.openrealm.visionos.tabletop" &&
                    TabletopProduct.executable == "OpenRealmTabletop",

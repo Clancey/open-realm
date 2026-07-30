@@ -51,7 +51,7 @@ extern "C" {
 /* Bump on every incompatible change to any struct/enum/function signature
  * below. Append-only: existing fields/values must never be renumbered or
  * removed, only added after the last member. */
-#define BZ_TABLETOP_ABI_VERSION 2u
+#define BZ_TABLETOP_ABI_VERSION 3u
 
 enum {
     BZ_TT_MAX_ENTITIES              = 1024, /* per-snapshot visible-entity cap; overflow is reported, never silently dropped - see BZ_TTSnapshot_EntitiesOverflowCount() */
@@ -99,6 +99,13 @@ typedef enum {
     BZ_TT_ACTION_TARGET_ENTITY,
     BZ_TT_ACTION_TARGET_ENTITY_OR_POINT,
 } bzTTActionTarget_t;
+
+typedef enum {
+    BZ_TT_GAME_RESULT_NONE = 0,
+    BZ_TT_GAME_RESULT_VICTORY,
+    BZ_TT_GAME_RESULT_DEFEAT,
+    BZ_TT_GAME_RESULT_DRAW,
+} bzTTGameResult_t;
 
 typedef enum {
     BZ_TT_CMD_SELECT = 0,   /* select <id...>    - replace the local selection set */
@@ -162,6 +169,7 @@ typedef struct {
     uint32_t resource_hero_tokens;
     char name[BZ_TT_MAX_NAME_LEN];
     bzTTActionTarget_t target;
+    bzTTGameResult_t game_result;
 } bzTTPlayer_t;
 
 typedef struct {

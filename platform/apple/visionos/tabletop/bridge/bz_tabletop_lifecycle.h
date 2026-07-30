@@ -1,6 +1,8 @@
 #ifndef __bz_tabletop_lifecycle_h__
 #define __bz_tabletop_lifecycle_h__
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -53,6 +55,11 @@ typedef enum {
 
 typedef struct bzTabletopLifecycle_s bzTabletopLifecycle_t;
 
+enum {
+    BZ_TABLETOP_MAP_PATH_MAX = 260,
+    BZ_TABLETOP_COMMAND_QUEUE_CAPACITY = 8,
+};
+
 // Allocates a lifecycle host bound to a deep copy of the given argv-shaped
 // arguments (the caller's array/strings do not need to outlive this call).
 // Does not start the engine thread — call BZ_TabletopStart for that.
@@ -71,6 +78,11 @@ void BZ_TabletopStart(bzTabletopLifecycle_t *lc);
 // No-op outside the RUNNING/SUSPENDED states respectively.
 void BZ_TabletopSuspend(bzTabletopLifecycle_t *lc);
 void BZ_TabletopResume(bzTabletopLifecycle_t *lc);
+
+// Queues a bare in-engine `map "<path>"` command for execution on the
+// dedicated engine thread before its next frame. Returns false for malformed
+// paths, a full queue, or a lifecycle outside RUNNING/SUSPENDED.
+bool BZ_TabletopSubmitMap(bzTabletopLifecycle_t *lc, const char *map);
 
 // Requests an orderly shutdown. If called from a thread other than the
 // engine thread, blocks until the engine thread has called

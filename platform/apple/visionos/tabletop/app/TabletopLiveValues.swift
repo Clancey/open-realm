@@ -34,6 +34,7 @@ struct TabletopPlayerSnapshot: Equatable, Sendable {
     var heroTokens: UInt32
     var name: String
     var target: TabletopActionTarget = .none
+    var gameResult: TabletopGameResult = .none
 }
 
 struct TabletopFogSnapshot: Equatable, Sendable {

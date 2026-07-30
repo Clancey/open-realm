@@ -320,6 +320,8 @@ static void G_InitMapPlayer(LPEDICT clent, LPCMAPINFO mapinfo, DWORD playernum) 
     LPCMAPPLAYER player = mapinfo ? mapinfo->players + playernum : NULL;
     LPPLAYER ps = &clent->client->ps;
     memset(ps, 0, sizeof(PLAYER));
+    /* Neutral is the non-terminal WC3 player-game-result; zero means victory. */
+    ps->stats[PLAYERSTATE_GAME_RESULT] = 3;
     ps->number = playernum;
     ps->team = G_MapPlayerTeam(mapinfo, playernum);
     ps->color = player ? player->color : playernum;

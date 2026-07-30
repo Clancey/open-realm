@@ -5,41 +5,20 @@
 #include "../ui_local.h"
 #include "../ui_screen.h"
 #include "../generated/single_player_menu.h"
-#include <ctype.h>
+#include "common/campaign.h"
 #include <stdlib.h>
-#ifndef _WIN32
-#include <strings.h>
-#endif
-
-#define SINGLE_PLAYER_MAX_CAMPAIGNS 16
-#define SINGLE_PLAYER_MAX_MISSIONS 128
 
 typedef enum {
     SINGLE_PLAYER_VIEW_MAIN,
     SINGLE_PLAYER_VIEW_CAMPAIGN_SELECT,
 } singlePlayerView_t;
 
-typedef struct {
-    UINAME header;
-    UINAME name;
-    PATHSTR map_path;
-} singlePlayerMission_t;
-
-typedef struct {
-    playerRace_t race;
-    UINAME key;
-    UINAME header;
-    UINAME name;
-    UINAME background;
-    singlePlayerMission_t missions[SINGLE_PLAYER_MAX_MISSIONS];
-    DWORD num_missions;
-} singlePlayerCampaign_t;
-
 static SinglePlayerMenu_t single_player;
-static singlePlayerCampaign_t campaigns[SINGLE_PLAYER_MAX_CAMPAIGNS];
-static DWORD campaign_count;
-static DWORD campaign_order[SINGLE_PLAYER_MAX_CAMPAIGNS];
-static DWORD campaign_order_count;
+static WC3CAMPAIGNCATALOG campaign_data;
+#define campaigns campaign_data.campaigns
+#define campaign_count campaign_data.campaign_count
+#define campaign_order campaign_data.campaign_order
+#define campaign_order_count campaign_data.campaign_order_count
 static uiMapListState_t campaign_list;
 static LPFRAMEDEF campaign_list_frame;
 static DWORD campaign_background_model = 0;
@@ -53,70 +32,7 @@ static BOOL SinglePlayerMenu_LoadScreen(void) {
     return false;
 }
 
-static char *SinglePlayer_Trim(char *text) {
-    text += strspn(text, " \t\r\n");
-    for (char *end = text + strlen(text); end > text && isspace((unsigned char)end[-1]); )
-        *--end = '\0';
-    return text;
-}
-
-static void SinglePlayer_StripComment(char *line) {
-    BOOL quoted = false;
-    for (char *p = line; *p; p++) {
-        if (*p == '"') quoted = !quoted;
-        if (!quoted && p[0] == '/' && p[1] == '/') {
-            *p = '\0';
-            return;
-        }
-    }
-}
-
-static BOOL SinglePlayer_ReadQuoted(char **cursor, LPSTR out, DWORD out_size) {
-    char *p = *cursor + strspn(*cursor, " \t\r\n");
-    if (*p != '"')
-        return false;
-    char *end = strchr(++p, '"');
-    if (!end)
-        return false;
-    size_t len = MIN((size_t)(end - p), out_size ? (size_t)out_size - 1 : 0);
-    if (out_size)
-        memcpy(out, p, len), out[len] = '\0';
-    p = end + 1 + strspn(end + 1, " \t\r\n");
-    if (*p == ',')
-        p++;
-    *cursor = p;
-    return true;
-}
-
-static singlePlayerCampaign_t *SinglePlayer_FindCampaignMutable(LPCSTR key) {
-    if (!key || !*key) {
-        return NULL;
-    }
-    FOR_LOOP(i, campaign_count) {
-        if (!strcasecmp(campaigns[i].key, key)) {
-            return &campaigns[i];
-        }
-    }
-    return NULL;
-}
-
-static singlePlayerCampaign_t *SinglePlayer_EnsureCampaign(LPCSTR key) {
-    singlePlayerCampaign_t *campaign = SinglePlayer_FindCampaignMutable(key);
-
-    if (campaign) {
-        return campaign;
-    }
-    if (!key || !*key || campaign_count >= SINGLE_PLAYER_MAX_CAMPAIGNS) {
-        return NULL;
-    }
-    campaign = &campaigns[campaign_count++];
-    memset(campaign, 0, sizeof(*campaign));
-    snprintf(campaign->key, sizeof(campaign->key), "%s", key);
-    campaign->race = kPlayerRaceNone;
-    return campaign;
-}
-
-static singlePlayerCampaign_t const *SinglePlayer_FindCampaign(LPCSTR name) {
+static LPCWC3CAMPAIGN SinglePlayer_FindCampaign(LPCSTR name) {
     if (!name) {
         return NULL;
     }
@@ -128,131 +44,8 @@ static singlePlayerCampaign_t const *SinglePlayer_FindCampaign(LPCSTR name) {
     return NULL;
 }
 
-static void SinglePlayer_AddCampaignOrder(LPCSTR key) {
-    singlePlayerCampaign_t *campaign = SinglePlayer_EnsureCampaign(key);
-    if (!campaign || campaign_order_count >= SINGLE_PLAYER_MAX_CAMPAIGNS) {
-        return;
-    }
-    FOR_LOOP(i, campaign_order_count) {
-        if (campaign_order[i] == (DWORD)(campaign - campaigns)) {
-            return;
-        }
-    }
-    campaign_order[campaign_order_count++] = (DWORD)(campaign - campaigns);
-}
-
-static void SinglePlayer_ParseCampaignList(char *value) {
-    UINAME field;
-    char *cursor = value;
-
-    while (SinglePlayer_ReadQuoted(&cursor, field, sizeof(field))) {
-        if (field[0]) {
-            SinglePlayer_AddCampaignOrder(field);
-        }
-    }
-}
-
-static BOOL SinglePlayer_ParseIndexedKey(LPCSTR key, LPCSTR prefix, DWORD *index) {
-    size_t prefix_len = strlen(prefix);
-
-    if (strncasecmp(key, prefix, prefix_len))
-        return false;
-    char *end = NULL;
-    unsigned long value = strtoul(key + prefix_len, &end, 10);
-    if (*end || value >= SINGLE_PLAYER_MAX_MISSIONS)
-        return false;
-    *index = (DWORD)value;
-    return true;
-}
-
-static void SinglePlayer_SetMissionCount(singlePlayerCampaign_t *campaign, DWORD index) {
-    if (campaign && index < SINGLE_PLAYER_MAX_MISSIONS && campaign->num_missions <= index) {
-        campaign->num_missions = index + 1;
-    }
-}
-
-static void SinglePlayer_ParseMissionValue(singlePlayerCampaign_t *campaign, DWORD index, char *value) {
-    char *cursor = value;
-    UINAME header;
-    UINAME name;
-    PATHSTR path;
-
-    if (!campaign || index >= SINGLE_PLAYER_MAX_MISSIONS) {
-        return;
-    }
-    singlePlayerMission_t *mission = &campaign->missions[index];
-
-    if (SinglePlayer_ReadQuoted(&cursor, header, sizeof(header)) &&
-        SinglePlayer_ReadQuoted(&cursor, name, sizeof(name)) &&
-        SinglePlayer_ReadQuoted(&cursor, path, sizeof(path))) {
-        snprintf(mission->header, sizeof(mission->header), "%s", header);
-        snprintf(mission->name, sizeof(mission->name), "%s", name);
-        snprintf(mission->map_path, sizeof(mission->map_path), "%s", path);
-    } else {
-        cursor = value;
-        if (SinglePlayer_ReadQuoted(&cursor, name, sizeof(name))) {
-            snprintf(mission->name, sizeof(mission->name), "%s", name);
-        }
-    }
-    SinglePlayer_SetMissionCount(campaign, index);
-}
-
-static void SinglePlayer_ParseFileValue(singlePlayerCampaign_t *campaign, DWORD index, char *value) {
-    PATHSTR file;
-    char *cursor = value;
-
-    if (!campaign || index >= SINGLE_PLAYER_MAX_MISSIONS) {
-        return;
-    }
-    singlePlayerMission_t *mission = &campaign->missions[index];
-    if (!SinglePlayer_ReadQuoted(&cursor, file, sizeof(file)) || !file[0]) {
-        return;
-    }
-    if (strchr(file, '\\') || strchr(file, '/')) {
-        snprintf(mission->map_path, sizeof(mission->map_path), "%s", file);
-    } else {
-        snprintf(mission->map_path, sizeof(mission->map_path), "Maps\\Campaign\\%.*s.w3m", (int)(sizeof(mission->map_path) - 19), file);
-    }
-    SinglePlayer_SetMissionCount(campaign, index);
-}
-
-static void SinglePlayer_ParseCampaignLine(singlePlayerCampaign_t *campaign, char *key, char *value) {
-    UINAME field;
-
-    if (!campaign) {
-        return;
-    }
-    if (!strcasecmp(key, "Header")) {
-        char *cursor = value;
-        if (SinglePlayer_ReadQuoted(&cursor, field, sizeof(field))) {
-            snprintf(campaign->header, sizeof(campaign->header), "%s", field);
-        }
-    } else if (!strcasecmp(key, "Name")) {
-        char *cursor = value;
-        if (SinglePlayer_ReadQuoted(&cursor, field, sizeof(field))) {
-            snprintf(campaign->name, sizeof(campaign->name), "%s", field);
-        }
-    } else if (!strcasecmp(key, "Background")) {
-        char *cursor = value;
-        if (SinglePlayer_ReadQuoted(&cursor, field, sizeof(field))) {
-            snprintf(campaign->background, sizeof(campaign->background), "%s", field);
-        }
-    } else if (!strcasecmp(key, "Cursor")) {
-        campaign->race = (playerRace_t)atoi(value);
-    } else {
-        DWORD index;
-        if (SinglePlayer_ParseIndexedKey(key, "Mission", &index)) {
-            SinglePlayer_ParseMissionValue(campaign, index, value);
-        } else if (SinglePlayer_ParseIndexedKey(key, "File", &index)) {
-            SinglePlayer_ParseFileValue(campaign, index, value);
-        }
-    }
-}
-
 static BOOL SinglePlayer_LoadCampaignFile(LPCSTR file_name) {
     void *buffer = NULL;
-    UINAME section = "";
-    singlePlayerCampaign_t *campaign = NULL;
     int size = uiimport.FS_ReadFile(file_name, &buffer);
     if (size <= 0 || !buffer) {
         return false;
@@ -266,68 +59,13 @@ static BOOL SinglePlayer_LoadCampaignFile(LPCSTR file_name) {
     text[size] = '\0';
     uiimport.FS_FreeFile(buffer);
 
-    char *cursor = text;
-    while (*cursor) {
-        char *line = cursor;
-
-        while (*cursor && *cursor != '\n' && *cursor != '\r') {
-            cursor++;
-        }
-        if (*cursor) {
-            *cursor++ = '\0';
-            while (*cursor == '\n' || *cursor == '\r') {
-                cursor++;
-            }
-        }
-
-        if ((unsigned char)line[0] == 0xef &&
-            (unsigned char)line[1] == 0xbb &&
-            (unsigned char)line[2] == 0xbf) {
-            line += 3;
-        }
-        SinglePlayer_StripComment(line);
-        char *key = SinglePlayer_Trim(line);
-        if (!*key) {
-            continue;
-        }
-        if (*key == '[') {
-            char *end = strchr(key + 1, ']');
-            if (!end) {
-                continue;
-            }
-            *end = '\0';
-            snprintf(section, sizeof(section), "%s", SinglePlayer_Trim(key + 1));
-            campaign = strcasecmp(section, "Index") ? SinglePlayer_EnsureCampaign(section) : NULL;
-            continue;
-        }
-        char *eq = strchr(key, '=');
-        if (!eq) {
-            continue;
-        }
-        *eq = '\0';
-        char *value = SinglePlayer_Trim(eq + 1);
-        key = SinglePlayer_Trim(key);
-
-        if (!strcasecmp(section, "Index") && !strcasecmp(key, "CampaignList")) {
-            SinglePlayer_ParseCampaignList(value);
-        } else {
-            SinglePlayer_ParseCampaignLine(campaign, key, value);
-        }
-    }
-
+    BOOL parsed = WC3_CampaignCatalogParse(&campaign_data, text);
     uiimport.MemFree(text);
-    return campaign_count > 0;
+    return parsed;
 }
 
 static void SinglePlayer_FinalizeCampaignOrder(void) {
-    if (campaign_order_count) {
-        return;
-    }
-    FOR_LOOP(i, campaign_count) {
-        if (campaigns[i].num_missions > 0 && campaign_order_count < SINGLE_PLAYER_MAX_CAMPAIGNS) {
-            campaign_order[campaign_order_count++] = i;
-        }
-    }
+    WC3_CampaignCatalogFinalize(&campaign_data);
 }
 
 static BOOL SinglePlayer_ExpansionEnabled(void) {
@@ -339,10 +77,7 @@ static void SinglePlayer_LoadCampaignData(void) {
     LPCSTR campaign_file;
     BOOL const expansion = SinglePlayer_ExpansionEnabled();
 
-    memset(campaigns, 0, sizeof(campaigns));
-    memset(campaign_order, 0, sizeof(campaign_order));
-    campaign_count = 0;
-    campaign_order_count = 0;
+    WC3_CampaignCatalogReset(&campaign_data);
 
     campaign_file = expansion ? Theme_String("CampaignFile", "Default") : NULL;
     if (campaign_file && strcmp(campaign_file, "CampaignFile") &&
@@ -356,14 +91,14 @@ static void SinglePlayer_LoadCampaignData(void) {
     }
 }
 
-static singlePlayerCampaign_t const *SinglePlayer_DefaultCampaign(void) {
+static LPCWC3CAMPAIGN SinglePlayer_DefaultCampaign(void) {
     if (campaign_order_count && campaign_order[0] < campaign_count) {
         return &campaigns[campaign_order[0]];
     }
     return campaign_count ? &campaigns[0] : NULL;
 }
 
-static LPCSTR SinglePlayer_FirstMissionMap(singlePlayerCampaign_t const *campaign) {
+static LPCSTR SinglePlayer_FirstMissionMap(LPCWC3CAMPAIGN campaign) {
     if (!campaign) {
         return NULL;
     }
@@ -406,7 +141,7 @@ static void SinglePlayer_SetView(singlePlayerView_t view) {
     SinglePlayer_SetHidden(campaign_list_frame, !show_campaign || SinglePlayer_HasStaticCampaignButtons());
 }
 
-static void SinglePlayer_SetCampaignBackdrop(singlePlayerCampaign_t const *campaign) {
+static void SinglePlayer_SetCampaignBackdrop(LPCWC3CAMPAIGN campaign) {
     if (single_player.CampaignBackdrop_2 && campaign && campaign->background[0]) {
         campaign_background_model = UI_LoadModel(campaign->background, true);
         single_player.CampaignBackdrop_2->Portrait.model = campaign_background_model;
@@ -436,7 +171,7 @@ static void SinglePlayer_DrawCampaignBackdrop(void) {
     }
 }
 
-static void SinglePlayer_LaunchCampaign(singlePlayerCampaign_t const *campaign) {
+static void SinglePlayer_LaunchCampaign(LPCWC3CAMPAIGN campaign) {
     char command[256];
     LPCSTR map_path = SinglePlayer_FirstMissionMap(campaign);
 
@@ -452,7 +187,7 @@ static void SinglePlayer_PopulateCampaignList(void) {
     FOR_LOOP(i, campaign_order_count) {
         DWORD const campaign_index = campaign_order[i];
         uiMapListItem_t *item;
-        singlePlayerCampaign_t const *campaign;
+        LPCWC3CAMPAIGN campaign;
 
         if (campaign_index >= campaign_count) {
             continue;
@@ -606,7 +341,7 @@ void SinglePlayerMenu_ShowCampaign(void) {
 }
 
 void SinglePlayerMenu_LaunchCampaign(LPCSTR name) {
-    singlePlayerCampaign_t const *campaign = SinglePlayer_FindCampaign(name);
+    LPCWC3CAMPAIGN campaign = SinglePlayer_FindCampaign(name);
     SinglePlayer_SetCampaignBackdrop(campaign);
     SinglePlayer_LaunchCampaign(campaign);
 }

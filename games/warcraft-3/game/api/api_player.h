@@ -348,7 +348,10 @@ DWORD RemovePlayer(LPJASS j) {
     LPPLAYER whichPlayer = jass_checkhandle(j, 1, "player");
     DWORD *gameResult = jass_checkhandle(j, 2, "playergameresult");
     if (whichPlayer && gameResult) {
+        LPGAMECLIENT client = PLAYER_CLIENT(whichPlayer);
         LPEDICT pent = PLAYER_ENT(whichPlayer);
+        /* Retain the server-authored result in playerState after the event fires. */
+        client->ps.stats[PLAYERSTATE_GAME_RESULT] = *gameResult;
         if (pent) {
             if (*gameResult == 0) {
                 G_PublishEvent(pent, EVENT_PLAYER_VICTORY);
