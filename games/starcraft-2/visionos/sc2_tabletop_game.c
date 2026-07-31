@@ -10,6 +10,7 @@
 
 #include "platform/bridge/bz_tabletop_game.h"
 #include "sc2_tabletop_assets_internal.h"
+#include "sc2_tabletop_models.h"
 #include "../common/sc2_map.h"
 
 static uint32_t sc2_pack_color32(COLOR32 color) {
@@ -237,6 +238,10 @@ void BZ_SC2_TTA_Source(bzSC2ASource_t *source) {
     };
 }
 
-void BZ_GameTabletopInit(void) { BZ_SC2A_Init(); }
-void BZ_GameTabletopShutdown(void) { BZ_SC2A_Shutdown(); }
-void BZ_GameTabletopPublish(void) { BZ_SC2A_PublishTerrainFromGame(); }
+void BZ_GameTabletopInit(void) { BZ_SC2A_Init(); BZ_SC2M_Init(); }
+void BZ_GameTabletopShutdown(void) { BZ_SC2M_Shutdown(); BZ_SC2A_Shutdown(); }
+void BZ_GameTabletopPublish(void) {
+    sc2Map_t const *map = SC2_MapCurrent();
+    BZ_SC2A_PublishTerrainFromGame();
+    BZ_SC2M_BeginRegistration(map ? map->generation : 0);
+}

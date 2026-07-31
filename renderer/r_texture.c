@@ -5,10 +5,21 @@ static LPTEXTURE g_textures = NULL;
 int R_RegisterTextureFile(char const *textureFileName) {
     LPTEXTURE tex = (LPTEXTURE)R_LoadTexture(textureFileName);
     if (tex) {
+        FOR_LOOP(i, TEX_COUNT) if (tex == tr.texture[i]) return tex->texid;
         ADD_TO_LIST(tex, g_textures);
         return tex->texid;
     } else {
         return -1;
+    }
+}
+
+/* Model-owned registry entries must be unlinked before their texture allocation is released. */
+void R_UnregisterTextureFile(int texid) {
+    LPTEXTURE *link = &g_textures;
+    while (*link) {
+        LPTEXTURE texture = *link;
+        if (texture->texid != texid) { link = &texture->next; continue; }
+        *link = texture->next; texture->next = NULL; R_ReleaseTexture(texture); return;
     }
 }
 
@@ -17,6 +28,8 @@ struct texture const* R_FindTextureByID(DWORD textureID) {
         if (tex->texid == textureID)
             return tex;
     }
+    FOR_LOOP(i, TEX_COUNT)
+        if (tr.texture[i] && tr.texture[i]->texid == textureID) return tr.texture[i];
     return NULL;
 }
 

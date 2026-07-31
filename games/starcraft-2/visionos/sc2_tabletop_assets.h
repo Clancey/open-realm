@@ -4,8 +4,8 @@
  * Layer 2A: a distinct, independently versioned ABI. It is plain C99/POD, exposes no engine,
  * renderer, SDL, OpenGL, Objective-C, Swift, or RealityKit types, and must never be confused
  * with platform/bridge/bz_tabletop_assets.h (BZ_TABLETOP_ASSETS_ABI_VERSION 2, Warcraft-shaped).
- * That header is untouched by this one; SC2 has no models, no team textures, and no entity
- * metadata resolution, so its ABI is deliberately smaller: terrain + terrain-texture images only.
+ * That header is untouched by this one; this ABI owns terrain plus generic encoded-image handles
+ * consumed by the separate SC2 model ABI.
  */
 #ifndef SC2_TABLETOP_ASSETS_H
 #define SC2_TABLETOP_ASSETS_H
@@ -190,6 +190,8 @@ uint32_t BZ_SC2ATerrain_CopyTextureMaskLayer(const bzSC2Terrain_t *terrain, uint
  * filesystem path and returns a retained, cross-reload-cached image (or cached placeholder). */
 const bzSC2Image_t *BZ_SC2A_RegisterTerrainImage(uint32_t abi_version, const bzSC2Terrain_t *terrain,
                                                  uint32_t texture_index, bzSC2ATerrainChannel_t channel);
+/* Resolves any confined SC2 DDS identity through the same cache used by terrain and model layers. */
+const bzSC2Image_t *BZ_SC2A_RegisterImage(uint32_t abi_version, const char *identity);
 void BZ_SC2AImage_Retain(const bzSC2Image_t *image);
 void BZ_SC2AImage_Release(const bzSC2Image_t *image);
 bool BZ_SC2AImage_IsPlaceholder(const bzSC2Image_t *image);

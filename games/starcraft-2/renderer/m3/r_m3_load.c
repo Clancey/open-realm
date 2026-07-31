@@ -1,48 +1,13 @@
 #include "renderer/r_local.h"
 #include "games/starcraft-2/common/sc2_map.h"
 #include "r_m3.h"
-
-#define M3_MAX_NODES 128
+#include "r_m3_utils.h"
 
 #define M3_FOR_EACH(TYPE, VAR, LIST) \
 for (m3##TYPE##_t const *VAR = LIST; VAR && VAR < LIST + LIST##Num; VAR++)
 
-#define M3_READ(BUFFER, VAR, VERSION) \
-if ((BUFFER)->ent.version > VERSION || VERSION == 0) M3_Read(BUFFER, &VAR, sizeof(VAR));
-
-#define READ_REFERENCE(TARGET, REF, TYPE) { \
-    m3Reader_t reader##__LINE__ = M3_MakeSizeBuf(currentmodel, REF); \
-    TARGET##Num = reader##__LINE__.valid ? MIN(REF.nEntries, reader##__LINE__.length / sizeof(m3##TYPE##_t)) : 0; \
-    TARGET = TARGET##Num ? ri.MemAlloc(sizeof(m3##TYPE##_t) * (TARGET##Num + 1)) : NULL; \
-    if (TARGET) memset(TARGET, 0, sizeof(m3##TYPE##_t) * (TARGET##Num + 1)); \
-    FOR_LOOP(n, TARGET##Num) { \
-        M3_Read##TYPE(currentmodel, &reader##__LINE__, &TARGET[n]); \
-    } \
-}
-
-#define M3_REFR(BUFFER, TARGET, TYPE, VERSION) \
-if ((BUFFER)->ent.version > VERSION) { \
-    Reference ref; \
-    M3_Read(BUFFER, &ref, sizeof(ref)); \
-    READ_REFERENCE(TARGET, ref, TYPE); \
-}
-
-#define M3_READER(TYPE) \
-void M3_Read##TYPE(m3Model_t *model, m3Reader_t *sb, m3##TYPE##_t *data)
-
-#define M3_SEQUENCE_DATA(TYPE) \
-M3_READER(TYPE##SequenceData) { \
-    M3_REFR(sb, data->keys, Uint32, 0); \
-    M3_READ(sb, data->flags, 0); \
-    M3_READ(sb, data->biggestKey, 0); \
-    M3_REFR(sb, data->values, TYPE, 0); \
-}
-
-
-static MATRIX4 bonemats[M3_MAX_NODES];
-static MATRIX4 tmp[M3_MAX_NODES];
-
-m3Model_t *currentmodel;
+static MATRIX4 bonemats[BZ_M3_RENDERER_MAX_BONES];
+static MATRIX4 tmp[BZ_M3_RENDERER_MAX_BONES];
 
 #ifdef USE_SHADOWMAPS
 extern bool is_rendering_lights;
@@ -52,14 +17,6 @@ static struct {
     LPSHADER shader;
     DWORD uDiffuseMap;
 } m3 = { 0 };
-
-typedef struct {
-    struct ReferenceEntry ent;
-    DWORD readcount;
-    DWORD length;
-    BOOL valid;
-    void *data;
-} m3Reader_t;
 
 void
 R_EvalKeyframeValue(void const *left,
@@ -86,34 +43,6 @@ static void M3_SetLightUniforms(LPSHADER shader) {
     R_Call(glUniform3f, shader->uLightColor, color.x * multiplier, color.y * multiplier, color.z * multiplier);
 }
 
-void M3_Read(m3Reader_t *buffer, void *dest, DWORD bytes) {
-    if (!dest || bytes == 0) return;
-    if (!buffer || !buffer->valid || !buffer->data ||
-        buffer->readcount > buffer->length ||
-        bytes > buffer->length - buffer->readcount) {
-        memset(dest, 0, bytes);
-        if (buffer) buffer->valid = false;
-        return;
-    }
-    memcpy(dest, (LPBYTE)buffer->data + buffer->readcount, bytes);
-    buffer->readcount += bytes;
-}
-
-m3Reader_t M3_MakeSizeBuf(m3Model_t const *model, Reference ref) {
-    if (!model || !model->buffer || !model->refs || !model->head || !ref.nEntries ||
-        ref.ref >= model->head->nRefs ||
-        model->refs[ref.ref].offset >= model->size) {
-        return (m3Reader_t){ 0 };
-    }
-    return (m3Reader_t) {
-        .data = (LPBYTE)model->buffer + model->refs[ref.ref].offset,
-        .readcount = 0,
-        .length = model->size - model->refs[ref.ref].offset,
-        .valid = true,
-        .ent = model->refs[ref.ref],
-    };
-}
-
 enum {
     kMaterialStandard = 1,
     kMaterialDisplacement,
@@ -127,239 +56,6 @@ enum {
     kMaterialUnknown2,
     kMaterialLensFlare,
 };
-
-M3_READER(Int16) { M3_Read(sb, data, sizeof(m3Int16_t)); }
-M3_READER(Uint16) { M3_Read(sb, data, sizeof(m3Uint16_t)); }
-M3_READER(Int32) { M3_Read(sb, data, sizeof(m3Int32_t)); }
-M3_READER(Uint32) { M3_Read(sb, data, sizeof(m3Uint32_t)); }
-M3_READER(Float32) { M3_Read(sb, data, sizeof(m3Float32_t)); }
-M3_READER(Vector2) { M3_Read(sb, data, sizeof(m3Vector2_t)); }
-M3_READER(Vector3) { M3_Read(sb, data, sizeof(m3Vector3_t)); }
-M3_READER(Vector4) { M3_Read(sb, data, sizeof(m3Vector4_t)); }
-M3_READER(Matrix4) { M3_Read(sb, data, sizeof(m3Matrix4_t)); }
-M3_READER(Face) { M3_Read(sb, data, sizeof(m3Face_t)); }
-M3_READER(Pixel) { M3_Read(sb, data, sizeof(m3Pixel_t)); }
-
-M3_READER(Char) {
-    M3_Read(sb, data, sizeof(m3Char_t));
-    if (*data == '/')
-        *data = '\\';
-}
-
-static DWORD M3_VertexUVCount(DWORD flags) {
-    DWORD count;
-
-    if (flags & 0x100000) return 4;
-    if (flags & 0x80000) count = 3;
-    else if (flags & 0x40000) count = 2;
-    else count = 1;
-
-    if (flags & 0x40000000)
-        count++;
-    return MIN(count, 4);
-}
-
-static DWORD M3_VertexDiskSize(DWORD flags) {
-    return 28 + M3_VertexUVCount(flags) * sizeof(SHORT) * 2 + ((flags & 0x200) ? sizeof(COLOR32) : 0);
-}
-
-M3_READER(Vertex) {
-    DWORD uv_count = M3_VertexUVCount(model->vertexFlags);
-    M3_READ(sb, data->pos, 0);
-    M3_READ(sb, data->boneWeight, 0);
-    M3_READ(sb, data->boneIndex, 0);
-    M3_READ(sb, data->normal, 0);
-    data->color = COLOR32_WHITE;
-    if (model->vertexFlags & 0x200)
-        M3_READ(sb, data->color, 0);
-    FOR_LOOP(i, uv_count)
-        M3_READ(sb, data->uv[i], 0);
-    M3_READ(sb, data->tangent, 0);
-}
-
-static void M3_ReadVertexReference(m3Model_t *model, m3Reader_t *sb) {
-    Reference ref;
-    m3Reader_t reader;
-    DWORD stride = M3_VertexDiskSize(model->vertexFlags);
-    DWORD count;
-
-    M3_Read(sb, &ref, sizeof(ref));
-    reader = M3_MakeSizeBuf(model, ref);
-    count = reader.valid && stride ? MIN(ref.nEntries / stride, reader.length / stride) : 0;
-    model->verticesNum = count;
-    model->vertices = count ? ri.MemAlloc(sizeof(m3Vertex_t) * (count + 1)) : NULL;
-    if (model->vertices) memset(model->vertices, 0, sizeof(m3Vertex_t) * (count + 1));
-    FOR_LOOP(n, count)
-        M3_ReadVertex(model, &reader, &model->vertices[n]);
-}
-
-M3_READER(MaterialReference) {
-    M3_READ(sb, data->materialType, 0);
-    M3_READ(sb, data->materialIndex, 0);
-}
-
-M3_READER(CompositeMaterialSection) {
-    M3_READ(sb, data->materialReferenceIndex, 0);
-    M3_READ(sb, data->alphaFactor, 0);
-}
-
-M3_READER(CompositeMaterial) {
-    M3_REFR(sb, data->name, Char, 0);
-    M3_READ(sb, data->unknown, 0);
-    M3_REFR(sb, data->sections, CompositeMaterialSection, 0);
-}
-
-M3_READER(Layer) {
-    M3_READ(sb, data->unknown0, 0);
-    M3_REFR(sb, data->imagePath, Char, 0);
-    M3_READ(sb, data->color, 0);
-    M3_READ(sb, data->flags, 0);
-    M3_READ(sb, data->uvSource1, 0);
-    M3_READ(sb, data->colorChannelSetting, 0);
-    M3_READ(sb, data->brightMult, 0);
-    M3_READ(sb, data->midtoneOffset, 0);
-    M3_READ(sb, data->unknown1, 0);
-    M3_READ(sb, data->noise, 23);
-    M3_READ(sb, data->rttChannel, 0);
-    M3_READ(sb, data->video, 0);
-    M3_READ(sb, data->flipBook, 0);
-    M3_READ(sb, data->uv, 0);
-    M3_READ(sb, data->brightness, 0);
-    M3_READ(sb, data->triPlanarOffset, 23);
-    M3_READ(sb, data->triPlanarScale, 23);
-    M3_READ(sb, data->unknown4, 0);
-    M3_READ(sb, data->fresnel, 0);
-    M3_READ(sb, data->fresnel2, 24);
-    
-    if (data->imagePath && *data->imagePath) {
-        data->texture = R_LoadTexture(data->imagePath);
-    }
-}
-
-M3_READER(Material) {
-    M3_REFR(sb, data->name, Char, 0);
-    M3_READ(sb, data->additionalFlags, 0);
-    M3_READ(sb, data->flags, 0);
-    M3_READ(sb, data->blendMode, 0);
-    M3_READ(sb, data->priority, 0);
-    M3_READ(sb, data->usedRTTChannels, 0);
-    M3_READ(sb, data->specularity, 0);
-    M3_READ(sb, data->depthBlendFalloff, 0);
-    M3_READ(sb, data->cutoutThreshold, 0);
-    M3_READ(sb, data->specMult, 0);
-    M3_READ(sb, data->emisMult, 0);
-    M3_REFR(sb, data->diffuseLayer, Layer, 0);
-    M3_REFR(sb, data->decalLayer, Layer, 0);
-    M3_REFR(sb, data->specularLayer, Layer, 0);
-    M3_REFR(sb, data->glossLayer, Layer, 15);
-    M3_REFR(sb, data->emissiveLayer, Layer, 0);
-    M3_REFR(sb, data->emissive2Layer, Layer, 0);
-    M3_REFR(sb, data->evioLayer, Layer, 0);
-    M3_REFR(sb, data->evioMaskLayer, Layer, 0);
-    M3_REFR(sb, data->alphaMaskLayer, Layer, 0);
-    M3_REFR(sb, data->alphaMask2Layer, Layer, 0);
-    M3_REFR(sb, data->normalLayer, Layer, 0);
-    M3_REFR(sb, data->heightLayer, Layer, 0);
-    M3_REFR(sb, data->lightMapLayer, Layer, 0);
-    M3_REFR(sb, data->ambientOcclusionLayer, Layer, 0);
-    M3_READ(sb, data->unknown4, 18);
-    M3_READ(sb, data->unknown8, 0);
-    M3_READ(sb, data->layerBlendType, 0);
-    M3_READ(sb, data->emisBlendType, 0);
-    M3_READ(sb, data->emisMode, 0);
-    M3_READ(sb, data->specType, 0);
-    M3_READ(sb, data->unknown9, 0);
-    M3_READ(sb, data->unknown10, 0);
-    M3_READ(sb, data->unknown11, 18);
-}
-
-M3_READER(Region) {
-    M3_READ(sb, data->unknown0, 0);
-    M3_READ(sb, data->unknown1, 0);
-    M3_READ(sb, data->firstVertexIndex, 0);
-    M3_READ(sb, data->verticesCount, 0);
-    M3_READ(sb, data->firstTriangleIndex, 0);
-    M3_READ(sb, data->triangleIndicesCount, 0);
-    M3_READ(sb, data->bonesCount, 0);
-    M3_READ(sb, data->firstBoneLookupIndex, 0);
-    M3_READ(sb, data->boneLookupIndicesCount, 0);
-    M3_READ(sb, data->unknown2, 0);
-    M3_READ(sb, data->boneWeightPairsCount, 0);
-    M3_READ(sb, data->unknown3, 0);
-    M3_READ(sb, data->rootBoneIndex, 0);
-    M3_READ(sb, data->unknown4, 3);
-    M3_READ(sb, data->unknown5, 4);
-}
-
-M3_READER(Batch) {
-    M3_READ(sb, data->unknown0, 0);
-    M3_READ(sb, data->regionIndex, 0);
-    M3_READ(sb, data->unknown1, 0);
-    M3_READ(sb, data->materialReferenceIndex, 0);
-    M3_READ(sb, data->unknown2, 0);
-}
-
-M3_READER(Divisions) {
-    M3_REFR(sb, data->faces, Face, 0);
-    M3_REFR(sb, data->regions, Region, 0);
-    M3_REFR(sb, data->batches, Batch, 0);
-    M3_READ(sb, data->MSEC, 0);
-    
-    R_Call(glGenBuffers, 1, &data->indicesBuffer);
-    R_Call(glBindBuffer, GL_ELEMENT_ARRAY_BUFFER, data->indicesBuffer);
-    R_Call(glBufferData, GL_ELEMENT_ARRAY_BUFFER, data->facesNum * sizeof(USHORT), data->faces, GL_STATIC_DRAW);
-}
-
-M3_READER(Sequence) {
-    M3_READ(sb, data->unknown, 0);
-    M3_REFR(sb, data->name, Char, 0);
-    M3_READ(sb, data->interval, 0);
-    M3_READ(sb, data->movementSpeed, 0);
-    M3_READ(sb, data->flags, 0);
-    M3_READ(sb, data->frequency, 0);
-    M3_READ(sb, data->unk, 0);
-    if (sb->ent.version < 2)
-        M3_READ(sb, data->unk2, 0);
-    M3_READ(sb, data->boundingSphere, 0);
-    M3_READ(sb, data->d5, 0);
-//    printf("  %s\n", data->name);
-}
-
-M3_READER(SequenceTimeline) {
-    M3_REFR(sb, data->name, Char, 0);
-    M3_READ(sb, data->runsConcurrent, 0);
-    M3_READ(sb, data->priority, 0);
-    M3_READ(sb, data->stsIndex, 0);
-    M3_READ(sb, data->stsIndexCopy, 0);
-    M3_REFR(sb, data->animIds, Uint32, 0);
-    M3_REFR(sb, data->animRefs, Uint32, 0);
-    M3_READ(sb, data->d3, 0);
-    FOR_LOOP(i, 13) {
-        M3_READ(sb, data->sd[i], 0);
-    }
-}
-
-M3_READER(SequenceValidator) {
-    M3_REFR(sb, data->animIds, Uint32, 0);
-    M3_READ(sb, data->unk, 0);
-}
-
-M3_READER(SequenceGetter) {
-    M3_REFR(sb, data->name, Char, 0);
-    M3_REFR(sb, data->stcID, Uint32, 0);
-}
-
-M3_READER(Bone) {
-    M3_READ(sb, data->unknown0, 0);
-    M3_REFR(sb, data->name, Char, 0);
-    M3_READ(sb, data->flags, 0);
-    M3_READ(sb, data->parent, 0);
-    M3_READ(sb, data->unknown1, 0);
-    M3_READ(sb, data->position, 0);
-    M3_READ(sb, data->rotation, 0);
-    M3_READ(sb, data->scale, 0);
-    M3_READ(sb, data->visibility, 0);
-}
 
 /* Converts M3 vertex data (SHORT UV ÷ 2048, ubyte normal ×2−1) to the unified
    float layout expected by the shared model shader. Uploads a VERTEX array so
@@ -406,75 +102,8 @@ void M3_MakeBuffer(m3Model_t *model) {
     ri.MemFree(verts);
 }
 
-void M3_InitMODL(m3Model_t *model, m3Reader_t sb) {
-    M3_REFR(&sb, model->modelName, Char, 0);
-    M3_READ(&sb, model->flags, 0);
-    M3_REFR(&sb, model->sequences, Sequence, 0);
-    M3_REFR(&sb, model->stc, SequenceTimeline, 0);
-    M3_REFR(&sb, model->stg, SequenceGetter, 0);
-    M3_READ(&sb, model->unknown0, 0);
-    M3_REFR(&sb, model->sts, SequenceValidator, 0);
-    M3_REFR(&sb, model->bones, Bone, 0);
-    M3_READ(&sb, model->numberOfBonesToCheckForSkin, 0);
-    M3_READ(&sb, model->vertexFlags, 0);
-    M3_ReadVertexReference(model, &sb);
-    M3_REFR(&sb, model->divisions, Divisions, 0);
-    M3_REFR(&sb, model->boneLookup, Uint16, 0);
-    M3_READ(&sb, model->boundings, 0);
-    M3_READ(&sb, model->unknown4, 0);
-    M3_READ(&sb, model->attachmentPoints, 0);
-    M3_READ(&sb, model->attachmentPointAddons, 0);
-    M3_READ(&sb, model->ligts, 0);
-    M3_READ(&sb, model->shbxData, 0);
-    M3_READ(&sb, model->cameras, 0);
-    M3_READ(&sb, model->unknown21, 0);
-    // Materials
-    M3_REFR(&sb, model->materialReferences, MaterialReference, 0);
-    M3_REFR(&sb, model->materialStandard, Material, 0);
-    M3_READ(&sb, model->materialDisplacement, 0);
-    M3_REFR(&sb, model->materialComposite, CompositeMaterial, 0);
-    M3_READ(&sb, model->materialTerrain, 0);
-    M3_READ(&sb, model->materialVolume, 0);
-    M3_READ(&sb, model->materialUnknown1, 0);
-    M3_READ(&sb, model->materialCreep, 0);
-    M3_READ(&sb, model->materialVolumeNoise, 24);
-    M3_READ(&sb, model->materialSplatTerrainBake, 25);
-    M3_READ(&sb, model->materialUnknown2, 27);
-    M3_READ(&sb, model->materialLensFlare, 28);
-    // Particles
-    M3_READ(&sb, model->particleEmitters, 0);
-    M3_READ(&sb, model->particleEmitterCopies, 0);
-    M3_READ(&sb, model->ribbonEmitters, 0);
-    M3_READ(&sb, model->projections, 0);
-    M3_READ(&sb, model->forces, 0);
-    M3_READ(&sb, model->warps, 0);
-    M3_READ(&sb, model->unknown22, 0);
-    M3_READ(&sb, model->rigidBodies, 0);
-    M3_READ(&sb, model->unknown23, 0);
-    M3_READ(&sb, model->physicsJoints, 0);
-    M3_READ(&sb, model->clothBehavior, 27)
-    M3_READ(&sb, model->unknown24, 0);
-    M3_READ(&sb, model->ikjtData, 0);
-    M3_READ(&sb, model->unknown25, 0);
-    M3_READ(&sb, model->unknown26, 24);
-    M3_READ(&sb, model->partsOfTurrentBehaviors, 0);
-    M3_READ(&sb, model->turrentBehaviors, 0);
-    M3_REFR(&sb, model->absoluteInverseBoneRestPositions, Matrix4, 0);
-    M3_READ(&sb, model->tightHitTest, 0);
-    M3_READ(&sb, model->fuzzyHitTestObjects, 0);
-    M3_READ(&sb, model->attachmentVolumes, 0);
-    M3_READ(&sb, model->attachmentVolumesAddon0, 0);
-    M3_READ(&sb, model->attachmentVolumesAddon1, 0);
-    M3_READ(&sb, model->billboardBehaviors, 0);
-    M3_READ(&sb, model->tmdData, 0);
-    M3_READ(&sb, model->unknown27, 0);
-    M3_READ(&sb, model->unknown28, 0);
-
-    M3_MakeBuffer(model);
-}
-
 m3Uint32_t M3_FindAnimRef(m3SequenceTimeline_t const *timeline, m3Uint32_t animID) {
-    if (!timeline)
+    if (!timeline || timeline->animIdsNum != timeline->animRefsNum)
         return 0;
     M3_FOR_EACH(Uint32, it, timeline->animIds) {
         if (animID == *it) {
@@ -483,22 +112,6 @@ m3Uint32_t M3_FindAnimRef(m3SequenceTimeline_t const *timeline, m3Uint32_t animI
     }
     return 0;
 }
-
-DWORD M3_FindKeyAtTime(m3Uint32_t const *keys, DWORD numkeys, DWORD time, float *t) {
-    if (numkeys == 0 || *keys > time)
-        return 0;
-    FOR_LOOP(b, numkeys) {
-        if (keys[b] > time) {
-            DWORD a = b - 1;
-            *t = (float)(time - keys[a]) / (float)(keys[b] - keys[a]);
-            return b;
-        }
-    }
-    *t = 1;
-    return numkeys - 1;
-}
-
-#define M3_GET_POINTER(MODEL, REF, TYPE) ((m3##TYPE##_t const *)M3_MakeSizeBuf(MODEL, REF).data)
 
 #define M3_GET_ANIM_VALUE(ANIMREF, DATATYPE) \
 M3_Get##ANIMREF##AnimValue(m3Model_t const *model, \
@@ -510,23 +123,29 @@ M3_Get##ANIMREF##AnimValue(m3Model_t const *model, \
     if (anim == 0) return animref->initValue; \
     DWORD const sdref = anim >> 16; \
     DWORD const sdindex = anim & 0xffff; \
-    if (sdref >= 13 || sdindex >= timeline->sd[sdref].nEntries) return animref->initValue; \
-    m3SequenceData_t const *sdbase = M3_GET_POINTER(model, timeline->sd[sdref], SequenceData); \
-    if (!sdbase) return animref->initValue; \
-    m3SequenceData_t const *sd = sdbase + sdindex; \
+    m3SequenceData_t sd; \
     m3##ANIMREF##_t output = animref->initValue; \
-    m3Float32_t t = 0.f; \
-    m3Uint32_t const *keys = M3_GET_POINTER(model, sd->keys, Uint32); \
-    if (!keys) return animref->initValue; \
-    DWORD key = M3_FindKeyAtTime(keys, sd->keys.nEntries, time, &t); \
-    if (key > 0) { \
-        m3##ANIMREF##_t const *values = M3_GET_POINTER(model, sd->values, ANIMREF); \
-        if (!values || key >= sd->values.nEntries) return animref->initValue; \
-        R_EvalKeyframeValue(values+key-1, values+key, t, DATATYPE, TRACK_LINEAR, &output); \
-        return output; \
-    } else { \
+    m3##ANIMREF##_t values[2]; \
+    m3KeySpan_t span; \
+    DWORD key_count, value_count; \
+    if (sdref >= 13) return animref->initValue; \
+    m3ReferenceRead_t sd_read = { .reference = timeline->sd[sdref], \
+        .element_size = sizeof(m3SequenceData_t), .element_index = sdindex }; \
+    if (!SC2_M3ReferenceElement(model, &sd_read, &sd)) return animref->initValue; \
+    m3ReferenceRead_t key_read = { .reference = sd.keys, .element_size = sizeof(m3Uint32_t), \
+        .section_id = "_23I" }; \
+    m3ReferenceRead_t value_read = { .reference = sd.values, .element_size = sizeof(m3##ANIMREF##_t) }; \
+    if (!SC2_M3ReferenceCount(model, &key_read, &key_count) || \
+        !SC2_M3ReferenceCount(model, &value_read, &value_count) || key_count != value_count) \
         return animref->initValue; \
-    } \
+    if (!m3_find_key_span(model, sd.keys, time, &span)) return animref->initValue; \
+    value_read.element_index = span.left; \
+    if (!SC2_M3ReferenceElement(model, &value_read, &values[0])) return animref->initValue; \
+    if (span.left == span.right) return values[0]; \
+    value_read.element_index = span.right; \
+    if (!SC2_M3ReferenceElement(model, &value_read, &values[1])) return animref->initValue; \
+    R_EvalKeyframeValue(&values[0], &values[1], span.fraction, DATATYPE, TRACK_LINEAR, &output); \
+    return output; \
 }
 
 DWORD   M3_GET_ANIM_VALUE(Uint32,  TDATA_INT1);
@@ -630,33 +249,93 @@ static BOOL M3_SetMaterialBlendMode(m3Material_t const *material) {
     return true;
 }
 
+static void M3_LoadLayers(m3Layer_t *layers, DWORD count) {
+    FOR_LOOP(i, count)
+        if (layers[i].imagePath && *layers[i].imagePath)
+            layers[i].texture = R_LoadTexture(layers[i].imagePath);
+}
+
+/* Layer textures are renderer-owned just like the VAO/VBO/EBO resources released below. */
+static void M3_ReleaseLayers(m3Layer_t *layers, DWORD count) {
+    FOR_LOOP(i, count)
+        if (layers[i].texture) R_ReleaseTexture(layers[i].texture);
+}
+
+/* Texture registration and GL upload are renderer policy, never parser side effects. */
+static void M3_UploadModel(m3Model_t *model) {
+    FOR_LOOP(i, model->materialStandardNum) {
+        m3Material_t *material = &model->materialStandard[i];
+#define M3_LOAD_LAYER(NAME) M3_LoadLayers(material->NAME, material->NAME##Num)
+        M3_LOAD_LAYER(diffuseLayer);
+        M3_LOAD_LAYER(decalLayer);
+        M3_LOAD_LAYER(specularLayer);
+        M3_LOAD_LAYER(glossLayer);
+        M3_LOAD_LAYER(emissiveLayer);
+        M3_LOAD_LAYER(emissive2Layer);
+        M3_LOAD_LAYER(evioLayer);
+        M3_LOAD_LAYER(evioMaskLayer);
+        M3_LOAD_LAYER(alphaMaskLayer);
+        M3_LOAD_LAYER(alphaMask2Layer);
+        M3_LOAD_LAYER(normalLayer);
+        M3_LOAD_LAYER(heightLayer);
+        M3_LOAD_LAYER(lightMapLayer);
+        M3_LOAD_LAYER(ambientOcclusionLayer);
+#undef M3_LOAD_LAYER
+    }
+    FOR_LOOP(i, model->divisionsNum) {
+        m3Divisions_t *division = &model->divisions[i];
+        R_Call(glGenBuffers, 1, &division->indicesBuffer);
+        R_Call(glBindBuffer, GL_ELEMENT_ARRAY_BUFFER, division->indicesBuffer);
+        R_Call(glBufferData, GL_ELEMENT_ARRAY_BUFFER, division->facesNum * sizeof(USHORT),
+               division->faces, GL_STATIC_DRAW);
+    }
+    M3_MakeBuffer(model);
+}
+
 m3Model_t *R_LoadModelM3(void *data, DWORD size) {
-    m3Model_t *model = ri.MemAlloc(sizeof(m3Model_t));
-    if (!model)
+    m3Model_t *model = SC2_M3Parse(data, size);
+    if (model && model->head && !m3_renderer_model_supported(model)) {
+        /* The old renderer wrote past tmp[128]; reject before any texture or GL resource upload. */
+        fprintf(stderr, "R_LoadModelM3: model has %u bones; desktop limit is %u\n",
+                model->bonesNum, BZ_M3_RENDERER_MAX_BONES);
+        SC2_M3Free(model);
         return NULL;
-    memset(model, 0, sizeof(*model));
-    if (!data || size < sizeof(struct MD33)) {
-        return model;
     }
-    model->buffer = malloc(size);
-    if (!model->buffer) {
-        return model;
-    }
-    model->size = size;
-    memcpy(model->buffer, data, size);
-    model->head = model->buffer;
-    if (memcmp(model->head->id, "43DM", 4) ||
-        model->head->ofsRefs >= model->size ||
-        model->head->nRefs > (model->size - model->head->ofsRefs) / sizeof(struct ReferenceEntry) ||
-        model->head->MODL.ref >= model->head->nRefs) {
-        fprintf(stderr, "R_LoadModelM3: invalid header\n");
-        return model;
-    }
-    model->refs = (struct ReferenceEntry *)((LPBYTE)model->buffer + model->head->ofsRefs);
-    model->type = model->refs[model->head->MODL.ref].version;
-    currentmodel = model;
-    M3_InitMODL(model, M3_MakeSizeBuf(model, model->head->MODL));
+    if (model && model->head) M3_UploadModel(model);
     return model;
+}
+
+void R_FreeModelM3(m3Model_t *model) {
+    if (!model) return;
+    FOR_LOOP(i, model->materialStandardNum) {
+        m3Material_t *material = &model->materialStandard[i];
+#define M3_RELEASE_LAYER(NAME) M3_ReleaseLayers(material->NAME, material->NAME##Num)
+        M3_RELEASE_LAYER(diffuseLayer);
+        M3_RELEASE_LAYER(decalLayer);
+        M3_RELEASE_LAYER(specularLayer);
+        M3_RELEASE_LAYER(glossLayer);
+        M3_RELEASE_LAYER(emissiveLayer);
+        M3_RELEASE_LAYER(emissive2Layer);
+        M3_RELEASE_LAYER(evioLayer);
+        M3_RELEASE_LAYER(evioMaskLayer);
+        M3_RELEASE_LAYER(alphaMaskLayer);
+        M3_RELEASE_LAYER(alphaMask2Layer);
+        M3_RELEASE_LAYER(normalLayer);
+        M3_RELEASE_LAYER(heightLayer);
+        M3_RELEASE_LAYER(lightMapLayer);
+        M3_RELEASE_LAYER(ambientOcclusionLayer);
+#undef M3_RELEASE_LAYER
+    }
+    FOR_LOOP(i, model->divisionsNum)
+        if (model->divisions[i].indicesBuffer)
+            R_Call(glDeleteBuffers, 1, &model->divisions[i].indicesBuffer);
+    if (model->renbuf) {
+        if (model->renbuf->vbo) R_Call(glDeleteBuffers, 1, &model->renbuf->vbo);
+        if (model->renbuf->vao) R_Call(glDeleteVertexArrays, 1, &model->renbuf->vao);
+        ri.MemFree(model->renbuf);
+        model->renbuf = NULL;
+    }
+    SC2_M3Free(model);
 }
 
 static void M3_DrawRegionMaterial(m3Region_t const *region, m3Material_t const *material, FLOAT alpha) {
@@ -825,18 +504,17 @@ void M3_RenderModel(renderEntity_t const *entity, m3Model_t const *model, LPCMAT
     }
 
     /* Build a full 128-entry bone palette indexed by boneLookup[i].
-       Vertex boneIndex values are boneLookup-relative so we pre-multiply
-       the inverse rest pose here, making every vertex index an absolute
-       palette slot. This removes the need for uFirstBoneLookupIndex. */
+       Vertex boneIndex values are region-relative; uFirstBoneLookupIndex
+       selects the corresponding pre-multiplied inverse-rest palette slot. */
     memset(bonemats, 0, sizeof(bonemats));
-    FOR_LOOP(j, M3_MAX_NODES) {
+    FOR_LOOP(j, BZ_M3_RENDERER_MAX_BONES) {
         MATRIX4 ident; Matrix4_identity(&ident); bonemats[j] = ident;
     }
     M3_FOR_EACH(Uint16, boneLookup, model->boneLookup) {
         m3Uint16_t boneIndex = *boneLookup;
         DWORD paletteIndex = (DWORD)(boneLookup - model->boneLookup);
         if (boneIndex >= model->bonesNum || boneIndex >= model->absoluteInverseBoneRestPositionsNum ||
-            paletteIndex >= M3_MAX_NODES) {
+            paletteIndex >= BZ_M3_RENDERER_MAX_BONES) {
             continue;
         }
         Matrix4_multiply(tmp + boneIndex, model->absoluteInverseBoneRestPositions + boneIndex,
@@ -872,7 +550,8 @@ void M3_RenderModel(renderEntity_t const *entity, m3Model_t const *model, LPCMAT
     R_Call(glUniformMatrix4fv, m3.shader->uTextureMatrix, 1, GL_FALSE, tr.viewDef.textureMatrix.v);
     R_Call(glUniformMatrix4fv, m3.shader->uModelMatrix, 1, GL_FALSE, mScaledMatrix.v);
     R_Call(glUniformMatrix3fv, m3.shader->uNormalMatrix, 1, GL_TRUE, mNormalMatrix.v);
-    R_Call(glUniformMatrix4fv, m3.shader->uBones, MIN(model->boneLookupNum, M3_MAX_NODES), GL_FALSE, bonemats->v);
+    R_Call(glUniformMatrix4fv, m3.shader->uBones,
+           MIN(model->boneLookupNum, BZ_M3_RENDERER_MAX_BONES), GL_FALSE, bonemats->v);
     M3_SetLightUniforms(m3.shader);
     /* The unified model shader requires identity defaults for uniforms that
        M3 does not animate (texture UV transform, layer alpha, geoset colour). */

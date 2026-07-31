@@ -10,6 +10,7 @@
  * CL_Init() sets up the renderer and input bindings at startup.
  */
 #include "client.h"
+#include "cl_model_lifecycle.h"
 #include "tr_public.h"
 #include "ui_layout.h"
 #include <arpa/inet.h>
@@ -25,6 +26,15 @@ struct client_state cl;
 
 static DWORD cl_last_packet_time = 0;
 static DWORD cl_realtime = 0;
+
+/* Map transitions and terminal shutdown share the renderer-handle ownership boundary. */
+static void CL_ReleaseModels(void) {
+    clModelHandles_t handles = {
+        .models = cl.models, .portraits = cl.portraits, .move_confirmation = &cl.moveConfirmation,
+        .count = MAX_MODELS, .release_model = re.ReleaseModel,
+    };
+    CL_ReleaseModelHandles(&handles);
+}
 
 void Cmd_ForwardToServer(LPCSTR text) {
     if (cls.state <= ca_connected || *text == '-' || *text == '+') {
@@ -78,6 +88,8 @@ void CL_ClearState(void) {
     SAFE_DELETE(cl.fow.visible, MemFree);
     SAFE_DELETE(cl.fow.explored, MemFree);
     SAFE_DELETE(cl.fow.texture, MemFree);
+    /* Release before memset: M3 handles own parser arrays, textures, and GL buffers. */
+    CL_ReleaseModels();
 
     FOR_LOOP(layer, MAX_LAYOUT_LAYERS) {
         SCR_ClearLayoutLayer(layer);
@@ -762,10 +774,7 @@ void CL_Connect(LPCSTR host, unsigned short port) {
 
 void CL_Shutdown(void) {
     ui.Shutdown();
-    FOR_LOOP(modelIndex, MAX_MODELS) {
-        SAFE_DELETE(cl.models[modelIndex], re.ReleaseModel);
-        SAFE_DELETE(cl.portraits[modelIndex], re.ReleaseModel);
-    }
+    CL_ReleaseModels();
     FOR_LOOP(imageIndex, MAX_DYNAMIC_IMAGES) {
         SAFE_DELETE(cl.dynamicPics[imageIndex], re.ReleaseTexture);
     }

@@ -1,4 +1,5 @@
 #include "client/tr_public.h"
+#include "games/starcraft-2/common/sc2_dds.h"
 #include "games/starcraft-2/renderer/m3/r_m3.h"
 #include "tools/viewer_common.h"
 
@@ -58,8 +59,16 @@ static void Tool_DrawString(refExport_t const *re, LPCSTR string, int x, int y) 
 static void PrintLayer(LPCSTR label, m3Layer_t const *layer, DWORD count) {
     FOR_LOOP(i, count) {
         COLOR32 color = layer[i].color.initValue;
+        sc2DdsImage_t dds = { 0 };
+        sc2DdsResult_t dds_result = SC2_DDS_ERR_INVALID_ARGUMENT;
+        void *texture_data = NULL;
+        int texture_size = layer[i].imagePath && *layer[i].imagePath ?
+            Tool_FS_ReadFile(layer[i].imagePath, &texture_data) : -1;
+        if (texture_size > 0)
+            dds_result = SC2_DdsParseResult(texture_data, (DWORD)texture_size, &dds);
         fprintf(stderr,
-                "    %s[%u]: flags=0x%08x uv=%u color=(%u %u %u %u) bright=%.3f mid=%.3f tex=%s\n",
+                "    %s[%u]: flags=0x%08x uv=%u color=(%u %u %u %u) bright=%.3f mid=%.3f tex=%s "
+                "dds=%s format=%u size=%ux%u mips=%u bytes=%d\n",
                 label,
                 (unsigned)i,
                 (unsigned)layer[i].flags,
@@ -70,7 +79,15 @@ static void PrintLayer(LPCSTR label, m3Layer_t const *layer, DWORD count) {
                 (unsigned)color.a,
                 layer[i].brightMult.initValue,
                 layer[i].midtoneOffset.initValue,
-                layer[i].imagePath ? layer[i].imagePath : "");
+                layer[i].imagePath ? layer[i].imagePath : "",
+                !layer[i].imagePath || !*layer[i].imagePath ? "empty" :
+                    (texture_size < 0 ? "not-found" : SC2_DdsResultString(dds_result)),
+                (unsigned)dds.format,
+                (unsigned)dds.width,
+                (unsigned)dds.height,
+                (unsigned)dds.mipLevelCount,
+                texture_size > 0 ? texture_size : 0);
+        if (texture_data) Tool_FS_FreeFile(texture_data);
     }
 }
 
@@ -106,8 +123,7 @@ static BOX3 M3PreviewBounds(m3Model_t const *m3) {
     return bounds;
 }
 
-static void PrintModelInfo(LPCMODEL model) {
-    m3Model_t const *m3 = model ? model->m3 : NULL;
+static void PrintModelInfo(m3Model_t const *m3) {
     BOX3 bounds = M3PreviewBounds(m3);
     FLOAT width = fabsf(bounds.max.x - bounds.min.x);
     FLOAT depth = fabsf(bounds.max.y - bounds.min.y);
@@ -126,6 +142,8 @@ static void PrintModelInfo(LPCMODEL model) {
     fprintf(stderr, "  bone_lookup: %u\n", (unsigned)m3->boneLookupNum);
     fprintf(stderr, "  sequences: %u\n", (unsigned)m3->sequencesNum);
     fprintf(stderr, "  materials: %u\n", (unsigned)m3->materialStandardNum);
+    fprintf(stderr, "  parse_budget: decoded_bytes=%llu work=%llu\n",
+            (unsigned long long)m3->decoded_bytes, (unsigned long long)m3->parse_work);
     fprintf(stderr,
             "  bounds: min=(%.3f %.3f %.3f) max=(%.3f %.3f %.3f) size=(%.3f %.3f %.3f)\n",
             bounds.min.x, bounds.min.y, bounds.min.z,
@@ -297,6 +315,7 @@ int main(int argc, char **argv) {
             g_info_only = true;
         } else if (!strcmp(argv[i], "--dump-all") || !strcmp(argv[i], "-dump-all")) {
             g_dump_all = true;
+            g_info_only = true;
         } else if (!strcmp(argv[i], "--once")) {
             g_run_once = true;
         } else {
@@ -310,6 +329,20 @@ int main(int argc, char **argv) {
     }
 
     Tool_SetSheetHost(archives, sizeof(archives) / sizeof(archives[0]));
+    if (g_info_only) {
+        void *data = NULL;
+        int size = Tool_FS_ReadFile(g_model_path, &data);
+        m3Model_t *m3 = size > 0 ? SC2_M3Parse(data, (DWORD)size) : NULL;
+        if (data) Tool_FS_FreeFile(data);
+        if (!m3 || !m3->head) {
+            fprintf(stderr, "m3tool: failed to parse M3 model %s\n", g_model_path);
+            SC2_M3Free(m3);
+            return 1;
+        }
+        PrintModelInfo(m3);
+        SC2_M3Free(m3);
+        return 0;
+    }
     re = R_GetAPI((refImport_t){
         .FS_ReadFile = Tool_FS_ReadFile,
         .FS_FreeFile = Tool_FS_FreeFile,
@@ -330,11 +363,7 @@ int main(int argc, char **argv) {
         re.Shutdown();
         return 1;
     }
-    PrintModelInfo(model);
-    if (g_info_only) {
-        re.Shutdown();
-        return 0;
-    }
+    PrintModelInfo(model->m3);
 
     bounds = M3PreviewBounds(model->m3);
     width = fabsf(bounds.max.x - bounds.min.x);

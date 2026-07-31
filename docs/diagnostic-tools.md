@@ -20,6 +20,27 @@ embedded terrain files remain explicit layer statuses and do not fail inventory.
 Use `-mpq build/tests/test-sc2.SC2Maps` for deterministic fixture evidence.
 Never extract, rewrite, or commit retail data or inventory output.
 
+## StarCraft II M3 inspection
+
+`m3tool --info` and `--dump-all` are headless: they mount the requested archives, call the common
+M3 parser, print stable geometry/material/layer counters, validate each non-empty layer DDS, and
+exit without initializing SDL or OpenGL.
+
+```sh
+make m3tool
+build/bin/m3tool \
+  -mpq "$HOME/Downloads/Starcraft II/StarCraft2/Mods/Core.SC2Mod/base.SC2Assets" \
+  -mpq "$HOME/Downloads/Starcraft II/StarCraft2/Mods/Liberty.SC2Mod/base.SC2Assets" \
+  -model 'Assets\Units\Terran\Marine\Marine.m3' --dump-all
+```
+
+Pass archives in the same order as the runtime; later registrations override earlier ones. Empty
+layer paths print `dds=empty`, while missing, malformed, unsupported, and valid DDS payloads retain
+distinct statuses. Use this evidence before changing M3 declarations, region/bone lookup handling,
+or material status. Strict declaration validation includes section IDs, version-specific disk
+strides, declared/physical counts, and animation reference element bounds. Never copy retail model
+or texture bytes into fixtures.
+
 ## Warcraft III map terrain inspection
 
 `maptool -inspect` loads a retail map through the renderer's W3E parser, prints

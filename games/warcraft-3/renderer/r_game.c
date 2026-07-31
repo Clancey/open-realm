@@ -1,4 +1,5 @@
 #include "renderer/r_game.h"
+#include "renderer/r_model_lifecycle.h"
 #include "../common/wc3_asset_path.h"
 #include "mdx/r_mdx.h"
 #include "w3m/r_war3map.h"
@@ -84,6 +85,10 @@ void R_GameInit(void) {
 }
 
 void R_GameShutdown(void) {
+    rOwnedModels_t models = { tr.model, MODEL_COUNT, R_GameReleaseModel };
+    /* Selection assets own MDX/GL resources and must die while the renderer context is still current. */
+    R_ReleaseOwnedModels(&models);
+    memset(&model_texture_cache, 0, sizeof(model_texture_cache));
     MDLX_Shutdown();
 }
 

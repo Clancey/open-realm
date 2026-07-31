@@ -89,5 +89,11 @@ void *BZ_SC2A_ImageData(bzSC2Image_t *image, uint32_t offset, size_t bytes);
 /* Installed by the selected game's static archive (games/starcraft-2/visionos/sc2_tabletop_game.c
  * in production; test_sc2_tabletop_assets.c installs its own fixture-backed source instead). */
 void BZ_SC2_TTA_Source(bzSC2ASource_t *source);
+void BZ_SC2A_ProviderLock(void);
+void BZ_SC2A_ProviderUnlock(void);
+
+#ifdef BZ_SC2A_TEST_HOOKS
+void BZ_SC2A_TestTerrainImageValidated(void);
+#endif
 
 #endif

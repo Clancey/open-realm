@@ -235,7 +235,7 @@ $(foreach t,$(BZ_XR_TARGETS),$(eval $(call bz_xr_bridge_rules,$(t))))
 visionos-bridge: xrsimulator-bridge xros-bridge
 
 # ---------------------------------------------------------------------------
-# StarCraft II headless foundation plus immutable terrain/DDS asset ABI
+# StarCraft II headless foundation plus immutable terrain/DDS and M3 model ABIs
 # ---------------------------------------------------------------------------
 BZ_XR_SC2_CFLAGS := $(BZ_XR_BASE_CFLAGS) -I$(SC2_DIR) -I$(SC2_DIR)/common \
 	-DSC2 -DOW3_LOAD_ALL_MPQS -DSTB_SC2LAYOUT_IMPLEMENTATION -DSTB_SC2LAYOUT_GLOBALS \
@@ -248,8 +248,10 @@ BZ_XR_SC2_ENGINE_SRCS := \
 	client/cl_main.c client/cl_parse.c client/cl_view.c client/cl_tent.c client/keys.c
 BZ_XR_SC2_GAME_SRCS := $(shell find $(SC2_DIR)/game -name '*.c' | sort) \
 	$(SC2_DIR)/common/sc2_dds.c \
-	$(SC2_DIR)/visionos/sc2_tabletop_assets.c \
-	$(SC2_DIR)/visionos/sc2_tabletop_game.c
+$(SC2_DIR)/common/sc2_m3.c \
+$(SC2_DIR)/visionos/sc2_tabletop_assets.c \
+$(SC2_DIR)/visionos/sc2_tabletop_models.c \
+$(SC2_DIR)/visionos/sc2_tabletop_game.c
 
 define bz_xr_sc2_platform_rules
 BZ_XR_SC2_$(1)_DIR := $$(BZ_XR_LIB_DIR)/sc2/$(1)
@@ -295,6 +297,9 @@ $$(BZ_XR_SC2_$(1)_SMOKE): $$(BZ_XR_SC2_$(1)_BRIDGE_ARCHIVE) $$(BZ_XR_SC2_$(1)_EN
 	@nm -g $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_SC2A_AbiVersion'
 	@nm -g $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_SC2A_LatestTerrain'
 	@nm -g $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_SC2A_RegisterTerrainImage'
+	@nm -g $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_SC2M_AbiVersion'
+	@nm -g $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_SC2M_RegisterModel'
+	@nm -g $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_SC2M_RegisterLayerImage'
 
 .PHONY: visionos-sc2-$(1)
 visionos-sc2-$(1): $$(BZ_XR_SC2_$(1)_SMOKE)

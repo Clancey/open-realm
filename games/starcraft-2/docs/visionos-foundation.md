@@ -19,7 +19,8 @@ SC2 server/game
 
 `platform/bridge/bz_tabletop_game.h` is the selected-game policy seam. Warcraft
 continues to initialize and publish its asset ABI. SC2 publishes its distinct
-terrain/DDS ABI documented in [visionos-assets.md](visionos-assets.md); it does
+terrain/DDS Layer 2A and M3 Layer 2B1 ABIs documented in
+[visionos-assets.md](visionos-assets.md); it does
 not fake SC2 terrain through the Warcraft W3E descriptor.
 
 Selection is copied from server-authored `RF_SELECTED`, not the desktop
@@ -91,8 +92,9 @@ No simulator is launched in this layer. The later native-shell layer must use a
 fresh disposable Apple Vision Pro simulator and must never address
 `0FDBB103-A3CE-461F-AF41-30CDBEC010FE`.
 
-## Next layer boundary
+## Current model boundary
 
-SC2 M3 geometry and material export remains game-owned Layer 2B. The OpenGL
-desktop renderer is not a visionOS asset provider, and renderer-private M3
-pointers or buffers must not cross the native asset ABI.
+Layer 2B1 now exports retained static M3 geometry plus raw material/layer descriptors through
+`sc2_tabletop_models.h`. The OpenGL desktop renderer is not a visionOS asset provider, and
+renderer-private M3 pointers or buffers do not cross the native asset ABI. Layer 2C owns skeleton
+evaluation, animation, attachment/entity resolution, and the later RealityKit renderer.

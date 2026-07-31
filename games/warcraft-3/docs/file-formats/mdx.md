@@ -149,6 +149,17 @@ Each entry in `SEQS` describes one named clip:
 
 Standard sequence names are: `Stand`, `Walk`, `Attack`, `Attack Slam`, `Attack 2`, `Decay Flesh`, `Decay Bone`, `Death`, `Dissipate`, `Portrait`, `Spell`, `Stand Channel`, `Stand Ready`, `Stand Work`.
 
+## Runtime ownership
+
+`R_LoadModelMDLX()` owns the root model, fixed arrays, every linked record family, every nested
+keytrack/array, geoset GL objects, and texture registry entries created for `TEXS`. `MDLX_Release()`
+releases that complete graph exactly once. `model->nodes[]` and `geoset->geosetAnim` are borrowed
+indexes into owned records and are not separate allocations. Texture entries are unlinked from the
+renderer registry before release; shared built-in missing-asset placeholders remain renderer-owned.
+Renderer-global `tr.model[]` assets are duplicate-safe owners and are released before
+`MDLX_Shutdown()` while the GL context is current; borrowed texture-inspection cache state is cleared
+with them.
+
 ## Related Source Files
 
 | Source | Purpose |

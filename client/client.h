@@ -97,7 +97,7 @@ struct client_state {
         FLOAT radius;
     } cursor_splat;
     DWORD hover_entity;     /* entity number under mouse cursor (0 = none) */
-    LPCMODEL moveConfirmation;
+    LPMODEL moveConfirmation;
     DWORD num_entities;
     DWORD time;
     struct {
