@@ -314,6 +314,9 @@ matrices, geoset animations, particle/ribbon emitters, and event/camera data.
 Classic MDX may omit a geoset `UVBS` stream entirely; the descriptor then
 authoritatively reports `uv_count=0`. Consumers may synthesize zero UVs for that
 fully absent stream, but a partial nonzero stream remains malformed.
+Retail MDX 800 geosets place `UVAS`/`UVBS` after the fixed `MATS` metadata block.
+The bounded record parser must continue after `MATS`; treating it as an end marker
+silently discards every authored model UV while leaving positions and indices valid.
 
 ## Swift value adapter
 
