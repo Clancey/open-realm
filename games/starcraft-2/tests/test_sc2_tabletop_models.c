@@ -193,7 +193,9 @@ static void *build_aliased_material_m3(uint32_t *size, uint32_t material_count, 
     memcpy(refs[3].id, "RAHC", 4); refs[3].offset = string_offset;
     refs[3].nEntries = string_bytes;
     FOR_LOOP(i, dummy_refs) {
-        memcpy(refs[4 + i].id, "RAHC", 4); refs[4 + i].offset = string_offset;
+        static const char ids[][4] = { "RAHC", "_TAM", "RYAL" };
+        DWORD offsets[] = { string_offset, materials_offset, layer_offset };
+        memcpy(refs[4 + i].id, ids[i % 3], 4); refs[4 + i].offset = offsets[i % 3];
         refs[4 + i].nEntries = string_bytes;
     }
     put_ref(data + 32, 312, (Reference){ .nEntries = material_count, .ref = 1 });
@@ -545,9 +547,21 @@ static void test_parser_reference_amplification_budget(void) {
     ASSERT(model->decoded_bytes <= SC2_M3_MAX_DECODED_BYTES);
     ASSERT(model->parse_work <= SC2_M3_MAX_PARSE_WORK);
     SC2_M3Free(model); free(data);
-    data = build_aliased_material_m3(&size, 100, 64, 5000);
+    data = build_aliased_material_m3(&size, 1, 64, 5000);
+    model = SC2_M3Parse(data, size);
+    ASSERT_NOT_NULL(model); ASSERT_NOT_NULL(model->head); ASSERT(!model->budget_exceeded);
+    ASSERT_EQ_INT(model->head->nRefs, 5004);
+    ASSERT_EQ_INT(model->ref_lengths[3], model->ref_lengths[4]);
+    SC2_M3Free(model); free(data);
+    data = build_aliased_material_m3(&size, 1, 64, 1);
+    struct MD33 *head = data;
+    struct ReferenceEntry *refs = (struct ReferenceEntry *)((uint8_t *)data + head->ofsRefs);
+    refs[4].offset = head->ofsRefs;
+    assert_parser_rejects(data, size);
+    data = build_aliased_material_m3(&size, 100, 1u << 20, 5000);
     model = SC2_M3Parse(data, size);
     ASSERT_NOT_NULL(model); ASSERT_NULL(model->head); ASSERT(model->budget_exceeded);
+    ASSERT_NOT_NULL(model->ref_lengths);
     ASSERT(model->parse_work <= SC2_M3_MAX_PARSE_WORK);
     SC2_M3Free(model); free(data);
 }

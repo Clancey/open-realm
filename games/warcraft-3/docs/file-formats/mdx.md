@@ -156,6 +156,9 @@ keytrack/array, geoset GL objects, and texture registry entries created for `TEX
 releases that complete graph exactly once. `model->nodes[]` and `geoset->geosetAnim` are borrowed
 indexes into owned records and are not separate allocations. Texture entries are unlinked from the
 renderer registry before release; shared built-in missing-asset placeholders remain renderer-owned.
+Renderer-global `tr.model[]` assets are duplicate-safe owners and are released before
+`MDLX_Shutdown()` while the GL context is current; borrowed texture-inspection cache state is cleared
+with them.
 
 ## Related Source Files
 

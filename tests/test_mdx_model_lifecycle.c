@@ -2,10 +2,11 @@
 
 #include "games/warcraft-3/renderer/mdx/r_mdx.h"
 #include "games/warcraft-3/renderer/mdx/r_mdx_lifecycle.h"
+#include "renderer/r_model_lifecycle.h"
 #include "test_framework.h"
 
 int _tests_run = 0, _tests_failed = 0;
-static void *g_allocations[128];
+static void *g_allocations[256];
 static int g_alloc_count, g_free_count, g_gpu_count, g_texture_count;
 
 static void *tracked_alloc(size_t size) {
@@ -30,6 +31,10 @@ static void populate_node(mdxNode_t *node) {
 
 static void release_gpu(mdxGeoset_t *geoset) { ASSERT_NOT_NULL(geoset); g_gpu_count++; }
 static void unregister_texture(int texture) { ASSERT(texture == 101 || texture == 102); g_texture_count++; }
+static mdxReleaseAPI_t g_release_api = {
+    .mem_free = tracked_free, .release_geoset_gpu = release_gpu,
+    .unregister_texture = unregister_texture,
+};
 
 static mdxModel_t *build_populated_model(void) {
     mdxModel_t *model = tracked_alloc(sizeof(*model));
@@ -87,20 +92,43 @@ static mdxModel_t *build_populated_model(void) {
 
 static void test_complete_model_release(void) {
     mdxModel_t *model;
-    mdxReleaseAPI_t api = {
-        .mem_free = tracked_free, .release_geoset_gpu = release_gpu,
-        .unregister_texture = unregister_texture,
-    };
     g_alloc_count = g_free_count = g_gpu_count = g_texture_count = 0;
     model = build_populated_model();
-    mdx_release_owned_model(&model, &api);
+    mdx_release_owned_model(&model, &g_release_api);
     ASSERT_NULL(model); ASSERT_EQ_INT(g_free_count, g_alloc_count);
     ASSERT_EQ_INT(g_gpu_count, 1); ASSERT_EQ_INT(g_texture_count, 2);
-    mdx_release_owned_model(&model, &api);
+    mdx_release_owned_model(&model, &g_release_api);
     ASSERT_EQ_INT(g_free_count, g_alloc_count);
+}
+
+static void release_wrapper(LPMODEL model) {
+    mdx_release_owned_model(&model->mdx, &g_release_api); tracked_free(model);
+}
+
+static LPMODEL build_model_wrapper(void) {
+    LPMODEL model = tracked_alloc(sizeof(*model));
+    model->modeltype = ID_MDLX; model->mdx = build_populated_model();
+    return model;
+}
+
+static void test_renderer_shutdown_and_reinit(void) {
+    LPMODEL models[2];
+    rOwnedModels_t owned = { models, 2, release_wrapper };
+    g_alloc_count = g_free_count = g_gpu_count = g_texture_count = 0;
+    models[0] = models[1] = build_model_wrapper();
+    R_ReleaseOwnedModels(&owned);
+    ASSERT_NULL(models[0]); ASSERT_NULL(models[1]); ASSERT_EQ_INT(g_free_count, g_alloc_count);
+    ASSERT_EQ_INT(g_gpu_count, 1); ASSERT_EQ_INT(g_texture_count, 2);
+    R_ReleaseOwnedModels(&owned);
+    ASSERT_EQ_INT(g_free_count, g_alloc_count);
+    models[0] = build_model_wrapper(); models[1] = NULL;
+    R_ReleaseOwnedModels(&owned);
+    ASSERT_NULL(models[0]); ASSERT_EQ_INT(g_free_count, g_alloc_count);
+    ASSERT_EQ_INT(g_gpu_count, 2); ASSERT_EQ_INT(g_texture_count, 4);
 }
 
 int main(void) {
     RUN_TEST(test_complete_model_release);
+    RUN_TEST(test_renderer_shutdown_and_reinit);
     TEST_RESULTS();
 }

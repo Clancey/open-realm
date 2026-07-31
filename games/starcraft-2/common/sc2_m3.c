@@ -137,21 +137,51 @@ static m3Reader_t m3_make_reader(m3Model_t const *model, Reference ref) {
     };
 }
 
-/* Build section bounds once; the charged quadratic scan cannot be multiplied by aliased references. */
+typedef struct {
+    DWORD offset;
+    DWORD index;
+} m3RefOffset_t;
+
+/* Sort offsets with deterministic merge passes so section indexing has an exact O(n log n) work charge. */
 static BOOL m3_init_reference_lengths(m3Model_t *model) {
     DWORD count = model->head->nRefs;
-    if (!m3_budget_charge(model, ((uint64_t)count + 1) * sizeof(*model->ref_lengths),
-                          (uint64_t)count * count))
-        return false;
+    DWORD passes = 0;
+    m3RefOffset_t *order, *scratch;
+    if (!m3_budget_charge(model, ((uint64_t)count + 1) * sizeof(*model->ref_lengths), 0)) return false;
     model->ref_lengths = calloc(count + 1, sizeof(*model->ref_lengths));
     if (!model->ref_lengths) return model->valid = false;
-    FOR_LOOP(i, count) {
-        DWORD section_end = model->head->ofsRefs;
-        FOR_LOOP(j, count)
-            if (model->refs[j].offset > model->refs[i].offset && model->refs[j].offset < section_end)
-                section_end = model->refs[j].offset;
-        model->ref_lengths[i] = section_end - model->refs[i].offset;
+    if (!m3_budget_charge(model, (uint64_t)count * sizeof(*order), 0)) return false;
+    order = malloc((size_t)count * sizeof(*order));
+    if (!order) return model->valid = false;
+    if (!m3_budget_charge(model, (uint64_t)count * sizeof(*scratch), 0)) { free(order); return false; }
+    scratch = malloc((size_t)count * sizeof(*scratch));
+    if (!scratch) { free(order); return model->valid = false; }
+    for (size_t width = 1; width < count; width *= 2) passes++;
+    if (!m3_budget_charge(model, 0, (uint64_t)count * (passes + 2))) {
+        free(scratch); free(order); return false;
     }
+    FOR_LOOP(i, count) order[i] = (m3RefOffset_t){ model->refs[i].offset, i };
+    for (size_t width = 1; width < count; width *= 2) {
+        for (size_t left = 0; left < count; left += width * 2) {
+            size_t mid = MIN(left + width, count), right = MIN(left + width * 2, count);
+            size_t a = left, b = mid;
+            for (size_t out = left; out < right; out++) {
+                BOOL take_a = b >= right || (a < mid && (order[a].offset < order[b].offset ||
+                    (order[a].offset == order[b].offset && order[a].index < order[b].index)));
+                scratch[out] = take_a ? order[a++] : order[b++];
+            }
+        }
+        m3RefOffset_t *swap = order; order = scratch; scratch = swap;
+    }
+    for (size_t first = 0; first < count;) {
+        size_t next = first + 1;
+        while (next < count && order[next].offset == order[first].offset) next++;
+        DWORD section_end = next < count ? order[next].offset : model->head->ofsRefs;
+        for (size_t i = first; i < next; i++)
+            model->ref_lengths[order[i].index] = section_end - order[i].offset;
+        first = next;
+    }
+    free(scratch); free(order);
     return true;
 }
 

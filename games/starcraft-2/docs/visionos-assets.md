@@ -93,8 +93,9 @@ hardening accepts all 178 with zero malformed or unsupported-version failures.
 M3 decoding is cumulatively bounded at 256 MiB of input/owned decoded bytes and 16 Mi parse-work
 operations. These limits preserve legal shared references without shared ownership, while rejecting
 reference aliasing that would otherwise amplify a roughly 1 MiB file into gigabytes of deep copies.
-The strict 178-model rerun peaked at 3,273,948 decoded bytes and 5,111,666 work operations. Run
-`m3tool --info` to inspect the exact counters for any retail identity.
+The strict TRaynor01 set remains 178/178. An extended 179-model rerun adds ThorCE's 4,437-reference
+model and peaks at 3,277,644 decoded bytes and 219,705 work operations. Run `m3tool --info` to inspect
+the exact counters for any retail identity.
 
 | Inventory | Object models | Cliff models |
 | --- | ---: | ---: |
