@@ -1,6 +1,7 @@
 /*
- * r_tabletop_null.c - headless renderer backend for the visionOS tabletop
- * client (Layer 2).
+ * r_tabletop_null.c - headless renderer backend for the shared tabletop
+ * client (see platform/tabletop/client), linked by every native host
+ * (visionOS today; Android/Meta Quest later).
  *
  * Provides R_GetAPI() (and an R_StdoutGetAPI() alias - see below) so
  * client/cl_main.c's CL_Init()/CL_GetRendererAPI() link and run unmodified.
@@ -36,7 +37,7 @@ static size2_t const null_window_size = { 0, 0 };
 static void RNull_Init(DWORD width, DWORD height) {
     (void)width;
     (void)height;
-    fprintf(stderr, "R_GetAPI: visionOS tabletop headless renderer active "
+    fprintf(stderr, "R_GetAPI: headless tabletop renderer active "
                      "(no window, no GL context, no drawing)\n");
     BZ_TT_Init();
 }
@@ -194,7 +195,7 @@ refExport_t R_GetAPI(refImport_t imp) {
  * an explicit, logged alias rather than a silent divergence from the
  * requested module. */
 refExport_t R_StdoutGetAPI(refImport_t imp) {
-    fprintf(stderr, "R_StdoutGetAPI: r_module=stdout is not available in the visionOS "
+    fprintf(stderr, "R_StdoutGetAPI: r_module=stdout is not available in the headless "
                      "tabletop build; using the headless renderer instead\n");
     return R_GetAPI(imp);
 }

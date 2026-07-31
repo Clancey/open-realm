@@ -1,6 +1,7 @@
 /*
- * cl_scrn_tabletop_null.c - headless screen/UI-wire glue for the visionOS
- * tabletop client (Layer 2).
+ * cl_scrn_tabletop_null.c - headless screen/UI-wire glue for the shared
+ * tabletop client (see platform/tabletop/client), linked by every native
+ * host (visionOS today; Android/Meta Quest later).
  *
  * Real client/cl_scrn.c pulls in <SDL2/SDL.h> and drives the actual pixel
  * draw calls (re.BeginFrame/DrawLayout/EndFrame, the loading plaque, the

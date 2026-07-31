@@ -1,6 +1,7 @@
 /*
  * cl_console_tabletop_null.c - headless developer console glue for the
- * visionOS tabletop client (Layer 2).
+ * shared tabletop client (see platform/tabletop/client), linked by every
+ * native host (visionOS today; Android/Meta Quest later).
  *
  * Real client/console.c pulls in <SDL2/SDL.h> (for text-input handling)
  * and stores CON_printf() output into an in-memory ring buffer that is

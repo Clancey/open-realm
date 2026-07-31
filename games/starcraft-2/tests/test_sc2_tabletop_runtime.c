@@ -2,7 +2,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "platform/apple/visionos/tabletop/bridge/bz_tabletop_lifecycle.h"
+#include "platform/tabletop/bridge/bz_tabletop_lifecycle.h"
 #include "platform/bridge/bz_tabletop_transport.h"
 #include "games/starcraft-2/visionos/sc2_tabletop_assets.h"
 #include "games/starcraft-2/visionos/sc2_tabletop_models.h"

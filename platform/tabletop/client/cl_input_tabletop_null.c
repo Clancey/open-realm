@@ -1,6 +1,7 @@
 /*
- * cl_input_tabletop_null.c - headless input glue for the visionOS tabletop
- * client (Layer 2).
+ * cl_input_tabletop_null.c - headless input glue for the shared tabletop
+ * client (see platform/tabletop/client), linked by every native host
+ * (visionOS today; Android/Meta Quest later).
  *
  * Real client/cl_input.c polls SDL for mouse/keyboard events (via
  * cl_input_local.h, which pulls SDL2) and drives real-time drag-select,
@@ -47,7 +48,7 @@ void CL_SetGameplayBindings(void) {
 }
 
 void CL_InitInput(void) {
-    fprintf(stderr, "CL_InitInput: visionOS tabletop build has no platform input source; "
+    fprintf(stderr, "CL_InitInput: headless tabletop build has no platform input source; "
                      "commands arrive only via the bz_tabletop_transport command queue\n");
 }
 

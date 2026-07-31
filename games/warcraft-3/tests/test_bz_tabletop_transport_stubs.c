@@ -5,8 +5,8 @@
  *
  * This binary links the REAL platform/bridge/bz_tabletop_transport.c, the
  * REAL client/cl_parse.c (server->client packet parser), and the REAL
- * platform/apple/visionos/tabletop/client/cl_scrn_tabletop_null.c (the same
- * headless glue that ships in the xrsimulator/xros archive) - not a second,
+ * platform/tabletop/client/cl_scrn_tabletop_null.c (the same headless
+ * glue that ships in the xrsimulator/xros archive) - not a second,
  * parallel reimplementation of any of them. This file supplies only the
  * handful of symbols those real files still need at link time that would
  * otherwise come from excluded/SDL-tainted engine files (mirrors
@@ -19,7 +19,7 @@
 
 #include "client/client.h"
 #include "common/cmodel.h"
-#include "platform/apple/visionos/tabletop/client/bz_tabletop_client_glue.h"
+#include "platform/tabletop/client/bz_tabletop_client_glue.h"
 #include "platform/bridge/bz_tabletop_transport.h"
 
 struct client_state cl;
@@ -93,8 +93,8 @@ static BOX2 g_test_world_bounds;
 void test_transport_set_world_bounds(BOX2 bounds) { g_test_world_bounds = bounds; }
 BOX2 CM_GetWorldBounds(void) { return g_test_world_bounds; }
 
-/* Controllable stand-in for platform/apple/visionos/tabletop/client/
- * ui_tabletop_null.c's real cache (same contract: BZ_TT_PublishSnapshotFromClient()
+/* Controllable stand-in for platform/tabletop/client/ui_tabletop_null.c's
+ * real cache (same contract: BZ_TT_PublishSnapshotFromClient()
  * calls this once per publish). Kept separate from the real UI glue file so
  * these tests can deterministically control what "the last CL_ParseUnitUI()
  * decode" looked like without needing the real same-thread cache's timing. */
