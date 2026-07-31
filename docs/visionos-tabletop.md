@@ -11,6 +11,9 @@ Detailed controls and asset contracts live in:
 - [visionos-tabletop-controls.md](visionos-tabletop-controls.md)
 - [wc3-visionos-assets.md](wc3-visionos-assets.md)
 
+The parallel snapshot-only StarCraft II foundation is documented in
+[games/starcraft-2/docs/visionos-foundation.md](../games/starcraft-2/docs/visionos-foundation.md).
+
 ## Local data contract
 
 Retail archives are local-only and must never be committed. Set:

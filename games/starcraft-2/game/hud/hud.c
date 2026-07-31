@@ -118,6 +118,8 @@ static void sc2_hud_parse_assets_txt(HANDLE buf, DWORD len, void *ud) {
  * covers Liberty.SC2Mod entries loaded at runtime. */
 static int sc2_hud_image_index(LPCSTR resource) {
     static struct { LPCSTR logical, physical; } const paths[] = {
+        /* Core's ChatBar names this legacy alias, but no retail Assets.txt defines it. */
+        { "UI/ResourceIconMinerals", "Assets/Textures/icon-mineral-terran.dds" },
         { "UI/ResourceIcon0",    "Assets/Textures/icon-mineral.dds" },
         { "UI/ResourceIcon1",    "Assets/Textures/icon-gas.dds" },
         { "UI/ResourceIcon2",    "Assets/Textures/icon-highyieldmineral.dds" },

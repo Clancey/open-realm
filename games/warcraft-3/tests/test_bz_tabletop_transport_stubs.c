@@ -149,9 +149,9 @@ bool test_transport_asset_terminal(void) {
     return terminal;
 }
 
-/* Asset export has its own focused suite; these synchronized lifecycle stubs
- * prove transport and asset transitions share one serialization boundary. */
-void BZ_TTA_Init(void) {
+/* Game export has its own focused suites; these synchronized lifecycle stubs
+ * prove transport and selected-game transitions share one serialization boundary. */
+void BZ_GameTabletopInit(void) {
     pthread_mutex_lock(&asset_lock);
     asset_init_waiting = true;
     pthread_cond_broadcast(&asset_cond);
@@ -159,7 +159,7 @@ void BZ_TTA_Init(void) {
     asset_init_waiting = false; asset_terminal = false;
     pthread_mutex_unlock(&asset_lock);
 }
-void BZ_TTA_Shutdown(void) {
+void BZ_GameTabletopShutdown(void) {
     pthread_mutex_lock(&asset_lock); asset_terminal = true; pthread_mutex_unlock(&asset_lock);
 }
-void BZ_TTA_PublishTerrainFromGame(void) {}
+void BZ_GameTabletopPublish(void) {}

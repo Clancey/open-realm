@@ -6,9 +6,12 @@ The code here owns a small game module and the StarCraft II M3 renderer hooks.
 
 ## Status
 
-Prototype asset-rendering target.
+Desktop runtime plus a headless native visionOS snapshot foundation.
 
-`opensc2` builds, links, and provides a clean place for M3 work. It is not a playable StarCraft II implementation, and it does not yet have a StarCraft II UI or gameplay layer. The current value is technical: model format coverage, renderer integration, and a second RTS-shaped game module.
+`opensc2` loads retail Wings of Liberty maps including TRaynor01, parses SC2
+catalog/layout/terrain data, renders M3 models and terrain on desktop, publishes
+an SC2 HUD, and supports minimal authoritative selection and movement. It is not
+a complete StarCraft II implementation.
 
 ## Working
 
@@ -19,21 +22,28 @@ Prototype asset-rendering target.
 - Basic skeletal/skinned model render path through the compound renderer.
 - Minimal game module that can initialize, load map collision through the shared map interface, and provide required game exports.
 - Build integration through `make opensc2`.
+- SC2-specific layout/HUD parsing and server-authored HUD delivery.
+- Catalog-driven unit/actor/model resolution and parsed map terrain/objects.
+- Minimal authoritative selection and point/entity movement.
+- arm64 `xrsimulator`/`xros` headless engine and bridge archives with immutable
+  snapshot ABI v3 and typed commands.
 
 ## Partial
 
 - M3 support is actively shaped around the renderer path and is not full StarCraft II asset parity.
-- The game module is intentionally minimal and mostly acts as a host for map/model experiments.
-- UI currently falls back to the default build shape; there is no StarCraft II-specific UI library.
-- Map/world behavior is placeholder-level compared with the Warcraft III target.
+- The game module implements only the minimal unit lifecycle and movement needed
+  to exercise the authoritative runtime.
+- The desktop SC2 HUD is functional but not a complete menu or gameplay UI.
+- The visionOS layer has no visible native app or asset renderer yet.
 
 ## Not There Yet
 
 - Playable StarCraft II gameplay.
 - StarCraft II data table, trigger, ability, race, or campaign systems.
-- Full SC2 map format support.
+- Complete SC2 map format support.
 - Complete M3 material, animation, particle, attachment, and lighting fidelity.
-- StarCraft II menus, HUD, editor-like behavior, or multiplayer flow.
+- Complete StarCraft II menus, editor-like behavior, or multiplayer flow.
+- RealityKit SC2 terrain/M3 rendering and native visionOS HUD/product flow.
 
 ## Build And Run
 
@@ -70,6 +80,8 @@ Public reverse-engineering and modding references for how StarCraft II maps are 
 - [Map, Model, And Unit Data](docs/map-model-unit-data.md) — practical path from placed objects through catalog XML to M3 models.
 - [Parser Notes](docs/parser-notes.md) — practical loading order and implementation guidance.
 - [HUD Layout Pipeline](docs/hud-layout-pipeline.md) — `.SC2Layout` → `sc2BaseFrame_t` → `uiFrame_t` → `svc_layout` pipeline; UI texture resolution via Assets.txt.
+- [Retail Installer Extraction](docs/installer-extraction.md) — read-only ISO/MPQE provenance, MPQ v2 repack rules, exact local manifest, and validation.
+- [visionOS Foundation](docs/visionos-foundation.md) — headless archives, selected-game transport seam, staging, tests, and next-layer boundary.
 - [References](docs/references.md) — all public sources, tools, and GitHub repos used.
 - [Sounds](docs/sounds.md)
 
@@ -103,6 +115,6 @@ Public reverse-engineering and modding references for how StarCraft II maps are 
 | `t3SyncPathingInfo` (pathing) | **not started** |
 | `t3Water` | **not started** |
 | `t3FluffDoodad` | **not started** |
-| Catalog-driven unit → model resolution | **not started** (currently uses path guessing) |
+| Catalog-driven unit → model resolution | done |
 | `.m3a` animation supplements | **not started** |
 | Team-color texture swapping | **not started** |

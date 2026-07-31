@@ -340,13 +340,10 @@ static void test_snapshot_reflects_entities_and_selection(void) {
     cl.ents[1].current.player = 2;
     cl.ents[1].current.model = 7;
     cl.ents[1].current.model2 = 12; /* One active slot remains one transport entity despite its render attachment. */
-    cl.ents[1].selected = true;
+    cl.ents[1].current.renderfx = RF_SELECTED;
     cl.ents[2].current.number = 2;
     cl.ents[2].current.class_id = 43;
     cl.ents[2].current.model2 = 11; /* Attachments do not activate an empty base-model slot. */
-
-    cl.selection.num_selected = 1;
-    cl.selection.entity_nums[0] = 1;
 
     BZ_TT_PublishSnapshotFromClient();
     const bzTTSnapshot_t *snap = BZ_TT_Latest();
@@ -370,6 +367,25 @@ static void test_snapshot_reflects_entities_and_selection(void) {
     ASSERT_EQ_INT(n, 1);
     ASSERT_EQ_INT(selected_ids[0], 1);
 
+    BZ_TTSnapshot_Release(snap);
+}
+
+static void test_snapshot_ignores_speculative_local_selection(void) {
+    reset_all();
+    cl.num_entities = 2;
+    cl.ents[1].current.number = 1;
+    cl.ents[1].current.model = 7;
+    cl.ents[1].selected = true;
+    cl.selection.num_selected = 1;
+    cl.selection.entity_nums[0] = 1;
+    BZ_TT_PublishSnapshotFromClient();
+    const bzTTSnapshot_t *snap = BZ_TT_Latest();
+    bzTTEntity_t entity;
+    uint32_t selected[BZ_TT_MAX_SELECTED_ENTITIES];
+    ASSERT_NOT_NULL(snap);
+    ASSERT(BZ_TTSnapshot_EntityAt(snap, 0, &entity));
+    ASSERT(!entity.selected);
+    ASSERT_EQ_INT(BZ_TTSnapshot_SelectedEntityIds(snap, selected, BZ_TT_MAX_SELECTED_ENTITIES), 0);
     BZ_TTSnapshot_Release(snap);
 }
 
@@ -804,6 +820,7 @@ void run_bz_tabletop_transport_tests(void) {
     RUN_TEST(test_configstring_count_and_iteration_bounds);
     RUN_TEST(test_map_bounds_only_valid_when_refresh_prepped);
     RUN_TEST(test_snapshot_reflects_entities_and_selection);
+    RUN_TEST(test_snapshot_ignores_speculative_local_selection);
     RUN_TEST(test_entity_overflow_is_reported_not_truncated_silently);
     RUN_TEST(test_fog_dimensions_and_planes_round_trip);
     RUN_TEST(test_fog_dimensions_false_when_no_fog_buffer);
