@@ -3,10 +3,26 @@
 
 #include "games/starcraft-2/common/sc2_m3.h"
 
+#define BZ_M3_RENDERER_MAX_BONES 128
+
 typedef struct {
     DWORD left, right;
     float fraction;
 } m3KeySpan_t;
+
+/* Desktop shaders and scratch matrices share one fixed 128-entry bone capability. */
+static BOOL m3_renderer_model_supported(m3Model_t const *model) {
+    if (!model || !model->head || !SC2_M3ValidateGeometry(model) ||
+        model->bonesNum > BZ_M3_RENDERER_MAX_BONES)
+        return false;
+    /* The old bone-count-only check let a region base address uBones[128]. */
+    FOR_LOOP(d, model->divisionsNum)
+        FOR_LOOP(r, model->divisions[d].regionsNum)
+            if ((DWORD)model->divisions[d].regions[r].firstBoneLookupIndex +
+                model->divisions[d].regions[r].boneLookupIndicesCount > BZ_M3_RENDERER_MAX_BONES)
+                return false;
+    return true;
+}
 
 /* Exact/single keys select their authored value; only a time before the first key has no span. */
 static BOOL m3_find_key_span(m3Model_t const *model, Reference keys, DWORD time, m3KeySpan_t *span) {

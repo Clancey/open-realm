@@ -134,8 +134,9 @@ make visionos-sc2
 
 `test-sc2-tabletop-assets` covers the shared generic image cache, stable overlong keys, and terrain
 registration across shutdown/re-init. `test-sc2-tabletop-models` covers ABI layouts, exact root and
-section declarations, versioned disk strides, version-zero animation tables, typed-array alignment,
-cross-image/model provider serialization, malformed/missing/confined paths, cache reuse, reload,
-retained lifetime, and terminal behavior. `test-client-model-lifecycle` proves map-clear and final
-shutdown release every owned desktop model/portrait slot exactly once. Runtime live proof freezes
-Marine through the public model ABI.
+section declarations, legacy MODL/REGN/DIV_ layouts, version-zero animation tables, geometry ranges
+and face values, the desktop 128-bone capability, typed-array alignment, cross-image/model provider
+serialization, malformed/missing/confined paths, cache reuse, reload, retained lifetime, and
+terminal behavior. `test-sc2-renderer-model-dispatch` covers 0-3 byte inputs and valid four-byte M3
+dispatch. `test-client-model-lifecycle` proves map-clear and final shutdown release every owned
+desktop model/portrait slot exactly once. Runtime live proof freezes Marine through the public ABI.

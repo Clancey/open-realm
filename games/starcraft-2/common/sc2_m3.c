@@ -62,11 +62,17 @@ static void m3_read(m3Reader_t *reader, void *dst, DWORD bytes) {
 
 static DWORD m3_stride_layer(DWORD version) { return version > 24 ? 468 : version > 23 ? 436 : 356; }
 static DWORD m3_stride_material(DWORD version) { return version > 18 ? 340 : version > 15 ? 280 : 268; }
-static DWORD m3_stride_region(DWORD version) { return version > 4 ? 48 : version > 3 ? 40 : 36; }
+static DWORD m3_stride_region(DWORD version) {
+    switch (version) { case 2: return 28; case 3: return 36; case 4: return 40; case 5: return 48; }
+    return 0;
+}
 static DWORD m3_stride_sequence(DWORD version) { return version < 2 ? 96 : 92; }
 static DWORD m3_stride_model(DWORD version) {
-    return 784 + (version > 24 ? 24 : 0) + (version > 25 ? 12 : 0) +
-           (version > 27 ? 24 : 0) + (version > 28 ? 12 : 0);
+    switch (version) {
+    case 20: return 748; case 21: return 760; case 23: return 784; case 25: return 808;
+    case 26: return 820; case 28: return 844; case 29: return 856;
+    }
+    return 0;
 }
 
 #define M3_SCHEMA_FIXED(TYPE, ID, MIN_VERSION, MAX_VERSION, STRIDE) \
@@ -83,15 +89,15 @@ M3_SCHEMA_FIXED(CompositeMaterialSection, "_SMC", 0, 0, 24);
 M3_SCHEMA_FIXED(CompositeMaterial, "_PMC", 0, 2, 28);
 M3_SCHEMA_VERSIONED(Layer, "RYAL", 0, 25, m3_stride_layer);
 M3_SCHEMA_VERSIONED(Material, "_TAM", 0, 19, m3_stride_material);
-M3_SCHEMA_VERSIONED(Region, "NGER", 0, 5, m3_stride_region);
-M3_SCHEMA_FIXED(Batch, "_TAB", 0, 1, 14);
-M3_SCHEMA_FIXED(Divisions, "_VID", 0, 2, 48);
+M3_SCHEMA_VERSIONED(Region, "NGER", 2, 5, m3_stride_region);
+M3_SCHEMA_FIXED(Batch, "_TAB", 1, 1, 14);
+M3_SCHEMA_FIXED(Divisions, "_VID", 2, 2, 52);
 M3_SCHEMA_VERSIONED(Sequence, "SQES", 0, 2, m3_stride_sequence);
 M3_SCHEMA_FIXED(SequenceTimeline, "_CTS", 0, 4, 204);
 M3_SCHEMA_FIXED(SequenceValidator, "_STS", 0, 0, 28);
 M3_SCHEMA_FIXED(SequenceGetter, "_GTS", 0, 0, 24);
 M3_SCHEMA_FIXED(Bone, "ENOB", 0, 1, 160);
-M3_SCHEMA_VERSIONED(Model, "LDOM", 0, 29, m3_stride_model);
+M3_SCHEMA_VERSIONED(Model, "LDOM", 20, 29, m3_stride_model);
 #undef M3_SCHEMA_FIXED
 #undef M3_SCHEMA_VERSIONED
 
@@ -308,9 +314,15 @@ M3_READER(Material) {
 
 M3_READER(Region) {
     M3_READ(sb, data->unknown0, 0);
-    M3_READ(sb, data->unknown1, 0);
-    M3_READ(sb, data->firstVertexIndex, 0);
-    M3_READ(sb, data->verticesCount, 0);
+    if (sb->ent.version >= 3) {
+        M3_READ(sb, data->unknown1, 0);
+        M3_READ(sb, data->firstVertexIndex, 0);
+        M3_READ(sb, data->verticesCount, 0);
+    } else {
+        USHORT first_vertex, vertex_count;
+        M3_READ(sb, first_vertex, 0); M3_READ(sb, vertex_count, 0);
+        data->firstVertexIndex = first_vertex; data->verticesCount = vertex_count;
+    }
     M3_READ(sb, data->firstTriangleIndex, 0);
     M3_READ(sb, data->triangleIndicesCount, 0);
     M3_READ(sb, data->bonesCount, 0);
@@ -337,6 +349,7 @@ M3_READER(Divisions) {
     M3_REFR(sb, data->regions, Region, 0);
     M3_REFR(sb, data->batches, Batch, 0);
     M3_READ(sb, data->MSEC, 0);
+    M3_READ(sb, data->unknown, 0);
 }
 
 M3_READER(Sequence) {
@@ -405,7 +418,7 @@ static void m3_init_model(m3Model_t *model, m3Reader_t *sb) {
     M3_READ(sb, model->attachmentPoints, 0);
     M3_READ(sb, model->attachmentPointAddons, 0);
     M3_READ(sb, model->ligts, 0);
-    M3_READ(sb, model->shbxData, 0);
+    M3_READ(sb, model->shbxData, 20);
     M3_READ(sb, model->cameras, 0);
     M3_READ(sb, model->unknown21, 0);
     M3_REFR(sb, model->materialReferences, MaterialReference, 0);
@@ -441,8 +454,8 @@ static void m3_init_model(m3Model_t *model, m3Reader_t *sb) {
     M3_READ(sb, model->tightHitTest, 0);
     M3_READ(sb, model->fuzzyHitTestObjects, 0);
     M3_READ(sb, model->attachmentVolumes, 0);
-    M3_READ(sb, model->attachmentVolumesAddon0, 0);
-    M3_READ(sb, model->attachmentVolumesAddon1, 0);
+    M3_READ(sb, model->attachmentVolumesAddon0, 22);
+    M3_READ(sb, model->attachmentVolumesAddon1, 22);
     M3_READ(sb, model->billboardBehaviors, 0);
     M3_READ(sb, model->tmdData, 0);
     M3_READ(sb, model->unknown27, 0);
@@ -493,6 +506,37 @@ static BOOL m3_validate_animations(m3Model_t const *model) {
     return true;
 }
 
+/* Both renderer paths consume region-local faces, so validate once before either can publish/upload them. */
+BOOL SC2_M3ValidateGeometry(m3Model_t const *model) {
+    if (!model || !model->head || !model->valid) return false;
+    FOR_LOOP(d, model->divisionsNum) {
+        m3Divisions_t const *division = &model->divisions[d];
+        if (division->facesNum % 3) return false;
+        FOR_LOOP(r, division->regionsNum) {
+            m3Region_t const *region = &division->regions[r];
+            uint64_t vertex_end = (uint64_t)region->firstVertexIndex + region->verticesCount;
+            uint64_t index_end = (uint64_t)region->firstTriangleIndex + region->triangleIndicesCount;
+            uint64_t bone_end = (uint64_t)region->firstBoneLookupIndex + region->boneLookupIndicesCount;
+            if (vertex_end > model->verticesNum || index_end > division->facesNum ||
+                bone_end > model->boneLookupNum || region->triangleIndicesCount % 3)
+                return false;
+            FOR_LOOP(i, region->triangleIndicesCount)
+                if (division->faces[region->firstTriangleIndex + i] >= region->verticesCount) return false;
+            /* Region-local skin slots must not let either renderer read another palette. */
+            FOR_LOOP(v, region->verticesCount)
+                FOR_LOOP(i, 4)
+                    if (model->vertices[region->firstVertexIndex + v].boneIndex[i] >=
+                        region->boneLookupIndicesCount)
+                        return false;
+        }
+        FOR_LOOP(b, division->batchesNum)
+            if (division->batches[b].regionIndex >= division->regionsNum ||
+                division->batches[b].materialReferenceIndex >= model->materialReferencesNum)
+                return false;
+    }
+    return true;
+}
+
 m3Model_t *SC2_M3Parse(void const *data, DWORD size) {
     m3Model_t *model = calloc(1, sizeof(*model));
     m3Reader_t root;
@@ -523,11 +567,16 @@ m3Model_t *SC2_M3Parse(void const *data, DWORD size) {
     model->valid = true;
         if (!m3_schema_reader(model, model->head->MODL, &m3_schema_Model, &root, &root_stride)) {
             fprintf(stderr, "SC2_M3Parse: invalid MODL root declaration\n");
+            if (!memcmp(model->refs[model->head->MODL.ref].id, "LDOM", 4) &&
+                model->refs[model->head->MODL.ref].nEntries == 1 &&
+                !m3_stride_model(model->refs[model->head->MODL.ref].version))
+                model->unsupported = true;
             model->head = NULL;
             return model;
         }
         m3_init_model(model, &root);
-        if (!model->valid || root.readcount != root_stride || !m3_validate_animations(model)) {
+        if (!model->valid || root.readcount != root_stride || !m3_validate_animations(model) ||
+            !SC2_M3ValidateGeometry(model)) {
             fprintf(stderr, "SC2_M3Parse: truncated or malformed referenced section\n");
             model->head = NULL;
     }

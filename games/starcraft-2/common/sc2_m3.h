@@ -268,6 +268,7 @@ typedef struct {
     M3_ENTRIES(Region, regions);
     M3_ENTRIES(Batch, batches);
     Reference MSEC;
+    DWORD unknown;
     DWORD indicesBuffer;
 } m3Divisions_t;
 
@@ -375,6 +376,7 @@ typedef struct m3Model_s {
     DWORD size;
     DWORD type;
     BOOL valid;
+    BOOL unsupported;
     
     
     M3_ENTRIES(Char, modelName);
@@ -443,6 +445,7 @@ m3Model_t *SC2_M3Parse(void const *buffer, DWORD size);
 void SC2_M3Free(m3Model_t *model);
 BOOL SC2_M3ReferenceCount(m3Model_t const *model, m3ReferenceRead_t const *read, LPDWORD count);
 BOOL SC2_M3ReferenceElement(m3Model_t const *model, m3ReferenceRead_t const *read, HANDLE out);
+BOOL SC2_M3ValidateGeometry(m3Model_t const *model);
 DWORD SC2_M3VertexUVCount(DWORD flags);
 DWORD SC2_M3VertexDiskSize(DWORD flags);
 

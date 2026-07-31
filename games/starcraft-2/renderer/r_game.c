@@ -2,6 +2,7 @@
 #include "m3/r_m3.h"
 #include "games/starcraft-2/common/sc2_map.h"
 #include "sc2/r_sc2map.h"
+#include "r_game_utils.h"
 
 void M3_Init(void);
 void M3_Shutdown(void);
@@ -222,7 +223,13 @@ LPMODEL R_GameLoadModel(LPCSTR modelFilename) {
     if (fileSize < 0 || !buffer) {
         return NULL;
     }
-    if (*(DWORD *)buffer == ID_43DM) {
+    if (fileSize < (int)sizeof(DWORD)) {
+        /* The old magic read accessed four bytes even when FS returned a 0-3 byte file. */
+        fprintf(stderr, "R_GameLoadModel: truncated model '%s' (%d bytes)\n", modelFilename, fileSize);
+        ri.FS_FreeFile(buffer);
+        return NULL;
+    }
+    if (r_sc2_model_is_m3(buffer, (size_t)fileSize)) {
         model = ri.MemAlloc(sizeof(model_t));
         model->m3 = R_LoadModelM3(buffer, fileSize);
         model->modeltype = ID_43DM;

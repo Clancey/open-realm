@@ -315,7 +315,8 @@ $(eval $(call test_schema,test-sc2,test-sc2-assets $(SHARED_LIB) $(SHEET_LIB),$(
 $(eval $(call test_schema,test-sc2-tabletop-assets,,$(SC2_TEST_CFLAGS) -DBZ_SC2A_TEST_HOOKS,$(BIN_DIR)/test_sc2_tabletop_assets$(EXE_EXT),$(SC2_TEST_DIR)/test_sc2_tabletop_assets.c $(SC2_DIR)/visionos/sc2_tabletop_assets.c $(SC2_DIR)/common/sc2_dds.c,-lm -lpthread,))
 $(eval $(call test_schema,test-sc2-tabletop-models,,$(SC2_TEST_CFLAGS),$(BIN_DIR)/test_sc2_tabletop_models$(EXE_EXT),$(SC2_TEST_DIR)/test_sc2_tabletop_models.c $(SC2_DIR)/visionos/sc2_tabletop_models.c $(SC2_DIR)/visionos/sc2_tabletop_assets.c $(SC2_DIR)/common/sc2_m3.c $(SC2_DIR)/common/sc2_dds.c,-lm -lpthread,))
 $(eval $(call test_schema,test-client-model-lifecycle,,$(CFLAGS) -Itests,$(BIN_DIR)/test_client_model_lifecycle$(EXE_EXT),tests/test_client_model_lifecycle.c,,,))
-test: test-client-model-lifecycle test-sc2-tabletop-models
+$(eval $(call test_schema,test-sc2-renderer-model-dispatch,,$(CFLAGS) -Itests,$(BIN_DIR)/test_sc2_renderer_model_dispatch$(EXE_EXT),tests/test_sc2_renderer_model_dispatch.c,,,))
+test: test-client-model-lifecycle test-sc2-renderer-model-dispatch test-sc2-tabletop-models
 
 test-sc2-assets: sc2fixturegen mpqtool sc2map | $(TESTS_DIR)
 	@echo "[test-sc2-assets] generating SC2 terrain fixtures"
@@ -386,4 +387,4 @@ test-sc2-live: opensc2 $(SC2_HUD_LIVE_BIN)
 	    $(SC2_HUD_LIVE_BIN); \
 	fi
 
-.PHONY: default build shared tools font $(TOOL_NAMES) diag clean download renderer-wow game-wow ui-wow openwow renderer-sc2 game-sc2 opensc2 run run-sc2 build-run-sc2 m2tool-wow-orcmale-player install-wow test-client-model-lifecycle test-wow-appearance test-wow-combat test-wow-abilities test-wow-game test-wow-ui test-wow-assets test-sc2 test-sc2-assets test-sc2-live test-sc2-tabletop-assets test-sc2-tabletop-models test-sc2-tabletop-runtime $(WC3_PHONY)
+.PHONY: default build shared tools font $(TOOL_NAMES) diag clean download renderer-wow game-wow ui-wow openwow renderer-sc2 game-sc2 opensc2 run run-sc2 build-run-sc2 m2tool-wow-orcmale-player install-wow test-client-model-lifecycle test-sc2-renderer-model-dispatch test-wow-appearance test-wow-combat test-wow-abilities test-wow-game test-wow-ui test-wow-assets test-sc2 test-sc2-assets test-sc2-live test-sc2-tabletop-assets test-sc2-tabletop-models test-sc2-tabletop-runtime $(WC3_PHONY)

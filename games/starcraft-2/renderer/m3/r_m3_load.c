@@ -3,13 +3,11 @@
 #include "r_m3.h"
 #include "r_m3_utils.h"
 
-#define M3_MAX_NODES 128
-
 #define M3_FOR_EACH(TYPE, VAR, LIST) \
 for (m3##TYPE##_t const *VAR = LIST; VAR && VAR < LIST + LIST##Num; VAR++)
 
-static MATRIX4 bonemats[M3_MAX_NODES];
-static MATRIX4 tmp[M3_MAX_NODES];
+static MATRIX4 bonemats[BZ_M3_RENDERER_MAX_BONES];
+static MATRIX4 tmp[BZ_M3_RENDERER_MAX_BONES];
 
 #ifdef USE_SHADOWMAPS
 extern bool is_rendering_lights;
@@ -296,6 +294,13 @@ static void M3_UploadModel(m3Model_t *model) {
 
 m3Model_t *R_LoadModelM3(void *data, DWORD size) {
     m3Model_t *model = SC2_M3Parse(data, size);
+    if (model && model->head && !m3_renderer_model_supported(model)) {
+        /* The old renderer wrote past tmp[128]; reject before any texture or GL resource upload. */
+        fprintf(stderr, "R_LoadModelM3: model has %u bones; desktop limit is %u\n",
+                model->bonesNum, BZ_M3_RENDERER_MAX_BONES);
+        SC2_M3Free(model);
+        return NULL;
+    }
     if (model && model->head) M3_UploadModel(model);
     return model;
 }
@@ -499,18 +504,17 @@ void M3_RenderModel(renderEntity_t const *entity, m3Model_t const *model, LPCMAT
     }
 
     /* Build a full 128-entry bone palette indexed by boneLookup[i].
-       Vertex boneIndex values are boneLookup-relative so we pre-multiply
-       the inverse rest pose here, making every vertex index an absolute
-       palette slot. This removes the need for uFirstBoneLookupIndex. */
+       Vertex boneIndex values are region-relative; uFirstBoneLookupIndex
+       selects the corresponding pre-multiplied inverse-rest palette slot. */
     memset(bonemats, 0, sizeof(bonemats));
-    FOR_LOOP(j, M3_MAX_NODES) {
+    FOR_LOOP(j, BZ_M3_RENDERER_MAX_BONES) {
         MATRIX4 ident; Matrix4_identity(&ident); bonemats[j] = ident;
     }
     M3_FOR_EACH(Uint16, boneLookup, model->boneLookup) {
         m3Uint16_t boneIndex = *boneLookup;
         DWORD paletteIndex = (DWORD)(boneLookup - model->boneLookup);
         if (boneIndex >= model->bonesNum || boneIndex >= model->absoluteInverseBoneRestPositionsNum ||
-            paletteIndex >= M3_MAX_NODES) {
+            paletteIndex >= BZ_M3_RENDERER_MAX_BONES) {
             continue;
         }
         Matrix4_multiply(tmp + boneIndex, model->absoluteInverseBoneRestPositions + boneIndex,
@@ -546,7 +550,8 @@ void M3_RenderModel(renderEntity_t const *entity, m3Model_t const *model, LPCMAT
     R_Call(glUniformMatrix4fv, m3.shader->uTextureMatrix, 1, GL_FALSE, tr.viewDef.textureMatrix.v);
     R_Call(glUniformMatrix4fv, m3.shader->uModelMatrix, 1, GL_FALSE, mScaledMatrix.v);
     R_Call(glUniformMatrix3fv, m3.shader->uNormalMatrix, 1, GL_TRUE, mNormalMatrix.v);
-    R_Call(glUniformMatrix4fv, m3.shader->uBones, MIN(model->boneLookupNum, M3_MAX_NODES), GL_FALSE, bonemats->v);
+    R_Call(glUniformMatrix4fv, m3.shader->uBones,
+           MIN(model->boneLookupNum, BZ_M3_RENDERER_MAX_BONES), GL_FALSE, bonemats->v);
     M3_SetLightUniforms(m3.shader);
     /* The unified model shader requires identity defaults for uniforms that
        M3 does not animate (texture UV transform, layer alpha, geoset colour). */

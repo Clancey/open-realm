@@ -139,27 +139,10 @@ static bool model_counts(const m3Model_t *src, bzSC2MModelInfo_t *info) {
     return true;
 }
 
-static bool validate_model(const m3Model_t *src, const bzSC2MModelInfo_t *info) {
-    if (!src->head || src->type != 23 || SC2_M3VertexUVCount(src->vertexFlags) > 4) return false;
-    FOR_LOOP(d, src->divisionsNum) {
-        const m3Divisions_t *division = &src->divisions[d];
-        if (division->facesNum % 3) return false;
-        FOR_LOOP(r, division->regionsNum) {
-            const m3Region_t *region = &division->regions[r];
-            uint64_t vertex_end = (uint64_t)region->firstVertexIndex + region->verticesCount;
-            uint64_t index_end = (uint64_t)region->firstTriangleIndex + region->triangleIndicesCount;
-            uint64_t bones_end = (uint64_t)region->firstBoneLookupIndex + region->boneLookupIndicesCount;
-            if (vertex_end > info->vertex_count || index_end > division->facesNum ||
-                bones_end > info->bone_lookup_count || region->triangleIndicesCount % 3)
-                return false;
-            FOR_LOOP(i, region->triangleIndicesCount)
-                if (division->faces[region->firstTriangleIndex + i] >= region->verticesCount) return false;
-        }
-        FOR_LOOP(b, division->batchesNum)
-            if (division->batches[b].regionIndex >= division->regionsNum ||
-                division->batches[b].materialReferenceIndex >= info->material_reference_count)
-                return false;
-    }
+static bool validate_model(const m3Model_t *src) {
+    if (!src->head || src->type != 23 || SC2_M3VertexUVCount(src->vertexFlags) > 4 ||
+        !SC2_M3ValidateGeometry(src))
+        return false;
     FOR_LOOP(i, src->materialReferencesNum) {
         const m3MaterialReference_t *ref = &src->materialReferences[i];
         if ((ref->materialType == BZ_SC2M_MATERIAL_STANDARD && ref->materialIndex >= src->materialStandardNum) ||
@@ -214,7 +197,7 @@ static bzSC2Model_t *export_model(const char *identity, const m3Model_t *src, ui
     bzSC2Model_t *model;
     uint32_t index_cursor = 0, region_cursor = 0, batch_cursor = 0, section_cursor = 0, layer_cursor = 0;
     if (!model_counts(src, &info)) { *status = BZ_SC2M_ERR_TOO_LARGE; return NULL; }
-    if (!validate_model(src, &info)) {
+    if (!validate_model(src)) {
         *status = src->type == 23 ? BZ_SC2M_ERR_MALFORMED : BZ_SC2M_ERR_UNSUPPORTED;
         return NULL;
     }
@@ -353,7 +336,10 @@ static bzSC2Model_t *load_model(const char *identity, bzSC2MResult_t *status, ui
     }
     parsed = SC2_M3Parse(raw, size);
     if (g_model_source.free_file) g_model_source.free_file(raw);
-    if (!parsed || !parsed->head) { SC2_M3Free(parsed); *status = BZ_SC2M_ERR_MALFORMED; return NULL; }
+    if (!parsed || !parsed->head) {
+        *status = parsed && parsed->unsupported ? BZ_SC2M_ERR_UNSUPPORTED : BZ_SC2M_ERR_MALFORMED;
+        SC2_M3Free(parsed); return NULL;
+    }
     model = export_model(identity, parsed, generation, status);
     SC2_M3Free(parsed);
     return model;

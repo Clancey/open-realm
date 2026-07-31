@@ -57,6 +57,19 @@ static void *build_empty_m3(uint32_t *size, uint32_t version) {
     return data;
 }
 
+/* Exact MODL section lengths prove legacy versions do not borrow later fields or padding. */
+static void *build_exact_empty_m3(uint32_t *size, uint32_t version, uint32_t stride) {
+    *size = 128 + stride + sizeof(struct ReferenceEntry);
+    uint8_t *data = calloc(1, *size);
+    struct MD33 *head = (struct MD33 *)data;
+    struct ReferenceEntry *ref = (struct ReferenceEntry *)(data + 128 + stride);
+    memcpy(head->id, "43DM", 4);
+    head->ofsRefs = 128 + stride; head->nRefs = 1;
+    head->MODL = (Reference){ .nEntries = 1, .ref = 0 };
+    memcpy(ref->id, "LDOM", 4); ref->offset = 128; ref->nEntries = 1; ref->version = version;
+    return data;
+}
+
 /* Material v15 consumes 268 bytes on disk; the section has ordinary 16-byte padding to 272. */
 static void *build_material_v15_m3(uint32_t *size) {
     uint8_t *data = calloc(1, 1328);
@@ -89,25 +102,85 @@ static void *build_version_zero_animation_tables_m3(uint32_t *size) {
 
 /* One vertex and one triangle force a 6-byte U16 segment before 4-byte division records. */
 static void *build_odd_indices_m3(uint32_t *size) {
-    uint8_t *data = calloc(1, 1040);
+    uint8_t *data = calloc(1, 1056);
     struct MD33 *head = (struct MD33 *)data;
     struct ReferenceEntry *refs = (struct ReferenceEntry *)(data + 960);
     uint8_t *root = data + 32, *division = data + 848, *region = data + 912;
     memcpy(head->id, "43DM", 4);
-    head->ofsRefs = 960; head->nRefs = 5; head->MODL = (Reference){ .nEntries = 1, .ref = 0 };
+    head->ofsRefs = 960; head->nRefs = 6; head->MODL = (Reference){ .nEntries = 1, .ref = 0 };
     memcpy(refs[0].id, "LDOM", 4); refs[0].offset = 32; refs[0].nEntries = 1; refs[0].version = 23;
     memcpy(refs[1].id, "__8U", 4); refs[1].offset = 816; refs[1].nEntries = 32; refs[1].version = 0;
     memcpy(refs[2].id, "_VID", 4); refs[2].offset = 848; refs[2].nEntries = 1; refs[2].version = 2;
-    memcpy(refs[3].id, "_61U", 4); refs[3].offset = 896; refs[3].nEntries = 3; refs[3].version = 0;
+    memcpy(refs[3].id, "_61U", 4); refs[3].offset = 904; refs[3].nEntries = 3; refs[3].version = 0;
     memcpy(refs[4].id, "NGER", 4); refs[4].offset = 912; refs[4].nEntries = 1; refs[4].version = 3;
+    memcpy(refs[5].id, "_61U", 4); refs[5].offset = 948; refs[5].nEntries = 1; refs[5].version = 0;
     memcpy(root + 96, &(uint32_t){ 0x0180007d }, sizeof(uint32_t));
     put_ref(root, 100, (Reference){ .nEntries = 32, .ref = 1 });
     put_ref(root, 112, (Reference){ .nEntries = 1, .ref = 2 });
+    put_ref(root, 124, (Reference){ .nEntries = 1, .ref = 5 });
     put_ref(division, 0, (Reference){ .nEntries = 3, .ref = 3 });
     put_ref(division, 12, (Reference){ .nEntries = 1, .ref = 4 });
+    memcpy(division + 48, &(uint32_t){ 1 }, sizeof(uint32_t));
     memcpy(region + 12, &(uint32_t){ 1 }, sizeof(uint32_t));
     memcpy(region + 20, &(uint32_t){ 3 }, sizeof(uint32_t));
-    *size = 1040;
+    memcpy(region + 28, &(uint16_t){ 1 }, sizeof(uint16_t));
+    *size = 1056;
+    return data;
+}
+
+static void *build_region_v2_m3(uint32_t *size) {
+    uint8_t *data = build_odd_indices_m3(size);
+    struct ReferenceEntry *refs = (struct ReferenceEntry *)(data + ((struct MD33 *)data)->ofsRefs);
+    uint8_t *region = data + refs[4].offset;
+    refs[4].version = 2;
+    memset(region, 0, 48);
+    memcpy(region + 6, &(uint16_t){ 1 }, sizeof(uint16_t));
+    memcpy(region + 12, &(uint32_t){ 3 }, sizeof(uint32_t));
+    memcpy(region + 20, &(uint16_t){ 1 }, sizeof(uint16_t));
+    return data;
+}
+
+static void *build_two_divisions_m3(uint32_t *size) {
+    *size = 952;
+    uint8_t *data = calloc(1, *size);
+    struct MD33 *head = (struct MD33 *)data;
+    struct ReferenceEntry *refs = (struct ReferenceEntry *)(data + 920);
+    uint8_t *root = data + 32, *divisions = data + 816;
+    memcpy(head->id, "43DM", 4);
+    head->ofsRefs = 920; head->nRefs = 2; head->MODL = (Reference){ .nEntries = 1, .ref = 0 };
+    memcpy(refs[0].id, "LDOM", 4); refs[0].offset = 32; refs[0].nEntries = 1; refs[0].version = 23;
+    memcpy(refs[1].id, "_VID", 4); refs[1].offset = 816; refs[1].nEntries = 2; refs[1].version = 2;
+    put_ref(root, 112, (Reference){ .nEntries = 2, .ref = 1 });
+    memcpy(divisions + 48, &(uint32_t){ 0x11223344 }, sizeof(uint32_t));
+    memcpy(divisions + 100, &(uint32_t){ 0x55667788 }, sizeof(uint32_t));
+    return data;
+}
+
+static void *build_bone_count_m3(uint32_t *size, uint32_t bone_count) {
+    uint32_t refs_offset = 912 + bone_count * 160;
+    *size = refs_offset + 2 * sizeof(struct ReferenceEntry);
+    uint8_t *data = calloc(1, *size);
+    struct MD33 *head = (struct MD33 *)data;
+    struct ReferenceEntry *refs = (struct ReferenceEntry *)(data + refs_offset);
+    uint8_t *root = data + 128;
+    memcpy(head->id, "43DM", 4);
+    head->ofsRefs = refs_offset; head->nRefs = 2; head->MODL = (Reference){ .nEntries = 1, .ref = 0 };
+    memcpy(refs[0].id, "LDOM", 4); refs[0].offset = 128; refs[0].nEntries = 1; refs[0].version = 23;
+    memcpy(refs[1].id, "ENOB", 4); refs[1].offset = 912; refs[1].nEntries = bone_count; refs[1].version = 1;
+    put_ref(root, 80, (Reference){ .nEntries = bone_count, .ref = 1 });
+    return data;
+}
+
+typedef enum { BAD_VERTEX_RANGE, BAD_INDEX_RANGE, BAD_FACE_VALUE, BAD_BONE_INDEX } bad_geometry_t;
+
+static void *build_bad_geometry_m3(uint32_t *size, bad_geometry_t bad) {
+    uint8_t *data = build_odd_indices_m3(size);
+    switch (bad) {
+    case BAD_VERTEX_RANGE: memcpy(data + 912 + 8, &(uint32_t){ 1 }, sizeof(uint32_t)); break;
+    case BAD_INDEX_RANGE: memcpy(data + 912 + 16, &(uint32_t){ 1 }, sizeof(uint32_t)); break;
+    case BAD_FACE_VALUE: memcpy(data + 904, &(uint16_t){ 1 }, sizeof(uint16_t)); break;
+    case BAD_BONE_INDEX: data[816 + 16] = 1; break;
+    }
     return data;
 }
 
@@ -279,6 +352,30 @@ static void test_parser_root_and_disk_stride_declarations(void) {
     ASSERT_NOT_NULL(model); ASSERT_NOT_NULL(model->head);
     ASSERT_EQ_INT(model->stgNum, 1); ASSERT_EQ_INT(model->stsNum, 1);
     SC2_M3Free(model); free(data);
+
+    static const struct { uint32_t version, stride; } roots[] = {
+        { 20, 748 }, { 21, 760 }, { 23, 784 },
+    };
+    FOR_LOOP(i, sizeof(roots) / sizeof(roots[0])) {
+        data = build_exact_empty_m3(&size, roots[i].version, roots[i].stride);
+        model = SC2_M3Parse(data, size);
+        ASSERT_NOT_NULL(model); ASSERT_NOT_NULL(model->head); ASSERT_EQ_INT(model->type, roots[i].version);
+        SC2_M3Free(model); free(data);
+    }
+    data = build_exact_empty_m3(&size, 22, 760); assert_parser_rejects(data, size);
+
+    data = build_two_divisions_m3(&size); model = SC2_M3Parse(data, size);
+    ASSERT_NOT_NULL(model); ASSERT_NOT_NULL(model->head); ASSERT_EQ_INT(model->divisionsNum, 2);
+    ASSERT_EQ_INT(model->divisions[0].unknown, 0x11223344);
+    ASSERT_EQ_INT(model->divisions[1].unknown, 0x55667788);
+    SC2_M3Free(model); free(data);
+
+    data = build_region_v2_m3(&size); model = SC2_M3Parse(data, size);
+    ASSERT_NOT_NULL(model); ASSERT_NOT_NULL(model->head); ASSERT_EQ_INT(model->divisions[0].regionsNum, 1);
+    ASSERT_EQ_INT(model->divisions[0].regions[0].firstVertexIndex, 0);
+    ASSERT_EQ_INT(model->divisions[0].regions[0].verticesCount, 1);
+    ASSERT_EQ_INT(model->divisions[0].regions[0].triangleIndicesCount, 3);
+    SC2_M3Free(model); free(data);
 }
 
 static void test_parser_rejects_truncated_string_reference(void) {
@@ -371,6 +468,35 @@ static void test_odd_indices_keep_all_trailing_arrays_aligned(void) {
     BZ_SC2M_Shutdown(); BZ_SC2A_Shutdown();
 }
 
+static void test_geometry_validation_rejects_ranges_and_faces(void) {
+    uint32_t size;
+    void *data = build_bad_geometry_m3(&size, BAD_VERTEX_RANGE); assert_parser_rejects(data, size);
+    data = build_bad_geometry_m3(&size, BAD_INDEX_RANGE); assert_parser_rejects(data, size);
+    data = build_bad_geometry_m3(&size, BAD_FACE_VALUE); assert_parser_rejects(data, size);
+    data = build_bad_geometry_m3(&size, BAD_BONE_INDEX); assert_parser_rejects(data, size);
+}
+
+static void test_renderer_bone_capability(void) {
+    uint32_t size;
+    struct MD33 head = { 0 };
+    m3Region_t region = { .firstBoneLookupIndex = 128, .boneLookupIndicesCount = 1 };
+    m3Divisions_t division = { .regions = &region, .regionsNum = 1 };
+    m3Model_t boundary = { .head = &head, .valid = true, .bonesNum = 128,
+        .boneLookupNum = 129, .divisions = &division, .divisionsNum = 1 };
+    void *data = build_bone_count_m3(&size, 128);
+    m3Model_t *model = SC2_M3Parse(data, size);
+    ASSERT_NOT_NULL(model); ASSERT_NOT_NULL(model->head); ASSERT_EQ_INT(model->bonesNum, 128);
+    ASSERT(m3_renderer_model_supported(model));
+    SC2_M3Free(model); free(data);
+
+    data = build_bone_count_m3(&size, 129); model = SC2_M3Parse(data, size);
+    ASSERT_NOT_NULL(model); ASSERT_NOT_NULL(model->head); ASSERT_EQ_INT(model->bonesNum, 129);
+    ASSERT(!m3_renderer_model_supported(model));
+    SC2_M3Free(model); free(data);
+
+    ASSERT(!m3_renderer_model_supported(&boundary));
+}
+
 static void *register_same_model(void *unused) {
     const bzSC2Model_t *model;
     (void)unused;
@@ -447,6 +573,8 @@ int main(void) {
     RUN_TEST(test_parser_animation_declaration_inverses);
     RUN_TEST(test_animation_value_versions_and_key_spans);
     RUN_TEST(test_odd_indices_keep_all_trailing_arrays_aligned);
+    RUN_TEST(test_geometry_validation_rejects_ranges_and_faces);
+    RUN_TEST(test_renderer_bone_capability);
     RUN_TEST(test_concurrent_same_identity_publication);
     RUN_TEST(test_model_and_image_misses_share_provider_serialization);
     TEST_RESULTS();
