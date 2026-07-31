@@ -234,6 +234,9 @@ LPMODEL R_GameLoadModel(LPCSTR modelFilename) {
 }
 
 void R_GameReleaseModel(LPMODEL model) {
+    /* M3 owns parser arrays and GL buffers; the old wrapper-only free leaked both. */
+    if (model && model->modeltype == ID_43DM)
+        R_FreeModelM3(model->m3);
     ri.MemFree(model);
 }
 

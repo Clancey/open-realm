@@ -439,7 +439,7 @@ static void test_indexed_and_xy_bounds(void) {
 
 static void test_image_info_and_mip_copy(void) {
     const bzSC2Terrain_t *terrain;
-    const bzSC2Image_t *image;
+    const bzSC2Image_t *image, *generic;
     bzSC2AImageInfo_t info;
     bzSC2AImageMipInfo_t mip;
     uint8_t pixels[8];
@@ -449,6 +449,8 @@ static void test_image_info_and_mip_copy(void) {
     BZ_SC2A_PublishTerrainFromGame();
     terrain = BZ_SC2A_LatestTerrain(BZ_SC2A_ABI_VERSION);
     image = BZ_SC2A_RegisterTerrainImage(BZ_SC2A_ABI_VERSION, terrain, 0, BZ_SC2A_TERRAIN_CHANNEL_DIFFUSE);
+    generic = BZ_SC2A_RegisterImage(BZ_SC2A_ABI_VERSION, "Assets/Textures/good.dds");
+    ASSERT(generic == image); /* terrain and model layers share one normalized DDS cache */
 
     ASSERT(BZ_SC2AImage_Info(image, &info));
     ASSERT_EQ_INT(info.format, BZ_SC2A_PIXEL_DXT1);
@@ -466,6 +468,7 @@ static void test_image_info_and_mip_copy(void) {
     ASSERT_EQ_INT(BZ_SC2AImage_CopyMip(image, 0, pixels, 3), 3); /* clamped to cap */
 
     BZ_SC2AImage_Release(image);
+    BZ_SC2AImage_Release(generic);
     BZ_SC2ATerrain_Release(terrain);
     BZ_SC2A_Shutdown();
 }

@@ -542,12 +542,26 @@ static const bzSC2Image_t *register_identity(const char *identity, bzSC2AResult_
     return image;
 }
 
+const bzSC2Image_t *BZ_SC2A_RegisterImage(uint32_t abi_version, const char *identity) {
+    bzSC2ASource_t source;
+    char normalized[BZ_SC2A_MAX_IDENTITY];
+    bzSC2AResult_t status;
+    uint64_t generation;
+    status = registration_context(abi_version, &source, &generation);
+    if (status != BZ_SC2A_OK)
+        return placeholder_image(status);
+    if (!identity || !identity[0])
+        return register_identity("", BZ_SC2A_ERR_NOT_FOUND, &source, generation);
+    if (!sc2_tta_normalize_identity(identity, normalized, sizeof(normalized)))
+        return register_identity(identity, BZ_SC2A_ERR_PATH_CONFINEMENT, &source, generation);
+    return register_identity(normalized, BZ_SC2A_OK, &source, generation);
+}
+
 const bzSC2Image_t *BZ_SC2A_RegisterTerrainImage(uint32_t abi_version, const bzSC2Terrain_t *terrain,
                                                  uint32_t texture_index, bzSC2ATerrainChannel_t channel) {
     bzSC2ATerrainTextureInfo_t texture;
     bzSC2ASource_t source;
     char identity[BZ_SC2A_MAX_IDENTITY];
-    char normalized[BZ_SC2A_MAX_IDENTITY];
     bzSC2AResult_t status;
     uint64_t generation;
     if (channel != BZ_SC2A_TERRAIN_CHANNEL_DIFFUSE && channel != BZ_SC2A_TERRAIN_CHANNEL_NORMAL)
@@ -560,11 +574,7 @@ const bzSC2Image_t *BZ_SC2A_RegisterTerrainImage(uint32_t abi_version, const bzS
         return placeholder_image(BZ_SC2A_ERR_INVALID_ARGUMENT);
     snprintf(identity, sizeof(identity), "%s",
              channel == BZ_SC2A_TERRAIN_CHANNEL_DIFFUSE ? texture.diffuse_identity : texture.normal_identity);
-    if (!identity[0])
-        return register_identity(identity, BZ_SC2A_ERR_NOT_FOUND, &source, generation);
-    if (!sc2_tta_normalize_identity(identity, normalized, sizeof(normalized)))
-        return register_identity(identity, BZ_SC2A_ERR_PATH_CONFINEMENT, &source, generation);
-    return register_identity(normalized, BZ_SC2A_OK, &source, generation);
+    return BZ_SC2A_RegisterImage(abi_version, identity);
 }
 
 void BZ_SC2AImage_Retain(const bzSC2Image_t *image) {

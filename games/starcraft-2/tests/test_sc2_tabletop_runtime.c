@@ -5,6 +5,7 @@
 #include "platform/apple/visionos/tabletop/bridge/bz_tabletop_lifecycle.h"
 #include "platform/bridge/bz_tabletop_transport.h"
 #include "games/starcraft-2/visionos/sc2_tabletop_assets.h"
+#include "games/starcraft-2/visionos/sc2_tabletop_models.h"
 
 static int failures;
 
@@ -98,6 +99,32 @@ static const bzSC2Terrain_t *check_assets(int live) {
     return terrain;
 }
 
+/* Marine freezes one representative skinned/two-UV retail model at the public Layer 2B1 ABI. */
+static const bzSC2Model_t *check_live_model(void) {
+    const bzSC2Model_t *model = BZ_SC2M_RegisterModel(
+        BZ_SC2M_ABI_VERSION, "Assets\\Units\\Terran\\Marine\\Marine.m3");
+    bzSC2MModelInfo_t info;
+    bzSC2MLayerInfo_t layer;
+    bzSC2AImageInfo_t image_info;
+    const bzSC2Image_t *image;
+    CHECK(model && !BZ_SC2Model_IsPlaceholder(model), "Marine M3 publication is unavailable");
+    if (!model || BZ_SC2Model_IsPlaceholder(model)) return model;
+    CHECK(BZ_SC2Model_Info(model, &info), "Marine M3 metadata is unavailable");
+    CHECK(info.modl_version == 23 && info.vertex_flags == 0x0186007du, "Marine M3 declaration changed");
+    CHECK(info.vertex_count == 1678 && info.index_count == 3216, "Marine M3 geometry counts changed");
+    CHECK(info.division_count == 1 && info.region_count == 2 && info.batch_count == 2,
+          "Marine M3 primitive regions changed");
+    CHECK(info.bone_lookup_count == 20 && info.material_reference_count == 1 &&
+          info.standard_material_count == 1, "Marine M3 material/skin counts changed");
+    CHECK(info.layer_count == 13 && BZ_SC2Model_LayerInfo(model, 0, &layer) &&
+          layer.semantic == BZ_SC2M_LAYER_DIFFUSE, "Marine M3 layers changed");
+    image = BZ_SC2M_RegisterLayerImage(BZ_SC2M_ABI_VERSION, model, 0);
+    CHECK(image && !BZ_SC2AImage_IsPlaceholder(image) && BZ_SC2AImage_Info(image, &image_info) &&
+          image_info.format == BZ_SC2A_PIXEL_DXT5, "Marine diffuse DDS handle is unavailable");
+    BZ_SC2AImage_Release(image);
+    return model;
+}
+
 int main(int argc, char **argv) {
     const char *data = argc > 1 ? argv[1] : "build/tests";
     const char *map_name = argc > 2 ? argv[2] : "Tiny";
@@ -109,6 +136,7 @@ int main(int argc, char **argv) {
     bzTabletopLifecycle_t *lc = BZ_TabletopCreate(
         (int)(sizeof(engine_argv) / sizeof(engine_argv[0])), engine_argv);
     const bzSC2Terrain_t *retained_terrain = NULL;
+    const bzSC2Model_t *retained_model = NULL;
     CHECK(lc != NULL, "lifecycle allocation failed");
     if (!lc) return 1;
     BZ_TabletopStart(lc);
@@ -149,6 +177,7 @@ int main(int argc, char **argv) {
                 }
             }
             retained_terrain = check_assets(!require_commands);
+            if (!require_commands) retained_model = check_live_model();
             BZ_TTSnapshot_Release(first);
         }
     }
@@ -161,6 +190,11 @@ int main(int argc, char **argv) {
         bzSC2ATerrainInfo_t retained_info;
         CHECK(BZ_SC2ATerrain_Info(retained_terrain, &retained_info), "retained terrain died during shutdown");
         BZ_SC2ATerrain_Release(retained_terrain);
+    }
+    if (retained_model) {
+        bzSC2MModelInfo_t retained_info;
+        CHECK(BZ_SC2Model_Info(retained_model, &retained_info), "retained model died during shutdown");
+        BZ_SC2Model_Release(retained_model);
     }
     {
         const bzSC2Terrain_t *terminal = BZ_SC2A_LatestTerrain(BZ_SC2A_ABI_VERSION);
