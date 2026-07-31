@@ -178,6 +178,7 @@ static void test_mdx_geometry_materials_sequences_and_bounds(void) {
     bzTTAssetMetadata_t texture_metadata;
     const bzTTAsset_t *image;
     uint16_t indices[6];
+    bzTTVec2_t uvs[4];
     reset_assets();
     test_assets_set_configstring(&snapshot, 1, "TestUI/Models/quad_sprite.mdx");
     asset = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION, &snapshot, 1,
@@ -190,9 +191,15 @@ static void test_mdx_geometry_materials_sequences_and_bounds(void) {
     ASSERT_EQ_FLOAT(model.bounds.min.x, -0.5f, 0.001f);
     ASSERT_EQ_FLOAT(model.bounds.max.x, 0.5f, 0.001f);
     ASSERT(BZ_TTAsset_GeosetInfo(asset, 0, &geoset));
-    ASSERT_EQ_INT(geoset.vertex_count, 4); ASSERT_EQ_INT(geoset.index_count, 6);
+    ASSERT_EQ_INT(geoset.vertex_count, 4); ASSERT_EQ_INT(geoset.uv_count, 4);
+    ASSERT_EQ_INT(geoset.index_count, 6);
     ASSERT_EQ_INT(BZ_TTAsset_CopyGeosetIndices(asset, 0, indices, 6), 6);
     ASSERT_EQ_INT(indices[5], 3);
+    ASSERT_EQ_INT(BZ_TTAsset_CopyGeosetUVs(asset, 0, uvs, 4), 4);
+    ASSERT_EQ_FLOAT(uvs[0].x, 0.125f, 0.001f); ASSERT_EQ_FLOAT(uvs[0].y, 0.875f, 0.001f);
+    ASSERT_EQ_FLOAT(uvs[1].x, 0.75f, 0.001f); ASSERT_EQ_FLOAT(uvs[1].y, 0.625f, 0.001f);
+    ASSERT_EQ_FLOAT(uvs[2].x, 0.9f, 0.001f); ASSERT_EQ_FLOAT(uvs[2].y, 0.2f, 0.001f);
+    ASSERT_EQ_FLOAT(uvs[3].x, 0.3f, 0.001f); ASSERT_EQ_FLOAT(uvs[3].y, 0.1f, 0.001f);
     ASSERT(BZ_TTAsset_MaterialInfo(asset, 0, &material));
     ASSERT(BZ_TTAsset_MaterialLayerInfo(asset, material.first_layer, &layer));
     ASSERT_EQ_INT(layer.texture_index, 0);
@@ -333,6 +340,47 @@ static uint8_t *duplicate_mdx_records(const uint8_t *src, size_t size, size_t *o
     return dst;
 }
 
+typedef struct {
+    size_t chunk_pos, record_start, record_end, uv_start;
+    uint32_t chunk_size, record_size;
+} mdxUVLayout_t;
+
+/* Locate the fixture's first retail-order UV pair without trusting its containing sizes. */
+static bool first_geoset_uv_layout(const uint8_t *src, size_t size, mdxUVLayout_t *layout) {
+    uint32_t tag = 0;
+    memset(layout, 0, sizeof(*layout)); layout->chunk_pos = 4;
+    while (layout->chunk_pos + 8 <= size) {
+        memcpy(&tag, src + layout->chunk_pos, 4);
+        memcpy(&layout->chunk_size, src + layout->chunk_pos + 4, 4);
+        if ((size_t)layout->chunk_size > size - layout->chunk_pos - 8) return false;
+        if (tag == FOURCC('G','E','O','S')) break;
+        layout->chunk_pos += 8 + layout->chunk_size;
+    }
+    if (layout->chunk_pos + 12 > size || tag != FOURCC('G','E','O','S') || layout->chunk_size < 52)
+        return false;
+    layout->record_start = layout->chunk_pos + 8;
+    memcpy(&layout->record_size, src + layout->record_start, 4);
+    if (layout->record_size > layout->chunk_size || layout->record_size < 52) return false;
+    layout->record_end = layout->record_start + layout->record_size;
+    layout->uv_start = layout->record_end - 48;
+    return layout->record_end <= size && !memcmp(src + layout->uv_start, "UVAS", 4) &&
+           !memcmp(src + layout->uv_start + 8, "UVBS", 4);
+}
+
+/* Remove the fixture's trailing retail-order UVAS/UVBS pair to cover valid textureless geosets. */
+static uint8_t *strip_first_geoset_uvs(const uint8_t *src, size_t size, size_t *out_size) {
+    mdxUVLayout_t layout;
+    uint32_t reduced;
+    uint8_t *out;
+    if (!first_geoset_uv_layout(src, size, &layout) || !(out = malloc(size - 48))) return NULL;
+    memcpy(out, src, layout.uv_start);
+    memcpy(out + layout.uv_start, src + layout.record_end, size - layout.record_end);
+    reduced = layout.chunk_size - 48; memcpy(out + layout.chunk_pos + 4, &reduced, 4);
+    reduced = layout.record_size - 48; memcpy(out + layout.record_start, &reduced, 4);
+    *out_size = size - 48;
+    return out;
+}
+
 static void test_mdx_multiple_inclusive_records(void) {
     DWORD size;
     uint8_t *single = FS_ReadFile("TestUI/Models/quad_sprite.mdx", &size);
@@ -341,6 +389,8 @@ static void test_mdx_multiple_inclusive_records(void) {
     bzTTAResult_t status = BZ_TTA_OK;
     bzTTAsset_t *asset;
     bzTTModelInfo_t model = { 0 };
+    bzTTGeosetInfo_t geoset = { 0 };
+    bzTTVec2_t uvs[4];
     ASSERT_NOT_NULL(single);
     multi = duplicate_mdx_records(single, size, &multi_size);
     FS_FreeFile(single);
@@ -352,7 +402,61 @@ static void test_mdx_multiple_inclusive_records(void) {
     ASSERT(BZ_TTAsset_ModelInfo(asset, &model));
     ASSERT_EQ_INT(model.geoset_count, 2); ASSERT_EQ_INT(model.material_count, 2);
     ASSERT_EQ_INT(model.layer_count, 2);
+    ASSERT(BZ_TTAsset_GeosetInfo(asset, 1, &geoset)); ASSERT_EQ_INT(geoset.uv_count, 4);
+    ASSERT_EQ_INT(BZ_TTAsset_CopyGeosetUVs(asset, 1, uvs, 4), 4);
+    ASSERT_EQ_FLOAT(uvs[0].x, 0.125f, 0.001f); ASSERT_EQ_FLOAT(uvs[3].y, 0.1f, 0.001f);
     BZ_TTAsset_Release(asset);
+}
+
+static void test_mdx_post_mats_uvs_and_absent_inverse(void) {
+    DWORD size;
+    uint8_t *source = FS_ReadFile("TestUI/Models/quad_sprite.mdx", &size), *without_uvs, *mutated;
+    size_t without_uvs_size, partial_size;
+    mdxUVLayout_t layout;
+    uint32_t value;
+    bzTTAResult_t status = BZ_TTA_OK;
+    bzTTAsset_t *asset;
+    bzTTGeosetInfo_t geoset = { 0 };
+    bzTTVec2_t uvs[4];
+    ASSERT_NOT_NULL(source);
+    ASSERT(first_geoset_uv_layout(source, size, &layout));
+    asset = BZ_WC3_TTA_DecodeMDX(source, size, "post-mats-uv.mdx", NULL, &status);
+    ASSERT_NOT_NULL(asset); ASSERT_EQ_INT(status, BZ_TTA_OK);
+    ASSERT(BZ_TTAsset_GeosetInfo(asset, 0, &geoset)); ASSERT_EQ_INT(geoset.uv_count, 4);
+    ASSERT_EQ_INT(BZ_TTAsset_CopyGeosetUVs(asset, 0, uvs, 4), 4);
+    ASSERT_EQ_FLOAT(uvs[0].x, 0.125f, 0.001f); ASSERT_EQ_FLOAT(uvs[0].y, 0.875f, 0.001f);
+    ASSERT_EQ_FLOAT(uvs[1].x, 0.75f, 0.001f); ASSERT_EQ_FLOAT(uvs[1].y, 0.625f, 0.001f);
+    ASSERT_EQ_FLOAT(uvs[2].x, 0.9f, 0.001f); ASSERT_EQ_FLOAT(uvs[2].y, 0.2f, 0.001f);
+    ASSERT_EQ_FLOAT(uvs[3].x, 0.3f, 0.001f); ASSERT_EQ_FLOAT(uvs[3].y, 0.1f, 0.001f);
+    BZ_TTAsset_Release(asset);
+    without_uvs = strip_first_geoset_uvs(source, size, &without_uvs_size);
+    ASSERT_NOT_NULL(without_uvs);
+    asset = BZ_WC3_TTA_DecodeMDX(
+        without_uvs, without_uvs_size, "post-mats-no-uv.mdx", NULL, &status);
+    free(without_uvs);
+    ASSERT_NOT_NULL(asset); ASSERT_EQ_INT(status, BZ_TTA_OK);
+    ASSERT(BZ_TTAsset_GeosetInfo(asset, 0, &geoset)); ASSERT_EQ_INT(geoset.uv_count, 0);
+    BZ_TTAsset_Release(asset);
+
+    partial_size = size - sizeof(bzTTVec2_t); mutated = malloc(partial_size);
+    ASSERT_NOT_NULL(mutated);
+    memcpy(mutated, source, layout.record_end - sizeof(bzTTVec2_t));
+    memcpy(mutated + layout.record_end - sizeof(bzTTVec2_t), source + layout.record_end,
+           size - layout.record_end);
+    value = 3; memcpy(mutated + layout.uv_start + 12, &value, 4);
+    value = layout.chunk_size - sizeof(bzTTVec2_t); memcpy(mutated + layout.chunk_pos + 4, &value, 4);
+    value = layout.record_size - sizeof(bzTTVec2_t); memcpy(mutated + layout.record_start, &value, 4);
+    ASSERT_NULL(BZ_WC3_TTA_DecodeMDX(mutated, partial_size, "post-mats-partial-uv.mdx", NULL, &status));
+    ASSERT_EQ_INT(status, BZ_TTA_ERR_MALFORMED); free(mutated);
+
+    mutated = malloc(size); ASSERT_NOT_NULL(mutated); memcpy(mutated, source, size);
+    value = 5; memcpy(mutated + layout.uv_start + 12, &value, 4);
+    ASSERT_NULL(BZ_WC3_TTA_DecodeMDX(mutated, size, "post-mats-truncated-uv.mdx", NULL, &status));
+    ASSERT_EQ_INT(status, BZ_TTA_ERR_MALFORMED);
+    memcpy(mutated, source, size); memcpy(mutated + layout.uv_start, "JUNK", 4);
+    ASSERT_NULL(BZ_WC3_TTA_DecodeMDX(mutated, size, "post-mats-unknown-tag.mdx", NULL, &status));
+    ASSERT_EQ_INT(status, BZ_TTA_ERR_MALFORMED);
+    free(mutated); FS_FreeFile(source);
 }
 
 static void test_mdx_zero_counted_array_is_malformed(void) {
@@ -1145,6 +1249,7 @@ void run_bz_tabletop_assets_tests(void) {
     RUN_TEST(test_spawn_model_variation_resolution);
     RUN_TEST(test_model_identity_output_bounds);
     RUN_TEST(test_mdx_multiple_inclusive_records);
+    RUN_TEST(test_mdx_post_mats_uvs_and_absent_inverse);
     RUN_TEST(test_mdx_zero_counted_array_is_malformed);
     RUN_TEST(test_malformed_blp_and_mdx_bounds);
     RUN_TEST(test_terrain_dimensions_corners_water_cliffs_and_chunks);

@@ -952,6 +952,8 @@ enum TabletopPureTests {
             expect(model.geosets[0].indices == [0, 2, 1] &&
                    WarcraftMeshMath.facesMatchNormals(model.geosets[0]),
                    "MDX z-up conversion reverses winding while preserving declared normals")
+            expect(model.geosets[0].textureCoordinates == source.geosets[0].textureCoordinates,
+                   "MDX axis conversion and mirrored winding preserve authored UV coordinates exactly")
             expect(model.materials[0].texture?.orientation == .topLeft &&
                    model.materials[0].texture?.rgba8.prefix(4) == [255, 0, 0, 255],
                    "exported top-left RGBA8 texture remains upright through descriptor conversion")

@@ -103,8 +103,13 @@ A geoset is one draw call: a set of vertices sharing the same material. Its sub-
 | `GNDX` | Bone group index per vertex |
 | `MTGC` | Vertex count per bone group |
 | `MATS` | Bone indices for each bone group |
+| `UVAS` | Number of UV channels |
+| `UVBS` | UV coordinates for a channel |
 
 The renderer builds a static VBO from `VRTX`/`NRMS`/`UVBS` and a matrix palette from the `MATS`/`GNDX`/`MTGC` tables for GPU skinning.
+Retail MDX 800 writes the fixed `MATS` metadata first, followed by `UVAS` and
+its `UVBS` stream. A geoset record is bounded by its inclusive size DWORD, not
+by `MATS`; readers must continue through the remaining tagged data.
 
 ## Geoset Flags
 

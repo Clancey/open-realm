@@ -246,7 +246,8 @@ static bool parse_geoset(mdxReader_t *r, mdxTempModel_t *model) {
                 if (!read_u32(r, &ignored_count)) goto fail; break;
             case FOURCC('M','A','T','S'):
                 if (!parse_geoset_mats(r, &geoset)) goto fail;
-                saw_mats = true; r->pos = r->size; break;
+                /* Retail MDX stores UVAS/UVBS after MATS; stopping here discarded every authored model UV. */
+                saw_mats = true; break;
             default:
                 goto fail;
         }

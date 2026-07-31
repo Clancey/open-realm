@@ -258,13 +258,6 @@ static void emit_GEOS_RECT(wbuf_t *b, float minx, float miny, float maxx, float 
         wb_vec3(b, 0.0f, 0.0f, 1.0f);
         wb_vec3(b, 0.0f, 0.0f, 1.0f);
 
-        /* UVBS: 4 UV coords */
-        wb_tag(b, "UVBS"); wb_u32(b, 4);
-        wb_vec2(b, 0.0f, 1.0f);
-        wb_vec2(b, 1.0f, 1.0f);
-        wb_vec2(b, 1.0f, 0.0f);
-        wb_vec2(b, 0.0f, 0.0f);
-
         /* PTYP: 1 primitive group of type 4 (triangles) */
         wb_tag(b, "PTYP"); wb_u32(b, 1); wb_u32(b, 4);
 
@@ -282,9 +275,6 @@ static void emit_GEOS_RECT(wbuf_t *b, float minx, float miny, float maxx, float 
         /* MTGC: 1 matrix group of size 1 (one bone) */
         wb_tag(b, "MTGC"); wb_u32(b, 1); wb_u32(b, 1);
 
-        /* UVAS: 1 UV channel */
-        wb_tag(b, "UVAS"); wb_u32(b, 1);
-
         /* MATS: matrices + geoset metadata */
         wb_tag(b, "MATS");
         wb_u32(b, 1);              /* num_matrices */
@@ -297,6 +287,14 @@ static void emit_GEOS_RECT(wbuf_t *b, float minx, float miny, float maxx, float 
                   minx, miny, 0.0f,
                   maxx, maxy, 0.0f);
         wb_u32(b, 0);              /* num_bounds (per-sequence) = 0 */
+
+        /* Retail MDX 800 writes UV channels after the fixed geoset metadata. */
+        wb_tag(b, "UVAS"); wb_u32(b, 1);
+        wb_tag(b, "UVBS"); wb_u32(b, 4);
+        wb_vec2(b, 0.125f, 0.875f);
+        wb_vec2(b, 0.75f, 0.625f);
+        wb_vec2(b, 0.9f, 0.2f);
+        wb_vec2(b, 0.3f, 0.1f);
 
         wb_patch_record_size(b, geo_size_off);
     }
