@@ -14,6 +14,11 @@
 #define SC2_MAX_CATALOG_CLIFFS       256
 #define SC2_MAX_CATALOG_PARENT_DEPTH 8
 #define SC2_MAX_CATALOG_INCLUDE_DEPTH 8
+#define SC2_HMAP_VERSION              101
+#define SC2_SMAP_VERSION              102
+#define SC2_LFCT_VERSION              101
+#define SC2_CLIF_VERSION              100
+#define SC2_MASK_VERSION              102
 #define SC2_ARRAY_LEN(x)             ((DWORD)(sizeof(x) / sizeof((x)[0])))
 #define SC2_XML_STRING_FIELD(name, field) { name, offsetof(sc2MapObject_t, field), SC2_XML_FIELD_STRING, sizeof(((sc2MapObject_t *)0)->field) }
 #define SC2_XML_FIELD(name, field, type)  { name, offsetof(sc2MapObject_t, field), type, 0 }
@@ -177,12 +182,15 @@ static BOOL sc2_file_exists(LPCSTR path) {
 }
 
 static void sc2_map_clear(void) {
+    DWORD generation = sc2_map.generation;
+
     SAFE_DELETE(sc2_map.t3CellFlags, sc2_free);
     SAFE_DELETE(sc2_map.t3SyncCliffLevel, sc2_free);
     SAFE_DELETE(sc2_map.t3HeightMap, sc2_free);
     SAFE_DELETE(sc2_map.t3SyncHeightMap, sc2_free);
     SAFE_DELETE(sc2_map.t3TextureMasks, sc2_free);
     memset(&sc2_map, 0, sizeof(sc2_map));
+    sc2_map.generation = generation;
 }
 
 static sc2MapInfo_t *sc2_ensure_mapinfo(void) {
@@ -2084,6 +2092,12 @@ void SC2_MapDump(FILE *out, LPCSTR filename) {
             object_counts[sc2_map.objects[i].type]++;
     }
     fprintf(out, "sc2map: file=%s\n", filename && *filename ? filename : "(current)");
+    fprintf(out, "Generation: %u\n", (unsigned)sc2_map.generation);
+    FOR_LOOP(i, SC2_TERRAIN_LAYER_COUNT) {
+        fprintf(out, "TerrainLayer: %s=%s\n",
+                SC2_MapTerrainLayerName((sc2TerrainLayerId_t)i),
+                SC2_MapLayerStatusName(sc2_map.terrain_layer_status[i]));
+    }
     fprintf(out,
             "MapInfo: version=%u size=%ux%u name=\"%s\"\n",
             (unsigned)sc2_map.MapInfo.version,
@@ -2157,13 +2171,15 @@ static LPBYTE sc2_read_binary_layer(sc2MapSource_t *source,
                                     LPCSTR filename,
                                     DWORD min_size,
                                     DWORD expected_fourcc,
-                                    LPDWORD out_size) {
+                                    LPDWORD out_size,
+                                    sc2LayerStatus_t *out_status) {
     DWORD size = 0;
     DWORD fourcc = 0;
     LPBYTE data = sc2_source_read(source, filename, &size);
     LPBYTE copy;
 
     if (out_size) *out_size = 0;
+    if (out_status) *out_status = data ? SC2_LAYER_STATUS_MALFORMED : SC2_LAYER_STATUS_ABSENT;
     if (!data || size < min_size || size < sizeof(fourcc)) {
         sc2_free_file(data);
         return NULL;
@@ -2181,6 +2197,7 @@ static LPBYTE sc2_read_binary_layer(sc2MapSource_t *source,
     memcpy(copy, data, size);
     sc2_free_file(data);
     if (out_size) *out_size = size;
+    if (out_status) *out_status = SC2_LAYER_STATUS_OK;
     return copy;
 }
 
@@ -2205,92 +2222,183 @@ static BOOL sc2_binary_layer_payload_valid(DWORD size,
     return (size_t)size >= total_size;
 }
 
+static void sc2_set_layer_status(sc2TerrainLayerId_t layer, sc2LayerStatus_t status) {
+    if (layer < SC2_ARRAY_LEN(sc2_map.terrain_layer_status))
+        sc2_map.terrain_layer_status[layer] = status;
+}
+
 static void sc2_parse_height_map(sc2MapSource_t *source) {
     DWORD size = 0;
+    sc2LayerStatus_t status;
 
     sc2_map.t3HeightMap = (sc2MapHeightMap_t *)sc2_read_binary_layer(source,
                                                                      "t3HeightMap",
                                                                      sizeof(sc2MapHeightMap_t),
                                                                      MAKEFOURCC('H','M','A','P'),
-                                                                     &size);
-    if (sc2_map.t3HeightMap &&
+                                                                     &size, &status);
+    if (!sc2_map.t3HeightMap) {
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_HEIGHT_MAP, status);
+        return;
+    }
+    if (sc2_map.t3HeightMap->version != SC2_HMAP_VERSION ||
         !sc2_binary_layer_payload_valid(size,
                                         sizeof(sc2MapHeightMap_t),
                                         sc2_map.t3HeightMap->width,
                                         sc2_map.t3HeightMap->height,
                                         sizeof(sc2MapHeightSample_t))) {
         SAFE_DELETE(sc2_map.t3HeightMap, sc2_free);
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_HEIGHT_MAP, SC2_LAYER_STATUS_MALFORMED);
+        return;
     }
+    sc2_set_layer_status(SC2_TERRAIN_LAYER_HEIGHT_MAP, SC2_LAYER_STATUS_OK);
 }
 
 static void sc2_parse_sync_height_map(sc2MapSource_t *source) {
     DWORD size = 0;
+    sc2LayerStatus_t status;
 
     sc2_map.t3SyncHeightMap = (sc2MapSyncHeightMap_t *)sc2_read_binary_layer(source,
                                                                              "t3SyncHeightMap",
                                                                              sizeof(sc2MapSyncHeightMap_t),
                                                                              MAKEFOURCC('S','M','A','P'),
-                                                                             &size);
-    if (sc2_map.t3SyncHeightMap &&
+                                                                             &size, &status);
+    if (!sc2_map.t3SyncHeightMap) {
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_SYNC_HEIGHT_MAP, status);
+        return;
+    }
+    if (sc2_map.t3SyncHeightMap->version != SC2_SMAP_VERSION ||
         !sc2_binary_layer_payload_valid(size,
                                         sizeof(sc2MapSyncHeightMap_t),
                                         sc2_map.t3SyncHeightMap->width,
                                         sc2_map.t3SyncHeightMap->height,
                                         sizeof(sc2MapSyncHeightSample_t))) {
         SAFE_DELETE(sc2_map.t3SyncHeightMap, sc2_free);
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_SYNC_HEIGHT_MAP, SC2_LAYER_STATUS_MALFORMED);
+        return;
     }
+    sc2_set_layer_status(SC2_TERRAIN_LAYER_SYNC_HEIGHT_MAP, SC2_LAYER_STATUS_OK);
 }
 
 static void sc2_parse_cell_flags(sc2MapSource_t *source) {
     DWORD size = 0;
+    sc2LayerStatus_t status;
 
     sc2_map.t3CellFlags = (sc2MapCellFlags_t *)sc2_read_binary_layer(source,
                                                                      "t3CellFlags",
                                                                      sizeof(sc2MapCellFlags_t),
                                                                      MAKEFOURCC('L','F','C','T'),
-                                                                     &size);
-    if (sc2_map.t3CellFlags &&
+                                                                     &size, &status);
+    if (!sc2_map.t3CellFlags) {
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_CELL_FLAGS, status);
+        return;
+    }
+    if (sc2_map.t3CellFlags->version != SC2_LFCT_VERSION ||
         !sc2_binary_layer_payload_valid(size,
                                         sizeof(sc2MapCellFlags_t),
                                         sc2_map.t3CellFlags->width,
                                         sc2_map.t3CellFlags->height,
                                         sizeof(BYTE))) {
         SAFE_DELETE(sc2_map.t3CellFlags, sc2_free);
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_CELL_FLAGS, SC2_LAYER_STATUS_MALFORMED);
+        return;
     }
+    sc2_set_layer_status(SC2_TERRAIN_LAYER_CELL_FLAGS, SC2_LAYER_STATUS_OK);
 }
 
 static void sc2_parse_sync_cliff_level(sc2MapSource_t *source) {
     DWORD size = 0;
+    sc2LayerStatus_t status;
 
     sc2_map.t3SyncCliffLevel = (sc2MapSyncCliffLevel_t *)sc2_read_binary_layer(source,
                                                                                "t3SyncCliffLevel",
                                                                                sizeof(sc2MapSyncCliffLevel_t),
                                                                                MAKEFOURCC('C','L','I','F'),
-                                                                               &size);
-    if (sc2_map.t3SyncCliffLevel &&
+                                                                               &size, &status);
+    if (!sc2_map.t3SyncCliffLevel) {
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_SYNC_CLIFF_LEVEL, status);
+        return;
+    }
+    if (sc2_map.t3SyncCliffLevel->version != SC2_CLIF_VERSION ||
         !sc2_binary_layer_payload_valid(size,
                                         sizeof(sc2MapSyncCliffLevel_t),
                                         sc2_map.t3SyncCliffLevel->width,
                                         sc2_map.t3SyncCliffLevel->height,
                                         sizeof(USHORT))) {
         SAFE_DELETE(sc2_map.t3SyncCliffLevel, sc2_free);
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_SYNC_CLIFF_LEVEL, SC2_LAYER_STATUS_MALFORMED);
+        return;
     }
+    sc2_set_layer_status(SC2_TERRAIN_LAYER_SYNC_CLIFF_LEVEL, SC2_LAYER_STATUS_OK);
 }
 
 static void sc2_parse_texture_masks(sc2MapSource_t *source) {
+    DWORD layers, stride;
+    sc2LayerStatus_t status;
     sc2_map.t3TextureMasks = (sc2MapTextureMasks_t *)sc2_read_binary_layer(source,
                                                                            "t3TextureMasks",
                                                                            sizeof(sc2MapTextureMasks_t),
                                                                            MAKEFOURCC('M','A','S','K'),
-                                                                           &sc2_map.t3TextureMasksSize);
-    if (sc2_map.t3TextureMasks &&
-        !sc2_binary_layer_payload_valid(sc2_map.t3TextureMasksSize,
-                                        sizeof(sc2MapTextureMasks_t),
-                                        sc2_map.t3TextureMasks->width,
-                                        sc2_map.t3TextureMasks->height,
-                                        sizeof(BYTE))) {
+                                                                           &sc2_map.t3TextureMasksSize, &status);
+    if (!sc2_map.t3TextureMasks) {
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_TEXTURE_MASKS, status);
+        return;
+    }
+    stride = sc2_map_mask_layer_stride(&sc2_map);
+    layers = sc2_map_mask_layer_count(&sc2_map);
+    if (sc2_map.t3TextureMasks->version != SC2_MASK_VERSION ||
+        !stride || !layers || layers > SC2_MAX_TERRAIN_TEXTURES) {
         SAFE_DELETE(sc2_map.t3TextureMasks, sc2_free);
         sc2_map.t3TextureMasksSize = 0;
+        sc2_set_layer_status(SC2_TERRAIN_LAYER_TEXTURE_MASKS, SC2_LAYER_STATUS_MALFORMED);
+        return;
+    }
+    sc2_set_layer_status(SC2_TERRAIN_LAYER_TEXTURE_MASKS, SC2_LAYER_STATUS_OK);
+}
+
+/* t3SyncPathingInfo/t3Water/t3FluffDoodad/t3HardTile are documented (see
+ * docs/embedded-map-files.md) but this parser does not decode their payloads. Detecting their
+ * presence lets diagnostics report SC2_LAYER_STATUS_UNSUPPORTED instead of silently treating
+ * a present-but-unparsed file the same as an absent one. */
+static void sc2_parse_unsupported_terrain_layers(sc2MapSource_t *source) {
+    static struct {
+        LPCSTR             debug_name;
+        sc2TerrainLayerId_t layer;
+    } const files[] = {
+        { "t3SyncPathingInfo", SC2_TERRAIN_LAYER_SYNC_PATHING_INFO },
+        { "t3Water",           SC2_TERRAIN_LAYER_WATER },
+        { "t3FluffDoodad",     SC2_TERRAIN_LAYER_FLUFF_DOODAD },
+        { "t3HardTile",        SC2_TERRAIN_LAYER_HARD_TILE },
+    };
+
+    FOR_LOOP(i, SC2_ARRAY_LEN(files)) {
+        DWORD size = 0;
+        LPBYTE raw = sc2_source_read(source, files[i].debug_name, &size);
+        if (!raw) {
+            sc2_set_layer_status(files[i].layer, SC2_LAYER_STATUS_ABSENT);
+            continue;
+        }
+        sc2_free_file(raw);
+        fprintf(stderr, "SC2_MapLoad: %s is present but not yet parsed (see docs/embedded-map-files.md)\n",
+                files[i].debug_name);
+        sc2_set_layer_status(files[i].layer, SC2_LAYER_STATUS_UNSUPPORTED);
+    }
+}
+
+LPCSTR SC2_MapTerrainLayerName(sc2TerrainLayerId_t layer) {
+    static LPCSTR const names[SC2_TERRAIN_LAYER_COUNT] = {
+        "t3HeightMap", "t3SyncHeightMap", "t3CellFlags", "t3SyncCliffLevel", "t3TextureMasks",
+        "t3SyncPathingInfo", "t3Water", "t3FluffDoodad", "t3HardTile",
+    };
+    return layer < SC2_ARRAY_LEN(names) ? names[layer] : "unknown";
+}
+
+LPCSTR SC2_MapLayerStatusName(sc2LayerStatus_t status) {
+    switch (status) {
+    case SC2_LAYER_STATUS_ABSENT:      return "absent";
+    case SC2_LAYER_STATUS_OK:          return "ok";
+    case SC2_LAYER_STATUS_MALFORMED:   return "malformed";
+    case SC2_LAYER_STATUS_UNSUPPORTED: return "unsupported";
+    default:                          return "unknown";
     }
 }
 
@@ -2302,6 +2410,7 @@ void SC2_MapSetHost(sc2MapHost_t const *host) {
 BOOL SC2_MapLoad(LPCSTR mapFilename) {
     sc2MapSource_t source;
     sc2_map_clear();
+    sc2_map.generation++;
     sc2_map.cell_size = SC2_CELL_SIZE;
     if (!sc2_source_open(&source, mapFilename)) {
         return false;
@@ -2318,14 +2427,15 @@ BOOL SC2_MapLoad(LPCSTR mapFilename) {
     sc2_parse_cell_flags(&source);
     sc2_parse_sync_cliff_level(&source);
     sc2_parse_texture_masks(&source);
+    sc2_parse_unsupported_terrain_layers(&source);
     sc2_parse_objects(&source);
     sc2_resolve_catalogs(&source);
     sc2_source_close(&source);
     sc2_map.origin.x = 0.0f;
     sc2_map.origin.y = 0.0f;
-    fprintf(stderr, "SC2_MapLoad: %s %ux%u objects=%u\n",
+    fprintf(stderr, "SC2_MapLoad: %s %ux%u objects=%u generation=%u\n",
             sc2_map.map_name, (unsigned)sc2_map_width(), (unsigned)sc2_map_height(),
-            (unsigned)sc2_map.num_objects);
+            (unsigned)sc2_map.num_objects, (unsigned)sc2_map.generation);
     return true;
 }
 

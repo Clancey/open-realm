@@ -4,6 +4,7 @@
 
 #include "platform/apple/visionos/tabletop/bridge/bz_tabletop_lifecycle.h"
 #include "platform/bridge/bz_tabletop_transport.h"
+#include "games/starcraft-2/visionos/sc2_tabletop_assets.h"
 
 static int failures;
 
@@ -50,6 +51,53 @@ static const bzTTSnapshot_t *wait_for_selection(uint64_t after, uint32_t id) {
     return NULL;
 }
 
+/* Freeze the deterministic fixture and retail TRaynor01 terrain/DDS evidence at the public ABI. */
+static const bzSC2Terrain_t *check_assets(int live) {
+    const bzSC2Terrain_t *terrain = BZ_SC2A_LatestTerrain(BZ_SC2A_ABI_VERSION);
+    bzSC2ATerrainInfo_t terrain_info;
+    uint32_t textures = live ? 8 : 2;
+    CHECK(terrain != NULL && !BZ_SC2ATerrain_IsPlaceholder(terrain), "terrain publication is unavailable");
+    if (!terrain || BZ_SC2ATerrain_IsPlaceholder(terrain)) return terrain;
+    CHECK(BZ_SC2ATerrain_Info(terrain, &terrain_info), "terrain metadata is unavailable");
+    CHECK(terrain_info.cell_width == (live ? 136u : 8u) &&
+          terrain_info.cell_height == (live ? 160u : 6u), "terrain cell dimensions changed");
+    CHECK(terrain_info.hmap_width == (live ? 137u : 9u) &&
+          terrain_info.hmap_height == (live ? 161u : 7u), "terrain HMAP dimensions changed");
+    CHECK(terrain_info.mask_width == (live ? 1088u : 4u) &&
+          terrain_info.mask_height == (live ? 1280u : 4u) &&
+          terrain_info.mask_layer_count == (live ? 8u : 2u), "terrain MASK dimensions changed");
+    CHECK(terrain_info.texture_count == textures, "terrain texture count changed");
+    CHECK(terrain_info.cliff_set_count == (live ? 2u : 1u), "terrain cliff-set count changed");
+    CHECK(terrain_info.cliff_cell_count == (live ? 1576u : 2u), "terrain cliff-cell count changed");
+    CHECK(terrain_info.availability_flags == (live ? 0x3fu : 0x7fu), "terrain availability flags changed");
+    CHECK(terrain_info.malformed_flags == 0, "terrain contains malformed required layers");
+    CHECK(terrain_info.unsupported_flags == (live ? 0x3du : 0x30u), "terrain unsupported flags changed");
+    for (uint32_t i = 0; i < textures; i++)
+        for (uint32_t channel = BZ_SC2A_TERRAIN_CHANNEL_DIFFUSE;
+             channel <= BZ_SC2A_TERRAIN_CHANNEL_NORMAL; channel++) {
+            const bzSC2Image_t *first = BZ_SC2A_RegisterTerrainImage(
+                BZ_SC2A_ABI_VERSION, terrain, i, (bzSC2ATerrainChannel_t)channel);
+            const bzSC2Image_t *second = BZ_SC2A_RegisterTerrainImage(
+                BZ_SC2A_ABI_VERSION, terrain, i, (bzSC2ATerrainChannel_t)channel);
+            bzSC2AImageInfo_t image_info;
+            CHECK(first != NULL && second != NULL && first == second, "terrain image cache did not reuse its handle");
+            CHECK(first && !BZ_SC2AImage_IsPlaceholder(first), "terrain image resolved to a placeholder");
+            if (first && !BZ_SC2AImage_IsPlaceholder(first)) {
+                CHECK(BZ_SC2AImage_Info(first, &image_info), "terrain image metadata is unavailable");
+                CHECK(image_info.format == (live ? BZ_SC2A_PIXEL_DXT5 : BZ_SC2A_PIXEL_DXT1),
+                      "terrain image DDS format changed");
+                CHECK(image_info.width == (live ? 1024u : 4u) && image_info.height == (live ? 1024u : 4u),
+                      "terrain image dimensions changed");
+                CHECK(image_info.mip_count == (live ? 11u : 1u), "terrain image mip count changed");
+                CHECK(image_info.data_bytes == (live ? 1398128u : 8u), "terrain image payload size changed");
+            }
+            BZ_SC2AImage_Release(first); BZ_SC2AImage_Release(second);
+        }
+    CHECK(BZ_SC2A_CacheMisses() == textures * 2, "terrain image cache miss count changed");
+    CHECK(BZ_SC2A_CacheHits() == textures * 2, "terrain image cache hit count changed");
+    return terrain;
+}
+
 int main(int argc, char **argv) {
     const char *data = argc > 1 ? argv[1] : "build/tests";
     const char *map_name = argc > 2 ? argv[2] : "Tiny";
@@ -60,6 +108,7 @@ int main(int argc, char **argv) {
     };
     bzTabletopLifecycle_t *lc = BZ_TabletopCreate(
         (int)(sizeof(engine_argv) / sizeof(engine_argv[0])), engine_argv);
+    const bzSC2Terrain_t *retained_terrain = NULL;
     CHECK(lc != NULL, "lifecycle allocation failed");
     if (!lc) return 1;
     BZ_TabletopStart(lc);
@@ -99,6 +148,7 @@ int main(int argc, char **argv) {
                     BZ_TTSnapshot_Release(selected);
                 }
             }
+            retained_terrain = check_assets(!require_commands);
             BZ_TTSnapshot_Release(first);
         }
     }
@@ -107,6 +157,17 @@ int main(int argc, char **argv) {
     CHECK(BZ_TT_Latest() == NULL, "terminal transport exposed a snapshot");
     CHECK(BZ_TT_PostCancel(BZ_TABLETOP_ABI_VERSION, 0) == BZ_TT_ERR_TERMINAL,
           "terminal transport accepted a command");
+    if (retained_terrain) {
+        bzSC2ATerrainInfo_t retained_info;
+        CHECK(BZ_SC2ATerrain_Info(retained_terrain, &retained_info), "retained terrain died during shutdown");
+        BZ_SC2ATerrain_Release(retained_terrain);
+    }
+    {
+        const bzSC2Terrain_t *terminal = BZ_SC2A_LatestTerrain(BZ_SC2A_ABI_VERSION);
+        CHECK(terminal && BZ_SC2ATerrain_Status(terminal) == BZ_SC2A_ERR_TERMINAL,
+             "terminal asset source accepted a terrain read");
+        BZ_SC2ATerrain_Release(terminal);
+    }
     BZ_TabletopDestroy(lc);
     if (failures) return 1;
     printf("test_sc2_tabletop_runtime: passed\n");

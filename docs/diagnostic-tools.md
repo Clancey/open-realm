@@ -1,5 +1,25 @@
 # Diagnostic Tools
 
+## StarCraft II terrain and DDS inventory
+
+`sc2map --asset-inventory` loads the authoritative SC2 map parser and prints
+terrain-layer statuses, dimensions, catalog counters, resolved terrain/cliff
+identities, and validated DDS format/mip/payload metadata. `-data` mounts the
+exact retail fileset in normal engine priority order:
+
+```sh
+make sc2map
+build/bin/sc2map -data "$HOME/Downloads/Starcraft II/StarCraft2" \
+  --asset-inventory Maps/Campaign/TRaynor01.SC2Map
+```
+
+The command exits nonzero for malformed supported terrain, path confinement,
+missing required diffuse images, or malformed/unsupported/oversized DDS data.
+Missing optional normal maps remain visible as `status=not-found`. Unsupported
+embedded terrain files remain explicit layer statuses and do not fail inventory.
+Use `-mpq build/tests/test-sc2.SC2Maps` for deterministic fixture evidence.
+Never extract, rewrite, or commit retail data or inventory output.
+
 ## Warcraft III map terrain inspection
 
 `maptool -inspect` loads a retail map through the renderer's W3E parser, prints

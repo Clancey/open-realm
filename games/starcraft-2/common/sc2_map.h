@@ -198,6 +198,29 @@ typedef struct {
     DWORD          unresolved_models;
 } sc2CatalogStats_t;
 
+/* Embedded terrain files this parser knows the name/magic of, whether or not it decodes
+ * them. See docs/embedded-map-files.md "File Index" for the authoritative parsed/unparsed
+ * status of each; SC2_TERRAIN_LAYER_SYNC_PATHING_INFO onward are "not yet parsed" there. */
+typedef enum {
+    SC2_TERRAIN_LAYER_HEIGHT_MAP = 0,
+    SC2_TERRAIN_LAYER_SYNC_HEIGHT_MAP,
+    SC2_TERRAIN_LAYER_CELL_FLAGS,
+    SC2_TERRAIN_LAYER_SYNC_CLIFF_LEVEL,
+    SC2_TERRAIN_LAYER_TEXTURE_MASKS,
+    SC2_TERRAIN_LAYER_SYNC_PATHING_INFO,
+    SC2_TERRAIN_LAYER_WATER,
+    SC2_TERRAIN_LAYER_FLUFF_DOODAD,
+    SC2_TERRAIN_LAYER_HARD_TILE,
+    SC2_TERRAIN_LAYER_COUNT,
+} sc2TerrainLayerId_t;
+
+typedef enum {
+    SC2_LAYER_STATUS_ABSENT = 0,  /* file not present, unreadable, or bad magic */
+    SC2_LAYER_STATUS_OK,          /* present, magic matched, and passed bounds validation */
+    SC2_LAYER_STATUS_MALFORMED,   /* present and magic matched, but failed bounds validation */
+    SC2_LAYER_STATUS_UNSUPPORTED, /* present and magic matched a documented-but-unparsed file */
+} sc2LayerStatus_t;
+
 typedef struct {
     char           map_name[128];
     VECTOR2        origin;
@@ -214,6 +237,8 @@ typedef struct {
     sc2MapSyncHeightMap_t *t3SyncHeightMap;
     sc2MapLighting_t lighting;
     sc2CatalogStats_t catalog;
+    DWORD          generation;    /* bumped once per SC2_MapLoad() call; never reset by shutdown */
+    sc2LayerStatus_t terrain_layer_status[SC2_TERRAIN_LAYER_COUNT];
 } sc2Map_t;
 
 typedef struct {
@@ -314,6 +339,97 @@ static inline FLOAT sc2_map_height_adjust_at_point(sc2Map_t const *map, FLOAT x,
                                p.ty);
 }
 
+/* t3TextureMasks (magic MASK) packs two 4-bit texture-layer weights per byte; see
+ * docs/embedded-map-files.md "t3TextureMasks (magic MASK)". Renderer and diagnostic tools
+ * both need identical decode math, so it is a shared inline helper rather than being
+ * re-derived per consumer. */
+static inline BYTE sc2_map_mask_nibble(BYTE byte, DWORD pixel) {
+    return pixel & 1 ? byte & 0x0F : byte >> 4;
+}
+
+/* A MASK payload is either flat scanlines (width*height/2 bytes/layer) or 64x64-pixel blocks
+ * (64x32 bytes/block). The t3Terrain texture list is the authoritative layer count; requiring
+ * that exact count prevents a packed multi-layer payload from aliasing one padded block layer. */
+static inline DWORD sc2_map_mask_layer_stride(sc2Map_t const *map) {
+    ULONGLONG pixels, blocks_x, blocks_y, packed_layer_size, block_layer_size;
+    DWORD payload, expected_layers;
+
+    if (!map || !map->t3TextureMasks || map->t3TextureMasksSize < sizeof(*map->t3TextureMasks))
+        return 0;
+    expected_layers = map->t3Terrain.num_terrain_textures;
+    if (!expected_layers || expected_layers > SC2_MAX_TERRAIN_TEXTURES)
+        return 0;
+    pixels = (ULONGLONG)map->t3TextureMasks->width * map->t3TextureMasks->height;
+    packed_layer_size = (pixels + 1) / 2;
+    blocks_x = ((ULONGLONG)map->t3TextureMasks->width + 63) / 64;
+    blocks_y = ((ULONGLONG)map->t3TextureMasks->height + 63) / 64;
+    block_layer_size = blocks_x * blocks_y * 64 * 32;
+    payload = map->t3TextureMasksSize - (DWORD)sizeof(*map->t3TextureMasks);
+    /* Retail MASK is block-authored; prefer it only when it accounts for every authored layer. */
+    if (block_layer_size && block_layer_size <= (DWORD)-1 &&
+        block_layer_size * expected_layers == payload)
+        return (DWORD)block_layer_size;
+    if (packed_layer_size && packed_layer_size <= (DWORD)-1 &&
+        packed_layer_size * expected_layers == payload)
+        return (DWORD)packed_layer_size;
+    return 0;
+}
+
+static inline DWORD sc2_map_mask_layer_count(sc2Map_t const *map) {
+    DWORD stride = sc2_map_mask_layer_stride(map);
+
+    if (!map || !map->t3TextureMasks || !stride || map->t3TextureMasksSize < sizeof(*map->t3TextureMasks))
+        return 0;
+    DWORD payload = map->t3TextureMasksSize - (DWORD)sizeof(*map->t3TextureMasks);
+    return payload % stride ? 0 : payload / stride;
+}
+
+/* Expands one 64x64-pixel block (identified by `block`, an index into the blocks_x-wide grid)
+ * of nibble-packed texels into `out` (a width*height BYTE array), clipping against the real,
+ * possibly non-64-aligned, layer dimensions. */
+static inline void sc2_map_mask_decode_block(LPBYTE out, LPBYTE src, DWORD width, DWORD height, DWORD blocks_x, DWORD block) {
+    DWORD bx = block % blocks_x;
+    DWORD by = block / blocks_x;
+
+    FOR_LOOP(y, 64) {
+        FOR_LOOP(x, 64) {
+            DWORD px = bx * 64 + x;
+            DWORD py = by * 64 + y;
+            if (px >= width || py >= height)
+                continue;
+            out[px + py * width] = sc2_map_mask_nibble(src[y * 32 + x / 2], x);
+        }
+    }
+}
+
+/* Decodes one full layer of `map`'s t3TextureMasks into `values` (a width*height BYTE array,
+ * one weight per texel), dispatching to the flat or 64x64-block decode based on the detected
+ * stride from sc2_map_mask_layer_stride(). */
+static inline void sc2_map_mask_decode_layer(sc2Map_t const *map, DWORD layer, LPBYTE values) {
+    DWORD w, h, stride, block_stride, blocks_x, blocks_y;
+    LPBYTE src;
+
+    if (!map || !map->t3TextureMasks || !map->t3TextureMasks->width || !map->t3TextureMasks->height ||
+        layer >= sc2_map_mask_layer_count(map))
+        return;
+    w = map->t3TextureMasks->width;
+    h = map->t3TextureMasks->height;
+    stride = sc2_map_mask_layer_stride(map);
+    blocks_x = (w + 63) / 64;
+    blocks_y = (h + 63) / 64;
+    block_stride = blocks_x * blocks_y * 64 * 32;
+    src = map->t3TextureMasks->data + layer * stride;
+    if (stride == block_stride && block_stride > 0) {
+        FOR_LOOP(block, blocks_x * blocks_y) {
+            sc2_map_mask_decode_block(values, src + block * 64 * 32, w, h, blocks_x, block);
+        }
+    } else {
+        FOR_LOOP(i, w * h) {
+            values[i] = sc2_map_mask_nibble(src[i / 2], i);
+        }
+    }
+}
+
 typedef struct {
     HANDLE (*read_file)(LPCSTR filename, LPDWORD size);
     void   (*free_file)(HANDLE file);
@@ -333,5 +449,7 @@ VECTOR2       SC2_MapDenormalizedPosition(FLOAT x, FLOAT y);
 DWORD         SC2_MapObjectClassId(sc2MapObject_t const *object);
 BOOL          SC2_MapDefaultCamera(sc2MapCamera_t *camera);
 void          SC2_MapDump(FILE *out, LPCSTR filename);
+LPCSTR        SC2_MapTerrainLayerName(sc2TerrainLayerId_t layer);
+LPCSTR        SC2_MapLayerStatusName(sc2LayerStatus_t status);
 
 #endif

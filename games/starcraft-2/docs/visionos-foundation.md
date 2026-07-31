@@ -18,9 +18,9 @@ SC2 server/game
 ```
 
 `platform/bridge/bz_tabletop_game.h` is the selected-game policy seam. Warcraft
-continues to initialize and publish its asset ABI. SC2 explicitly logs that this
-layer publishes snapshots only; it does not fake SC2 terrain through the
-Warcraft W3E descriptor.
+continues to initialize and publish its asset ABI. SC2 publishes its distinct
+terrain/DDS ABI documented in [visionos-assets.md](visionos-assets.md); it does
+not fake SC2 terrain through the Warcraft W3E descriptor.
 
 Selection is copied from server-authored `RF_SELECTED`, not the desktop
 client's speculative `centity_t.selected` state. Typed commands therefore become
@@ -76,11 +76,13 @@ SC2DATA="$HOME/Downloads/Starcraft II/StarCraft2" make test-sc2-live test-sc2-ta
 ```
 
 `test-sc2-tabletop-runtime` starts the real headless listen server/client on the
-generated Tiny fixture, waits for an active snapshot, checks map bounds and
-entities, posts select and point commands, observes authoritative selection,
-rejects a stale generation, and verifies terminal shutdown.
+generated Tiny fixture, waits for an active snapshot, checks map bounds,
+entities, retained terrain, and DDS cache behavior, posts select and point
+commands, observes authoritative selection, rejects a stale generation, and
+verifies terminal shutdown.
 `test-sc2-tabletop-live` verifies the retail-data manifest and repeats the
-lifecycle, active snapshot, bounds, entity, and shutdown proof on TRaynor01.
+lifecycle, active snapshot, exact terrain/DDS inventory, cache, retained
+lifetime, entity, and shutdown proof on TRaynor01.
 Typed command acknowledgement stays fixture-owned because direct-map TRaynor01
 starts the local client as player 0 while its authored objects belong to players
 3 and 5.
@@ -91,7 +93,6 @@ fresh disposable Apple Vision Pro simulator and must never address
 
 ## Next layer boundary
 
-SC2 M3/DDS and terrain export remains game-owned. It needs retained immutable
-descriptors and a distinct SC2 terrain ABI; the OpenGL desktop renderer is not a
-visionOS asset provider, and SC2 terrain must not be coerced into Warcraft W3E
-ground/cliff/water records.
+SC2 M3 geometry and material export remains game-owned Layer 2B. The OpenGL
+desktop renderer is not a visionOS asset provider, and renderer-private M3
+pointers or buffers must not cross the native asset ABI.

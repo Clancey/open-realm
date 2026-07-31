@@ -264,8 +264,9 @@ $(BIN_DIR)/m3tool$(EXE_EXT): tools/m3tool.c $(TOOL_DEPS) $(CLIENT_HEADERS) $(COM
 	@$(CC) $(SC2_CFLAGS) -o $@ $< \
 		$(RPATH) $(LDFLAGS) -lrenderer-sc2 -lsheet -lshared $(LIBS) -lm -lz $(SC2_XML_LIBS)
 
-$(BIN_DIR)/sc2map$(EXE_EXT): tools/sc2map.c $(SC2_DIR)/common/sc2_map.c $(SC2_DIR)/common/sc2_map.h common/mpq.c | $(BIN_DIR)
-	@$(CC) $(SC2_CFLAGS) -o $@ tools/sc2map.c $(SC2_DIR)/common/sc2_map.c common/mpq.c \
+$(BIN_DIR)/sc2map$(EXE_EXT): tools/sc2map.c $(SC2_DIR)/common/sc2_map.c $(SC2_DIR)/common/sc2_map.h \
+		$(SC2_DIR)/common/sc2_dds.c $(SC2_DIR)/common/sc2_dds.h common/mpq.c | $(BIN_DIR)
+	@$(CC) $(SC2_CFLAGS) -o $@ tools/sc2map.c $(SC2_DIR)/common/sc2_map.c $(SC2_DIR)/common/sc2_dds.c common/mpq.c \
 		$(RPATH) $(LDFLAGS) -lm -lz $(SC2_XML_LIBS)
 
 $(BIN_DIR)/img2sysfont$(EXE_EXT): tools/img2sysfont.c | $(BIN_DIR)
@@ -283,8 +284,8 @@ $(BIN_DIR)/imgdiff$(EXE_EXT): tools/imgdiff.c renderer/stb/stb_image.h renderer/
 $(FONT_HEADER): $(FONT_SRC) $(BIN_DIR)/img2sysfont$(EXE_EXT)
 	@$(BIN_DIR)/img2sysfont$(EXE_EXT) $(FONT_SRC) $(FONT_HEADER) $(FONT_SYMBOL)
 
-$(eval $(call unity_lib_schema,$(RENDERER_WOW_LIB),$(RENDERER_BASE_DEPS) $(call CSRC,renderer $(WOW_DIR)/renderer),renderer-wow,renderer $(WOW_DIR)/renderer,,$(WOW_CFLAGS),common/mpq.c,$(RENDERER_SHARED_LIBS)))
-$(eval $(call unity_lib_schema,$(RENDERER_SC2_LIB),$(RENDERER_BASE_DEPS) $(call CSRC,renderer $(SC2_DIR)/renderer) $(SC2_COMMON_SRCS),renderer-sc2,renderer $(SC2_DIR)/renderer,,$(SC2_CFLAGS),common/mpq.c,$(RENDERER_SHARED_LIBS) $(SC2_XML_LIBS)))
+$(eval $(call unity_lib_schema,$(RENDERER_WOW_LIB),$(RENDERER_BASE_DEPS) $(call CSRC,renderer $(WOW_DIR)/renderer) $(SC2_DIR)/common/sc2_dds.c,renderer-wow,renderer $(WOW_DIR)/renderer,,$(WOW_CFLAGS),common/mpq.c $(SC2_DIR)/common/sc2_dds.c,$(RENDERER_SHARED_LIBS)))
+$(eval $(call unity_lib_schema,$(RENDERER_SC2_LIB),$(RENDERER_BASE_DEPS) $(call CSRC,renderer $(SC2_DIR)/renderer) $(SC2_COMMON_SRCS),renderer-sc2,renderer $(SC2_DIR)/renderer,,$(SC2_CFLAGS),common/mpq.c $(SC2_DIR)/common/sc2_dds.c,$(RENDERER_SHARED_LIBS) $(SC2_XML_LIBS)))
 
 $(eval $(call unity_lib_schema,$(GAME_WOW_LIB),$(GAME_BASE_DEPS) common/world.c $(WOW_COMMON_SRCS) $(call CSRC,$(WOW_DIR)/game),game-wow,$(WOW_DIR)/game,,$(WOW_CFLAGS),common/mpq.c,-lshared $(LIBS) -lm -lz))
 $(eval $(call unity_lib_schema,$(GAME_SC2_LIB),$(GAME_BASE_DEPS) $(WORLD_CORE_SRCS) $(SC2_COMMON_SRCS) $(call CSRC,$(SC2_DIR)/game),game-sc2,$(SC2_DIR)/game,,$(SC2_IMPL_CFLAGS),common/mpq.c,-lshared $(LIBS) -lm -lz $(SC2_XML_LIBS)))
@@ -310,7 +311,8 @@ $(eval $(call test_schema,test-wow-combat,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wo
 $(eval $(call test_schema,test-wow-abilities,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_abilities$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_abilities.c $(WOW_DIR)/game/g_wow.c $(WOW_DIR)/game/g_world.c $(WOW_DIR)/game/g_ai.c $(WOW_DIR)/game/m_creature.c common/mpq.c $(call CSRC,shared),-lm -lz,))
 $(eval $(call test_schema,test-wow-game,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_game$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_game.c $(WOW_DIR)/game/g_wow.c $(WOW_DIR)/game/g_world.c $(WOW_DIR)/game/g_ai.c $(WOW_DIR)/game/m_creature.c common/mpq.c $(call CSRC,shared),-lm -lz,))
 $(eval $(call test_schema,test-wow-ui,test-wow-assets,$(WOW_UI_TEST_CFLAGS),$(BIN_DIR)/test_wow_ui$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_ui.c $(WOW_DIR)/ui/ui_main.c $(WOW_DIR)/ui/ui_lua.c $(WOW_DIR)/ui/ui_dbc.c $(WOW_DIR)/ui/ui_loading.c $(WOW_DIR)/ui/ui_xml.c common/mpq.c,-lshared $(LUA_LIBS) $(WOW_XML_LIBS) -lz,))
-$(eval $(call test_schema,test-sc2,test-sc2-assets $(SHARED_LIB) $(SHEET_LIB),$(SC2_TEST_CFLAGS),$(BIN_DIR)/test_sc2$(EXE_EXT),$(SC2_TEST_DIR)/test_sc2_main.c $(SC2_TEST_DIR)/test_sc2_map.c $(SC2_TEST_DIR)/test_sc2_layout.c $(SC2_TEST_DIR)/test_sc2_consoleui.c $(SC2_TEST_DIR)/stb_sc2layout_impl.c $(SC2_DIR)/common/sc2_map.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz $(SC2_XML_LIBS),))
+$(eval $(call test_schema,test-sc2,test-sc2-assets $(SHARED_LIB) $(SHEET_LIB),$(SC2_TEST_CFLAGS),$(BIN_DIR)/test_sc2$(EXE_EXT),$(SC2_TEST_DIR)/test_sc2_main.c $(SC2_TEST_DIR)/test_sc2_map.c $(SC2_TEST_DIR)/test_sc2_layout.c $(SC2_TEST_DIR)/test_sc2_consoleui.c $(SC2_TEST_DIR)/test_sc2_dds.c $(SC2_TEST_DIR)/stb_sc2layout_impl.c $(SC2_DIR)/common/sc2_map.c $(SC2_DIR)/common/sc2_dds.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz $(SC2_XML_LIBS),))
+$(eval $(call test_schema,test-sc2-tabletop-assets,,$(SC2_TEST_CFLAGS),$(BIN_DIR)/test_sc2_tabletop_assets$(EXE_EXT),$(SC2_TEST_DIR)/test_sc2_tabletop_assets.c $(SC2_DIR)/visionos/sc2_tabletop_assets.c $(SC2_DIR)/common/sc2_dds.c,-lm -lpthread,))
 
 test-sc2-assets: sc2fixturegen mpqtool sc2map | $(TESTS_DIR)
 	@echo "[test-sc2-assets] generating SC2 terrain fixtures"
@@ -321,6 +323,10 @@ test-sc2-assets: sc2fixturegen mpqtool sc2map | $(TESTS_DIR)
 	@$(BIN_DIR)/sc2fixturegen$(EXE_EXT) cell-flags $(SC2_TEST_RES_DIR)/Maps/Test/Tiny.SC2Map/t3CellFlags
 	@$(BIN_DIR)/sc2fixturegen$(EXE_EXT) cliff-levels $(SC2_TEST_RES_DIR)/Maps/Test/Tiny.SC2Map/t3SyncCliffLevel
 	@$(BIN_DIR)/sc2fixturegen$(EXE_EXT) texture-masks $(SC2_TEST_RES_DIR)/Maps/Test/Tiny.SC2Map/t3TextureMasks
+	@mkdir -p $(SC2_TEST_RES_DIR)/Assets/Textures/Terrain
+	@for image in FixtureGrass_Diffuse FixtureGrass_Diffuse_normal FixtureDirt_Diffuse FixtureDirt_Diffuse_normal; do \
+		$(BIN_DIR)/sc2fixturegen$(EXE_EXT) dds-dxt1 $(SC2_TEST_RES_DIR)/Assets/Textures/Terrain/$$image.dds; \
+	done
 	@echo "[test-sc2-assets] packing test-sc2.SC2Maps"
 	@set --; \
 	for f in $$(find $(SC2_TEST_RES_DIR) -type f | sort); do \
@@ -336,10 +342,12 @@ test-sc2-assets: sc2fixturegen mpqtool sc2map | $(TESTS_DIR)
 	@$(BIN_DIR)/mpqtool$(EXE_EXT) -mpq $(SC2_TEST_MPQ) ls Maps/Test/Tiny.SC2Map | grep -q "MapInfo" && echo "  ls map OK"
 	@$(BIN_DIR)/mpqtool$(EXE_EXT) -mpq $(SC2_TEST_MPQ) cat Maps/Test/Tiny.SC2Map/Objects | grep -q "UnitType=\"Marine\"" && echo "  cat objects OK"
 	@$(BIN_DIR)/mpqtool$(EXE_EXT) -mpq $(SC2_TEST_MPQ) info Maps/Test/Tiny.SC2Map/t3CellFlags | grep -q "size=80" && echo "  binary cell flags OK"
-	@diag="$$( $(BIN_DIR)/sc2map$(EXE_EXT) -mpq $(SC2_TEST_MPQ) Maps/Test/Tiny.SC2Map )"; \
+	@diag="$$( $(BIN_DIR)/sc2map$(EXE_EXT) -mpq $(SC2_TEST_MPQ) --asset-inventory Maps/Test/Tiny.SC2Map )"; \
 	echo "$$diag" | grep -q "Objects: units=3 doodads=2 points=1 cameras=1 total=7" && \
 	echo "$$diag" | grep -q "MarineManifestModel" && \
 	echo "$$diag" | grep -q "footprint=Footprint2x2 size=2.000x2.000 fpRadius=1.414" && \
+	echo "$$diag" | grep -q "AssetInventory: cells=8x6 hmap=9x7 mask=4x4x2 textures=2" && \
+	test "$$(echo "$$diag" | grep -c "status=ok format=DXT1 width=4 height=4 mips=1 bytes=8")" -eq 4 && \
 	echo "  sc2map diag OK"
 
 test-wow-assets: blpgen mpqtool | $(TESTS_DIR)
@@ -375,4 +383,4 @@ test-sc2-live: opensc2 $(SC2_HUD_LIVE_BIN)
 	    $(SC2_HUD_LIVE_BIN); \
 	fi
 
-.PHONY: default build shared tools font $(TOOL_NAMES) diag clean download renderer-wow game-wow ui-wow openwow renderer-sc2 game-sc2 opensc2 run run-sc2 build-run-sc2 m2tool-wow-orcmale-player install-wow test-wow-appearance test-wow-combat test-wow-abilities test-wow-game test-wow-ui test-wow-assets test-sc2 test-sc2-assets test-sc2-live test-sc2-tabletop-runtime $(WC3_PHONY)
+.PHONY: default build shared tools font $(TOOL_NAMES) diag clean download renderer-wow game-wow ui-wow openwow renderer-sc2 game-sc2 opensc2 run run-sc2 build-run-sc2 m2tool-wow-orcmale-player install-wow test-wow-appearance test-wow-combat test-wow-abilities test-wow-game test-wow-ui test-wow-assets test-sc2 test-sc2-assets test-sc2-live test-sc2-tabletop-assets test-sc2-tabletop-runtime $(WC3_PHONY)

@@ -8,23 +8,27 @@ See [file-formats/objects.md](file-formats/objects.md) for the full `Objects` XM
 
 ## File Index
 
-| File | Magic | Format | Status |
-| --- | --- | --- | --- |
-| `MapInfo` | `MapI` | binary struct | parsed |
-| `Objects` | — | XML | parsed |
-| `t3Terrain.xml` | — | XML | parsed |
-| `t3HeightMap` | `HMAP` | binary | parsed |
-| `t3SyncCliffLevel` | `CLIF` | binary | parsed |
-| `t3CellFlags` | `LFCT` | binary | parsed |
-| `t3TextureMasks` | `MASK` | binary | parsed |
-| `t3SyncHeightMap` | `SMAP` | binary | parsed |
-| `t3SyncPathingInfo` | `PATH` | binary | **not yet parsed** |
-| `t3Water` | `WATR` | binary | **not yet parsed** |
-| `t3FluffDoodad` | `DLFT` | binary | **not yet parsed** |
-| `t3HardTile` | `HRDT` | binary | **not yet parsed** |
-| `t3VertCol` | — | binary | unknown layout |
-| `PaintedPathingLayer` | — | binary | partially understood |
-| `Terrain` | — | binary | sparse |
+| File | Magic | WoL version | Format | Status |
+| --- | --- | --- | --- | --- |
+| `MapInfo` | `MapI` | — | binary struct | parsed |
+| `Objects` | — | — | XML | parsed |
+| `t3Terrain.xml` | — | — | XML | parsed |
+| `t3HeightMap` | `HMAP` | 101 | binary | parsed |
+| `t3SyncCliffLevel` | `CLIF` | 100 | binary | parsed |
+| `t3CellFlags` | `LFCT` | 101 | binary | parsed |
+| `t3TextureMasks` | `MASK` | 102 | binary | parsed |
+| `t3SyncHeightMap` | `SMAP` | 102 | binary | parsed |
+| `t3SyncPathingInfo` | `PATH` | — | binary | **not yet parsed** |
+| `t3Water` | `WATR` | — | binary | **not yet parsed** |
+| `t3FluffDoodad` | `DLFT` | — | binary | **not yet parsed** |
+| `t3HardTile` | `HRDT` | — | binary | **not yet parsed** |
+| `t3VertCol` | — | — | binary | unknown layout |
+| `PaintedPathingLayer` | — | — | binary | partially understood |
+| `Terrain` | — | — | binary | sparse |
+
+The five parsed binary terrain-layer versions were verified against TRaynor01, THanson01, THorner01,
+and TZeratul01 from the WoL retail `Liberty.SC2Campaign/Base.SC2Maps` archive. The parser rejects other
+versions instead of interpreting an unknown file layout as the supported WoL shape.
 
 ---
 
@@ -222,6 +226,15 @@ typedef struct {
 ```
 
 **Data** follows immediately: blocks of `64 × 32 = 2048` bytes each.
+
+The authoritative parser validates dimensions and payload bounds before exposing
+this layer. `sc2_map_mask_decode_layer()` handles both packed and 64x64-block
+storage and returns one 0..15 byte per texel; the desktop renderer and visionOS
+asset copier share that decoder. The parsed `t3Terrain.xml` texture count is the
+authoritative layer count, which disambiguates packed payloads whose total size
+also happens to equal a padded block layer. MASK resolution is independent of `MapInfo`:
+TRaynor01 has a 136x160 cell grid but a 1088x1280x8 MASK. The asset ABI therefore
+uses a separate 8192 MASK dimension cap and a 256 MiB decoded payload cap.
 
 ```c
 typedef struct {
