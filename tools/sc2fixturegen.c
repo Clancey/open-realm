@@ -3,7 +3,7 @@
  *
  * Generates the small terrain/pathing files that SC2_MapLoad already parses:
  * MapInfo, t3HeightMap, t3SyncHeightMap, t3CellFlags, t3SyncCliffLevel,
- * and t3TextureMasks.
+ * t3TextureMasks, and a minimal valid DXT1 DDS.
  */
 
 #include <stdint.h>
@@ -41,6 +41,7 @@ static int write_cell_flags(const char *path) {
     unsigned char data[32 + 8 * 6];
     memset(data, 0, sizeof(data));
     memcpy(data, "LFCT", 4);
+    wr_u32le(data + 4, 101);
     wr_u32le(data + 24, 8);
     wr_u32le(data + 28, 6);
     for (unsigned int i = 0; i < 8 * 6; i++) {
@@ -121,6 +122,7 @@ static int write_cliff_levels(const char *path) {
     unsigned char data[32 + 8 * 6 * 2];
     memset(data, 0, sizeof(data));
     memcpy(data, "CLIF", 4);
+    wr_u32le(data + 4, 100);
     wr_u32le(data + 8, 8);
     wr_u32le(data + 12, 6);
     for (unsigned int i = 0; i < 8 * 6; i++) {
@@ -133,6 +135,7 @@ static int write_texture_masks(const char *path) {
     unsigned char data[64 + 8 * 2];
     memset(data, 0, sizeof(data));
     memcpy(data, "MASK", 4);
+    wr_u32le(data + 4, 102);
     wr_u32le(data + 12, 4);
     wr_u32le(data + 16, 4);
     memset(data + 64, 0x12, 8);
@@ -140,9 +143,25 @@ static int write_texture_masks(const char *path) {
     return write_file(path, data, sizeof(data));
 }
 
+static int write_dds_dxt1(const char *path) {
+    unsigned char data[128 + 8];
+    memset(data, 0, sizeof(data));
+    memcpy(data, "DDS ", 4);
+    wr_u32le(data + 4, 124);
+    wr_u32le(data + 12, 4);
+    wr_u32le(data + 16, 4);
+    wr_u32le(data + 28, 1);
+    wr_u32le(data + 76, 32);
+    wr_u32le(data + 80, 4);
+    memcpy(data + 84, "DXT1", 4);
+    memset(data + 128, 0xab, 8);
+    return write_file(path, data, sizeof(data));
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
-        fprintf(stderr, "Usage: sc2fixturegen <map-info|height-map|sync-height-map|cell-flags|cliff-levels|texture-masks> <out>\n");
+        fprintf(stderr, "Usage: sc2fixturegen <map-info|height-map|sync-height-map|cell-flags|cliff-levels|"
+                        "texture-masks|dds-dxt1> <out>\n");
         return 1;
     }
     if (!strcmp(argv[1], "map-info")) {
@@ -162,6 +181,9 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(argv[1], "texture-masks")) {
         return write_texture_masks(argv[2]) ? 0 : 1;
+    }
+    if (!strcmp(argv[1], "dds-dxt1")) {
+        return write_dds_dxt1(argv[2]) ? 0 : 1;
     }
     fprintf(stderr, "sc2fixturegen: unknown fixture kind %s\n", argv[1]);
     return 1;

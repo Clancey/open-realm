@@ -538,73 +538,8 @@ static void r_sc2_add_layer(LPMAPLAYER *list, LPMAPLAYER layer) {
     *tail = layer;
 }
 
-static BYTE r_sc2_texture_mask_nibble(BYTE byte, DWORD pixel) {
-    return pixel & 1 ? byte & 0x0F : byte >> 4;
-}
-
-static DWORD r_sc2_texture_mask_layer_stride(sc2Map_t const *map) {
-    DWORD w, h, blocks_x, blocks_y, packed_layer_size, block_layer_size;
-
-    if (!map || !map->t3TextureMasks)
-        return 0;
-    w = map->t3TextureMasks->width;
-    h = map->t3TextureMasks->height;
-    packed_layer_size = (w * h) / 2;
-    blocks_x = (w + 63) / 64;
-    blocks_y = (h + 63) / 64;
-    block_layer_size = blocks_x * blocks_y * 64 * 32;
-    if (block_layer_size && map->t3TextureMasksSize >= sizeof(*map->t3TextureMasks) + block_layer_size &&
-        (map->t3TextureMasksSize - sizeof(*map->t3TextureMasks)) % block_layer_size == 0)
-        return block_layer_size;
-    return packed_layer_size;
-}
-
-static DWORD r_sc2_texture_mask_layers(sc2Map_t const *map) {
-    DWORD stride = r_sc2_texture_mask_layer_stride(map);
-
-    if (!map || !map->t3TextureMasks || !stride || map->t3TextureMasksSize < sizeof(*map->t3TextureMasks))
-        return 0;
-    return (map->t3TextureMasksSize - sizeof(*map->t3TextureMasks)) / stride;
-}
-
-static void r_sc2_decode_texture_mask_block(LPBYTE out, LPBYTE src, DWORD width, DWORD height, DWORD blocks_x, DWORD block) {
-    DWORD bx = block % blocks_x;
-    DWORD by = block / blocks_x;
-
-    FOR_LOOP(y, 64) {
-        FOR_LOOP(x, 64) {
-            DWORD px = bx * 64 + x;
-            DWORD py = by * 64 + y;
-            if (px >= width || py >= height)
-                continue;
-            out[px + py * width] = r_sc2_texture_mask_nibble(src[y * 32 + x / 2], x);
-        }
-    }
-}
-
-static void r_sc2_decode_texture_mask_layer(sc2Map_t const *map, DWORD layer, LPBYTE values) {
-    DWORD w, h, stride, block_stride, blocks_x, blocks_y;
-    LPBYTE src;
-
-    if (!map->t3TextureMasks || !map->t3TextureMasks->width || !map->t3TextureMasks->height || layer >= r_sc2_texture_mask_layers(map))
-        return;
-    w = map->t3TextureMasks->width;
-    h = map->t3TextureMasks->height;
-    stride = r_sc2_texture_mask_layer_stride(map);
-    blocks_x = (w + 63) / 64;
-    blocks_y = (h + 63) / 64;
-    block_stride = blocks_x * blocks_y * 64 * 32;
-    src = map->t3TextureMasks->data + layer * stride;
-    if (stride == block_stride && block_stride > 0) {
-        FOR_LOOP(block, blocks_x * blocks_y) {
-            r_sc2_decode_texture_mask_block(values, src + block * 64 * 32, w, h, blocks_x, block);
-        }
-    } else {
-        FOR_LOOP(i, w * h) {
-            values[i] = r_sc2_texture_mask_nibble(src[i / 2], i);
-        }
-    }
-}
+/* MASK stride/layer/nibble decode is shared with common/sc2_map.c diagnostics; see
+ * sc2_map_mask_decode_layer() for the implementation. */
 
 static void r_sc2_store_mask_pixel(LPCOLOR32 pixel, BYTE r, BYTE g, BYTE b, BYTE a) {
 #if __linux__
@@ -630,7 +565,7 @@ static LPTEXTURE r_sc2_build_mask_texture(sc2Map_t const *map, DWORD group) {
     memset(values, 0, w * h * SC2_TERRAIN_BLEND_LAYERS);
     if (map->t3TextureMasks && map->t3TextureMasks->width && map->t3TextureMasks->height) {
         FOR_LOOP(layer, MIN(sc2_num_terrain_layers, SC2_TERRAIN_BLEND_LAYERS)) {
-            r_sc2_decode_texture_mask_layer(map, layer, values + layer * w * h);
+            sc2_map_mask_decode_layer(map, layer, values + layer * w * h);
         }
     }
     FOR_LOOP(i, w * h) {

@@ -235,7 +235,7 @@ $(foreach t,$(BZ_XR_TARGETS),$(eval $(call bz_xr_bridge_rules,$(t))))
 visionos-bridge: xrsimulator-bridge xros-bridge
 
 # ---------------------------------------------------------------------------
-# StarCraft II snapshot-only foundation
+# StarCraft II headless foundation plus immutable terrain/DDS asset ABI
 # ---------------------------------------------------------------------------
 BZ_XR_SC2_CFLAGS := $(BZ_XR_BASE_CFLAGS) -I$(SC2_DIR) -I$(SC2_DIR)/common \
 	-DSC2 -DOW3_LOAD_ALL_MPQS -DSTB_SC2LAYOUT_IMPLEMENTATION -DSTB_SC2LAYOUT_GLOBALS \
@@ -247,6 +247,8 @@ BZ_XR_SC2_ENGINE_SRCS := \
 	$(BZ_XR_BRIDGE_TRANSPORT_DIR)/bz_tabletop_transport.c \
 	client/cl_main.c client/cl_parse.c client/cl_view.c client/cl_tent.c client/keys.c
 BZ_XR_SC2_GAME_SRCS := $(shell find $(SC2_DIR)/game -name '*.c' | sort) \
+	$(SC2_DIR)/common/sc2_dds.c \
+	$(SC2_DIR)/visionos/sc2_tabletop_assets.c \
 	$(SC2_DIR)/visionos/sc2_tabletop_game.c
 
 define bz_xr_sc2_platform_rules
@@ -288,8 +290,11 @@ $$(BZ_XR_SC2_$(1)_SMOKE): $$(BZ_XR_SC2_$(1)_BRIDGE_ARCHIVE) $$(BZ_XR_SC2_$(1)_EN
 		echo "visionos-sc2-$(1): forbidden developer path" >&2; exit 1; \
 	fi
 	@if nm -u $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_TTA_'; then \
-		echo "visionos-sc2-$(1): snapshot-only archive references the asset ABI" >&2; exit 1; \
+		echo "visionos-sc2-$(1): archive references the Warcraft asset ABI" >&2; exit 1; \
 	fi
+	@nm -g $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_SC2A_AbiVersion'
+	@nm -g $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_SC2A_LatestTerrain'
+	@nm -g $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_SC2A_RegisterTerrainImage'
 
 .PHONY: visionos-sc2-$(1)
 visionos-sc2-$(1): $$(BZ_XR_SC2_$(1)_SMOKE)
