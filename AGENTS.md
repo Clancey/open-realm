@@ -18,6 +18,7 @@ This codebase is inspired by **Quake 2** (id Software). The developer is deeply 
 | SC2 HUD layout pipeline (sc2BaseFrame_t → uiFrame_t, layer IDs, stat bindings) | [games/starcraft-2/docs/hud-layout-pipeline.md](games/starcraft-2/docs/hud-layout-pipeline.md) |
 | SC2 retail extraction, visionOS foundation, and terrain/DDS ABI | [games/starcraft-2/docs/installer-extraction.md](games/starcraft-2/docs/installer-extraction.md), [games/starcraft-2/docs/visionos-foundation.md](games/starcraft-2/docs/visionos-foundation.md), [games/starcraft-2/docs/visionos-assets.md](games/starcraft-2/docs/visionos-assets.md) |
 | visionOS tabletop runtime, lifecycle, controls, build/test commands | [docs/visionos-tabletop.md](docs/visionos-tabletop.md), [docs/visionos-tabletop-controls.md](docs/visionos-tabletop-controls.md) |
+| Meta Quest (Android/NDK + OpenXR) tabletop native shell, source-list sync contract, build/verify commands | [docs/quest-tabletop.md](docs/quest-tabletop.md) |
 
 ## Coding Style
 

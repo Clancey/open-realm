@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Meta Quest tabletop native shell manifest — Layer 2 sideloaded debug
+    prototype. Settings verified against Meta's documented mobile-native
+    manifest guidance (developers.meta.com/horizon/documentation/native/
+    android/mobile-native-manifest/, content last_updated 2026-05-28) — see
+    docs/quest-tabletop.md for the full citation and what must be rechecked
+    before any wider (store) distribution, which has additional submission
+    manifest requirements this file does not attempt to satisfy.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:installLocation="auto">
+
+    <!-- android:name is intentionally unset: this layer is a plain
+         NativeActivity (android.app.lib_name below) with zero Java/Kotlin
+         application code — the smallest justified shim per this layer's
+         scope (see docs/quest-tabletop.md). -->
+
+    <!-- Required for Meta Quest store v2 signing per the manifest guidance
+         above; also documents this app's actual runtime requirement (head
+         tracking is the one OpenXR capability this loader-init/probe layer
+         touches). -->
+    <uses-feature
+        android:name="android.hardware.vr.headtracking"
+        android:version="1"
+        android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:hasCode="false"
+        android:label="@string/app_name">
+
+        <!-- com.oculus.supportedDevices scopes this developer prototype to
+             the Quest 3/3S hardware this layer targets (see
+             docs/quest-tabletop.md); widen only alongside re-validating on
+             the added hardware. -->
+        <meta-data
+            android:name="com.oculus.supportedDevices"
+            android:value="quest3|quest3s" />
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false">
+
+            <!-- Tells android.app.NativeActivity which .so to
+                 dlopen()/ANativeActivity_onCreate() — bz_quest_native maps
+                 to libbz_quest_native.so (CMakeLists.txt's bz_quest_native
+                 SHARED target). -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="bz_quest_native" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

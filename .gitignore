@@ -17,3 +17,10 @@ War3xLocal.mpq
 /share/openwow-config.cfg
 /share/autoexec.cfg
 share/characters.xml
+
+# Android/Gradle (platform/android/quest) — local SDK path and IDE/build state.
+local.properties
+.gradle/
+.cxx/
+*.iml
+.idea/
