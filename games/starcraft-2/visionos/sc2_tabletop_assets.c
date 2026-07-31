@@ -18,7 +18,7 @@
 #include "../common/sc2_dds.h"
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t g_source_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_provider_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool g_initialized, g_terminal = true;
 static bzSC2ASource_t g_source;
 static bzSC2Image_t *g_image_cache;
@@ -27,6 +27,9 @@ static bzSC2AResult_t g_last_terrain_status = BZ_SC2A_ERR_NOT_FOUND;
 static uint64_t g_cache_hits, g_cache_misses, g_placeholder_logs;
 static uint64_t g_generation;
 static uintptr_t g_failed_terrain_token;
+
+void BZ_SC2A_ProviderLock(void) { pthread_mutex_lock(&g_provider_lock); }
+void BZ_SC2A_ProviderUnlock(void) { pthread_mutex_unlock(&g_provider_lock); }
 
 static void terrain_free(bzSC2Terrain_t *terrain) { free(terrain); }
 static void image_free(bzSC2Image_t *image) { free(image); }
@@ -159,7 +162,7 @@ void *BZ_SC2A_ImageData(bzSC2Image_t *image, uint32_t offset, size_t bytes) {
 void BZ_SC2A_Init(void) {
     bzSC2ASource_t source = { 0 };
     BZ_SC2_TTA_Source(&source);
-    pthread_mutex_lock(&g_source_lock);
+    BZ_SC2A_ProviderLock();
     pthread_mutex_lock(&g_lock);
     clear_published_locked();
     g_source = source;
@@ -170,7 +173,7 @@ void BZ_SC2A_Init(void) {
     g_initialized = true;
     g_terminal = false;
     pthread_mutex_unlock(&g_lock);
-    pthread_mutex_unlock(&g_source_lock);
+    BZ_SC2A_ProviderUnlock();
     fprintf(stderr, "SC2TabletopAssets: initialized, abi_version=%u\n", BZ_SC2A_ABI_VERSION);
 }
 
@@ -180,8 +183,8 @@ void BZ_SC2A_Shutdown(void) {
     clear_published_locked();
     pthread_mutex_unlock(&g_lock);
     /* Mark terminal first, then drain without holding the cache lock before FS/game teardown. */
-    pthread_mutex_lock(&g_source_lock);
-    pthread_mutex_unlock(&g_source_lock);
+    BZ_SC2A_ProviderLock();
+    BZ_SC2A_ProviderUnlock();
     fprintf(stderr, "SC2TabletopAssets: shutdown (terminal)\n");
 }
 
@@ -201,18 +204,18 @@ void BZ_SC2A_PublishTerrainFromGame(void) {
     source = g_source;
     generation = g_generation;
     pthread_mutex_unlock(&g_lock);
-    pthread_mutex_lock(&g_source_lock);
+    BZ_SC2A_ProviderLock();
     token = source.terrain_token();
     pthread_mutex_lock(&g_lock);
     if (!g_initialized || g_terminal || generation != g_generation) {
         pthread_mutex_unlock(&g_lock);
-        pthread_mutex_unlock(&g_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return;
     }
     if (!token || token == g_failed_terrain_token ||
         (g_latest_terrain && g_latest_terrain->source_token == token)) {
         pthread_mutex_unlock(&g_lock);
-        pthread_mutex_unlock(&g_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return;
     }
     pthread_mutex_unlock(&g_lock);
@@ -229,20 +232,20 @@ void BZ_SC2A_PublishTerrainFromGame(void) {
         if (log_failure)
             fprintf(stderr, "SC2TabletopAssets: terrain token 0x%llx unavailable (%d)\n",
                     (unsigned long long)token, status);
-        pthread_mutex_unlock(&g_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return;
     }
     pthread_mutex_lock(&g_lock);
     if (!g_initialized || g_terminal || generation != g_generation) {
         pthread_mutex_unlock(&g_lock);
         terrain_release_locked(terrain);
-        pthread_mutex_unlock(&g_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return;
     }
     if (g_latest_terrain && g_latest_terrain->source_token == token) {
         pthread_mutex_unlock(&g_lock);
         terrain_release_locked(terrain);
-        pthread_mutex_unlock(&g_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return;
     }
     terrain->source_token = token;
@@ -254,7 +257,7 @@ void BZ_SC2A_PublishTerrainFromGame(void) {
     g_last_terrain_status = BZ_SC2A_OK;
     if (old) terrain_release_locked(old);
     pthread_mutex_unlock(&g_lock);
-    pthread_mutex_unlock(&g_source_lock);
+    BZ_SC2A_ProviderUnlock();
 }
 
 /* Always returns a retained handle: the latest published terrain, or a placeholder carrying
@@ -376,6 +379,24 @@ static bzSC2AResult_t registration_context(uint32_t abi_version, bzSC2ASource_t 
     return status;
 }
 
+/* Invalid identities still need a stable bounded cache/log key; hash the elided suffix. */
+static void invalid_identity_key(const char *identity, char out[BZ_SC2A_MAX_IDENTITY]) {
+    static const char hex[] = "0123456789abcdef";
+    uint64_t hash = 1469598103934665603ull;
+    size_t length, keep;
+    if (!identity) { out[0] = '\0'; return; }
+    length = strlen(identity);
+    if (length < BZ_SC2A_MAX_IDENTITY) {
+        memcpy(out, identity, length + 1);
+        return;
+    }
+    FOR_LOOP(i, length) { hash ^= (unsigned char)identity[i]; hash *= 1099511628211ull; }
+    keep = BZ_SC2A_MAX_IDENTITY - 18;
+    memcpy(out, identity, keep); out[keep++] = '#';
+    for (int shift = 60; shift >= 0; shift -= 4) out[keep++] = hex[(hash >> shift) & 15];
+    out[keep] = '\0';
+}
+
 static bzSC2AResult_t map_dds_result(sc2DdsResult_t result) {
     switch (result) {
     case SC2_DDS_OK: return BZ_SC2A_OK;
@@ -480,12 +501,12 @@ static const bzSC2Image_t *register_identity(const char *identity, bzSC2AResult_
     pthread_mutex_unlock(&g_lock);
 
     /* Source archive readers may be process-global; serialize misses through immutable publication. */
-    pthread_mutex_lock(&g_source_lock);
+    BZ_SC2A_ProviderLock();
     pthread_mutex_lock(&g_lock);
     lifecycle_status = registration_generation_status_locked(generation);
     if (lifecycle_status != BZ_SC2A_OK) {
         pthread_mutex_unlock(&g_lock);
-        pthread_mutex_unlock(&g_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return placeholder_image(lifecycle_status);
     }
     image = find_cached_image_locked(identity);
@@ -493,7 +514,7 @@ static const bzSC2Image_t *register_identity(const char *identity, bzSC2AResult_
         g_cache_hits++;
         image_retain_locked(image);
         pthread_mutex_unlock(&g_lock);
-        pthread_mutex_unlock(&g_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return image;
     }
     g_cache_misses++;
@@ -507,7 +528,7 @@ static const bzSC2Image_t *register_identity(const char *identity, bzSC2AResult_
     if (!image)
         image = placeholder_image(status);
     if (!image) {
-        pthread_mutex_unlock(&g_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return NULL;
     }
     snprintf(image->identity, sizeof(image->identity), "%s", identity);
@@ -517,7 +538,7 @@ static const bzSC2Image_t *register_identity(const char *identity, bzSC2AResult_
     if (lifecycle_status != BZ_SC2A_OK) {
         pthread_mutex_unlock(&g_lock);
         image_release_locked(image);
-        pthread_mutex_unlock(&g_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return placeholder_image(lifecycle_status);
     }
     {
@@ -526,7 +547,7 @@ static const bzSC2Image_t *register_identity(const char *identity, bzSC2AResult_
             image_retain_locked(raced);
             pthread_mutex_unlock(&g_lock);
             image_release_locked(image);
-            pthread_mutex_unlock(&g_source_lock);
+            BZ_SC2A_ProviderUnlock();
             return raced;
         }
     }
@@ -535,7 +556,7 @@ static const bzSC2Image_t *register_identity(const char *identity, bzSC2AResult_
     image_retain_locked(image);
     if (image->placeholder) g_placeholder_logs++;
     pthread_mutex_unlock(&g_lock);
-    pthread_mutex_unlock(&g_source_lock);
+    BZ_SC2A_ProviderUnlock();
     if (image->placeholder)
         fprintf(stderr, "SC2TabletopAssets: image '%s' unavailable (%d); cached placeholder\n",
                 identity, status);
@@ -552,8 +573,10 @@ const bzSC2Image_t *BZ_SC2A_RegisterImage(uint32_t abi_version, const char *iden
         return placeholder_image(status);
     if (!identity || !identity[0])
         return register_identity("", BZ_SC2A_ERR_NOT_FOUND, &source, generation);
-    if (!sc2_tta_normalize_identity(identity, normalized, sizeof(normalized)))
-        return register_identity(identity, BZ_SC2A_ERR_PATH_CONFINEMENT, &source, generation);
+    if (!sc2_tta_normalize_identity(identity, normalized, sizeof(normalized))) {
+        invalid_identity_key(identity, normalized);
+        return register_identity(normalized, BZ_SC2A_ERR_PATH_CONFINEMENT, &source, generation);
+    }
     return register_identity(normalized, BZ_SC2A_OK, &source, generation);
 }
 
@@ -574,7 +597,15 @@ const bzSC2Image_t *BZ_SC2A_RegisterTerrainImage(uint32_t abi_version, const bzS
         return placeholder_image(BZ_SC2A_ERR_INVALID_ARGUMENT);
     snprintf(identity, sizeof(identity), "%s",
              channel == BZ_SC2A_TERRAIN_CHANNEL_DIFFUSE ? texture.diffuse_identity : texture.normal_identity);
-    return BZ_SC2A_RegisterImage(abi_version, identity);
+#ifdef BZ_SC2A_TEST_HOOKS
+    BZ_SC2A_TestTerrainImageValidated();
+#endif
+    if (!identity[0]) return register_identity("", BZ_SC2A_ERR_NOT_FOUND, &source, generation);
+    if (!sc2_tta_normalize_identity(identity, texture.diffuse_identity, sizeof(texture.diffuse_identity))) {
+        invalid_identity_key(identity, texture.diffuse_identity);
+        return register_identity(texture.diffuse_identity, BZ_SC2A_ERR_PATH_CONFINEMENT, &source, generation);
+    }
+    return register_identity(texture.diffuse_identity, BZ_SC2A_OK, &source, generation);
 }
 
 void BZ_SC2AImage_Retain(const bzSC2Image_t *image) {

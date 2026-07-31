@@ -18,7 +18,6 @@ enum {
 };
 
 static pthread_mutex_t g_model_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t g_model_source_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool g_model_initialized, g_model_terminal = true;
 static uint64_t g_model_generation, g_model_map_generation;
 static uint64_t g_model_hits, g_model_misses, g_model_placeholder_logs;
@@ -72,11 +71,39 @@ static bzSC2Model_t *model_placeholder(bzSC2MResult_t status, const char *identi
     return model;
 }
 
-static bool add_bytes(size_t *total, uint32_t count, size_t stride) {
+typedef struct {
+    size_t bytes;
+    uint32_t vertices, indices, divisions, regions, batches, bone_lookup;
+    uint32_t material_references, materials, composite_sections, layers;
+} sc2ModelLayout_t;
+
+static bool add_segment(size_t *total, uint32_t count, size_t stride, size_t alignment, uint32_t *offset) {
+    size_t start, bytes;
+    if (!alignment || alignment & (alignment - 1) || *total > SIZE_MAX - (alignment - 1)) return false;
+    start = (*total + alignment - 1) & ~(alignment - 1);
     if (count && stride > SIZE_MAX / count) return false;
-    if ((size_t)count * stride > SIZE_MAX - *total) return false;
-    *total += (size_t)count * stride;
-    return *total <= UINT32_MAX;
+    bytes = (size_t)count * stride;
+    if (bytes > SIZE_MAX - start || start + bytes > UINT32_MAX) return false;
+    *offset = (uint32_t)start; *total = start + bytes;
+    return true;
+}
+
+static bool model_layout(const bzSC2MModelInfo_t *info, sc2ModelLayout_t *layout) {
+#define SC2M_SEGMENT(NAME, COUNT, TYPE) \
+    if (!add_segment(&layout->bytes, COUNT, sizeof(TYPE), _Alignof(TYPE), &layout->NAME)) return false
+    *layout = (sc2ModelLayout_t){ 0 };
+    SC2M_SEGMENT(vertices, info->vertex_count, bzSC2MVertex_t);
+    SC2M_SEGMENT(indices, info->index_count, uint16_t);
+    SC2M_SEGMENT(divisions, info->division_count, bzSC2MDivisionInfo_t);
+    SC2M_SEGMENT(regions, info->region_count, bzSC2MRegionInfo_t);
+    SC2M_SEGMENT(batches, info->batch_count, bzSC2MBatchInfo_t);
+    SC2M_SEGMENT(bone_lookup, info->bone_lookup_count, uint16_t);
+    SC2M_SEGMENT(material_references, info->material_reference_count, bzSC2MMaterialReferenceInfo_t);
+    SC2M_SEGMENT(materials, info->standard_material_count, bzSC2MStandardMaterialInfo_t);
+    SC2M_SEGMENT(composite_sections, info->composite_section_count, bzSC2MCompositeSectionInfo_t);
+    SC2M_SEGMENT(layers, info->layer_count, bzSC2MLayerInfo_t);
+#undef SC2M_SEGMENT
+    return true;
 }
 
 static uint32_t layer_count(const m3Material_t *material) {
@@ -183,7 +210,7 @@ static bzSC2Model_t *export_model(const char *identity, const m3Model_t *src, ui
     bzSC2MModelInfo_t info = { .registration_generation = generation, .modl_version = src->type,
         .vertex_flags = src->vertexFlags, .vertex_stride = SC2_M3VertexDiskSize(src->vertexFlags),
         .uv_count = SC2_M3VertexUVCount(src->vertexFlags) };
-    size_t total = 0;
+    sc2ModelLayout_t layout;
     bzSC2Model_t *model;
     uint32_t index_cursor = 0, region_cursor = 0, batch_cursor = 0, section_cursor = 0, layer_cursor = 0;
     if (!model_counts(src, &info)) { *status = BZ_SC2M_ERR_TOO_LARGE; return NULL; }
@@ -191,19 +218,10 @@ static bzSC2Model_t *export_model(const char *identity, const m3Model_t *src, ui
         *status = src->type == 23 ? BZ_SC2M_ERR_MALFORMED : BZ_SC2M_ERR_UNSUPPORTED;
         return NULL;
     }
-    if (!add_bytes(&total, info.vertex_count, sizeof(bzSC2MVertex_t)) ||
-        !add_bytes(&total, info.index_count, sizeof(uint16_t)) ||
-        !add_bytes(&total, info.division_count, sizeof(bzSC2MDivisionInfo_t)) ||
-        !add_bytes(&total, info.region_count, sizeof(bzSC2MRegionInfo_t)) ||
-        !add_bytes(&total, info.batch_count, sizeof(bzSC2MBatchInfo_t)) ||
-        !add_bytes(&total, info.bone_lookup_count, sizeof(uint16_t)) ||
-        !add_bytes(&total, info.material_reference_count, sizeof(bzSC2MMaterialReferenceInfo_t)) ||
-        !add_bytes(&total, info.standard_material_count, sizeof(bzSC2MStandardMaterialInfo_t)) ||
-        !add_bytes(&total, info.composite_section_count, sizeof(bzSC2MCompositeSectionInfo_t)) ||
-        !add_bytes(&total, info.layer_count, sizeof(bzSC2MLayerInfo_t))) {
+    if (!model_layout(&info, &layout)) {
         *status = BZ_SC2M_ERR_TOO_LARGE; return NULL;
     }
-    model = model_alloc(total);
+    model = model_alloc(layout.bytes);
     if (!model) { *status = BZ_SC2M_ERR_OUT_OF_MEMORY; return NULL; }
     model->status = BZ_SC2M_OK; model->info = info;
     snprintf(model->info.identity, sizeof(model->info.identity), "%s", identity);
@@ -211,20 +229,11 @@ static bzSC2Model_t *export_model(const char *identity, const m3Model_t *src, ui
     memcpy(model->info.bounds_min, &src->boundings.min, sizeof(model->info.bounds_min));
     memcpy(model->info.bounds_max, &src->boundings.max, sizeof(model->info.bounds_max));
     model->info.bounds_radius = src->boundings.radius;
-#define SC2M_OFFSET(NAME, COUNT, TYPE) do { model->NAME##_offset = (uint32_t)index_cursor; \
-    index_cursor += (COUNT) * (uint32_t)sizeof(TYPE); } while (0)
-    index_cursor = 0;
-    SC2M_OFFSET(vertices, info.vertex_count, bzSC2MVertex_t);
-    SC2M_OFFSET(indices, info.index_count, uint16_t);
-    SC2M_OFFSET(divisions, info.division_count, bzSC2MDivisionInfo_t);
-    SC2M_OFFSET(regions, info.region_count, bzSC2MRegionInfo_t);
-    SC2M_OFFSET(batches, info.batch_count, bzSC2MBatchInfo_t);
-    SC2M_OFFSET(bone_lookup, info.bone_lookup_count, uint16_t);
-    SC2M_OFFSET(material_references, info.material_reference_count, bzSC2MMaterialReferenceInfo_t);
-    SC2M_OFFSET(materials, info.standard_material_count, bzSC2MStandardMaterialInfo_t);
-    SC2M_OFFSET(composite_sections, info.composite_section_count, bzSC2MCompositeSectionInfo_t);
-    SC2M_OFFSET(layers, info.layer_count, bzSC2MLayerInfo_t);
-#undef SC2M_OFFSET
+    model->vertices_offset = layout.vertices; model->indices_offset = layout.indices;
+    model->divisions_offset = layout.divisions; model->regions_offset = layout.regions;
+    model->batches_offset = layout.batches; model->bone_lookup_offset = layout.bone_lookup;
+    model->material_references_offset = layout.material_references; model->materials_offset = layout.materials;
+    model->composite_sections_offset = layout.composite_sections; model->layers_offset = layout.layers;
     FOR_LOOP(i, info.vertex_count) {
         bzSC2MVertex_t *dst = model_data(model, model->vertices_offset + i * sizeof(*dst), sizeof(*dst));
         memcpy(dst->position, &src->vertices[i].pos, sizeof(dst->position));
@@ -353,22 +362,22 @@ static bzSC2Model_t *load_model(const char *identity, bzSC2MResult_t *status, ui
 void BZ_SC2M_Init(void) {
     bzSC2ASource_t source = { 0 };
     BZ_SC2_TTA_Source(&source);
-    pthread_mutex_lock(&g_model_source_lock);
+    BZ_SC2A_ProviderLock();
     pthread_mutex_lock(&g_model_lock);
     model_clear_cache_locked();
     g_model_source = source; g_model_hits = g_model_misses = g_model_placeholder_logs = 0;
     if (!++g_model_generation) g_model_generation = 1;
     g_model_map_generation = 0; g_model_initialized = true; g_model_terminal = false;
     pthread_mutex_unlock(&g_model_lock);
-    pthread_mutex_unlock(&g_model_source_lock);
+    BZ_SC2A_ProviderUnlock();
 }
 
 void BZ_SC2M_Shutdown(void) {
     pthread_mutex_lock(&g_model_lock);
     g_model_terminal = true; model_clear_cache_locked();
     pthread_mutex_unlock(&g_model_lock);
-    pthread_mutex_lock(&g_model_source_lock);
-    pthread_mutex_unlock(&g_model_source_lock);
+    BZ_SC2A_ProviderLock();
+    BZ_SC2A_ProviderUnlock();
 }
 
 uint32_t BZ_SC2M_AbiVersion(void) { return BZ_SC2M_ABI_VERSION; }
@@ -407,7 +416,7 @@ const bzSC2Model_t *BZ_SC2M_RegisterModel(uint32_t abi_version, const char *iden
     pthread_mutex_unlock(&g_model_lock);
     if (model) return model;
     if (status != BZ_SC2M_OK) return model_placeholder(status, normalized);
-    pthread_mutex_lock(&g_model_source_lock);
+    BZ_SC2A_ProviderLock();
     pthread_mutex_lock(&g_model_lock);
     model = g_model_generation == generation && !g_model_terminal ? model_find_locked(normalized) : NULL;
     if (model) { g_model_hits++; model_retain_locked(model); }
@@ -415,23 +424,23 @@ const bzSC2Model_t *BZ_SC2M_RegisterModel(uint32_t abi_version, const char *iden
     status = g_model_terminal || g_model_generation != generation ? BZ_SC2M_ERR_TERMINAL : BZ_SC2M_OK;
     pthread_mutex_unlock(&g_model_lock);
     if (model || status != BZ_SC2M_OK) {
-        pthread_mutex_unlock(&g_model_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return model ? model : model_placeholder(status, normalized);
     }
     model = load_model(normalized, &status, generation);
     if (!model) model = model_placeholder(status, normalized);
-    if (!model) { pthread_mutex_unlock(&g_model_source_lock); return NULL; }
+    if (!model) { BZ_SC2A_ProviderUnlock(); return NULL; }
     pthread_mutex_lock(&g_model_lock);
     if (g_model_terminal || generation != g_model_generation) {
         pthread_mutex_unlock(&g_model_lock);
         model_release_locked(model);
-        pthread_mutex_unlock(&g_model_source_lock);
+        BZ_SC2A_ProviderUnlock();
         return model_placeholder(BZ_SC2M_ERR_TERMINAL, normalized);
     }
     model->cache_next = g_model_cache; g_model_cache = model; model_retain_locked(model);
     if (model->placeholder) g_model_placeholder_logs++;
     pthread_mutex_unlock(&g_model_lock);
-    pthread_mutex_unlock(&g_model_source_lock);
+    BZ_SC2A_ProviderUnlock();
     if (model->placeholder)
         fprintf(stderr, "SC2TabletopModels: model '%s' unavailable (%d); cached placeholder\n", normalized, status);
     return model;

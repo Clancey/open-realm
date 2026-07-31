@@ -65,6 +65,13 @@ typedef struct {
     DWORD flags;
 } Reference;
 
+typedef struct {
+    Reference reference;
+    DWORD element_size;
+    DWORD element_index;
+    char section_id[4]; /* File byte order; all-zero accepts any section ID. */
+} m3ReferenceRead_t;
+
 struct ReferenceEntry {
     char id[4];
     DWORD offset;
@@ -434,7 +441,8 @@ typedef struct m3Model_s {
 
 m3Model_t *SC2_M3Parse(void const *buffer, DWORD size);
 void SC2_M3Free(m3Model_t *model);
-void const *SC2_M3ReferenceData(m3Model_t const *model, Reference ref, DWORD *bytes);
+BOOL SC2_M3ReferenceCount(m3Model_t const *model, m3ReferenceRead_t const *read, LPDWORD count);
+BOOL SC2_M3ReferenceElement(m3Model_t const *model, m3ReferenceRead_t const *read, HANDLE out);
 DWORD SC2_M3VertexUVCount(DWORD flags);
 DWORD SC2_M3VertexDiskSize(DWORD flags);
 

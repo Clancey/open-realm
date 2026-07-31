@@ -12,6 +12,13 @@ typedef struct {
     void *data;
 } m3Reader_t;
 
+typedef DWORD (*m3StrideFunc_t)(DWORD version);
+typedef struct {
+    char id[4];
+    DWORD min_version, max_version, stride;
+    m3StrideFunc_t version_stride;
+} m3Schema_t;
+
 #define M3_READ(BUFFER, VAR, VERSION) \
 if ((BUFFER)->ent.version > VERSION || VERSION == 0) m3_read(BUFFER, &VAR, sizeof(VAR));
 
@@ -19,16 +26,22 @@ if ((BUFFER)->ent.version > VERSION || VERSION == 0) m3_read(BUFFER, &VAR, sizeo
 static void m3_read_##TYPE(m3Model_t *model, m3Reader_t *sb, m3##TYPE##_t *data)
 
 #define M3_READ_REFERENCE(MODEL, TARGET, REF, TYPE) do { \
-    m3Reader_t reader = m3_make_reader(MODEL, REF); \
-    size_t count = reader.valid ? MIN((size_t)(REF).nEntries, reader.length / sizeof(m3##TYPE##_t)) : 0; \
-    TARGET##Num = count > UINT32_MAX ? 0 : (DWORD)count; \
+    m3Reader_t reader = { 0 }; \
+    DWORD stride = 0; \
+    TARGET##Num = 0; TARGET = NULL; \
+    if (!(REF).nEntries) break; \
+    if (!m3_schema_reader(MODEL, REF, &m3_schema_##TYPE, &reader, &stride) || (REF).nEntries == UINT32_MAX) { \
+        (MODEL)->valid = false; break; \
+    } \
+    TARGET##Num = (REF).nEntries; \
     TARGET = TARGET##Num ? calloc(TARGET##Num + 1, sizeof(m3##TYPE##_t)) : NULL; \
     if (TARGET##Num && !TARGET) { TARGET##Num = 0; (MODEL)->valid = false; } \
     FOR_LOOP(n, TARGET##Num) m3_read_##TYPE(MODEL, &reader, &TARGET[n]); \
+    if (reader.readcount != TARGET##Num * stride) (MODEL)->valid = false; \
 } while (0)
 
 #define M3_REFR(BUFFER, TARGET, TYPE, VERSION) do { \
-    if ((BUFFER)->ent.version > VERSION) { \
+    if ((BUFFER)->ent.version > VERSION || VERSION == 0) { \
         Reference ref; \
         m3_read(BUFFER, &ref, sizeof(ref)); \
         M3_READ_REFERENCE(model, TARGET, ref, TYPE); \
@@ -47,32 +60,110 @@ static void m3_read(m3Reader_t *reader, void *dst, DWORD bytes) {
     reader->readcount += bytes;
 }
 
+static DWORD m3_stride_layer(DWORD version) { return version > 24 ? 468 : version > 23 ? 436 : 356; }
+static DWORD m3_stride_material(DWORD version) { return version > 18 ? 340 : version > 15 ? 280 : 268; }
+static DWORD m3_stride_region(DWORD version) { return version > 4 ? 48 : version > 3 ? 40 : 36; }
+static DWORD m3_stride_sequence(DWORD version) { return version < 2 ? 96 : 92; }
+static DWORD m3_stride_model(DWORD version) {
+    return 784 + (version > 24 ? 24 : 0) + (version > 25 ? 12 : 0) +
+           (version > 27 ? 24 : 0) + (version > 28 ? 12 : 0);
+}
+
+#define M3_SCHEMA_FIXED(TYPE, ID, MIN_VERSION, MAX_VERSION, STRIDE) \
+static const m3Schema_t m3_schema_##TYPE = { ID, MIN_VERSION, MAX_VERSION, STRIDE, NULL }
+#define M3_SCHEMA_VERSIONED(TYPE, ID, MIN_VERSION, MAX_VERSION, FUNC) \
+static const m3Schema_t m3_schema_##TYPE = { ID, MIN_VERSION, MAX_VERSION, 0, FUNC }
+M3_SCHEMA_FIXED(Char, "RAHC", 0, 0, 1);
+M3_SCHEMA_FIXED(Uint16, "_61U", 0, 0, 2);
+M3_SCHEMA_FIXED(Uint32, "_23U", 0, 0, 4);
+M3_SCHEMA_FIXED(Matrix4, "FERI", 0, 0, 64);
+M3_SCHEMA_FIXED(Face, "_61U", 0, 0, 2);
+M3_SCHEMA_FIXED(MaterialReference, "MTAM", 0, 0, 8);
+M3_SCHEMA_FIXED(CompositeMaterialSection, "_SMC", 0, 0, 24);
+M3_SCHEMA_FIXED(CompositeMaterial, "_PMC", 0, 2, 28);
+M3_SCHEMA_VERSIONED(Layer, "RYAL", 0, 25, m3_stride_layer);
+M3_SCHEMA_VERSIONED(Material, "_TAM", 0, 19, m3_stride_material);
+M3_SCHEMA_VERSIONED(Region, "NGER", 0, 5, m3_stride_region);
+M3_SCHEMA_FIXED(Batch, "_TAB", 0, 1, 14);
+M3_SCHEMA_FIXED(Divisions, "_VID", 0, 2, 48);
+M3_SCHEMA_VERSIONED(Sequence, "SQES", 0, 2, m3_stride_sequence);
+M3_SCHEMA_FIXED(SequenceTimeline, "_CTS", 0, 4, 204);
+M3_SCHEMA_FIXED(SequenceValidator, "_STS", 0, 0, 28);
+M3_SCHEMA_FIXED(SequenceGetter, "_GTS", 0, 0, 24);
+M3_SCHEMA_FIXED(Bone, "ENOB", 0, 1, 160);
+M3_SCHEMA_VERSIONED(Model, "LDOM", 0, 29, m3_stride_model);
+#undef M3_SCHEMA_FIXED
+#undef M3_SCHEMA_VERSIONED
+
+static DWORD m3_schema_stride(m3Schema_t const *schema, DWORD version) {
+    return schema->version_stride ? schema->version_stride(version) : schema->stride;
+}
+
 static m3Reader_t m3_make_reader(m3Model_t const *model, Reference ref) {
-    DWORD end;
+    DWORD section_end;
     if (!model || !model->buffer || !model->refs || !model->head || !ref.nEntries)
         return (m3Reader_t){ 0 };
-    if (ref.ref >= model->head->nRefs || model->refs[ref.ref].offset >= model->size) {
-        ((m3Model_t *)model)->valid = false;
+    if (ref.ref >= model->head->nRefs || model->refs[ref.ref].offset >= model->size ||
+        model->refs[ref.ref].offset >= model->head->ofsRefs)
         return (m3Reader_t){ 0 };
-    }
-    end = model->head->ofsRefs;
-    if (end <= model->refs[ref.ref].offset || end > model->size) end = model->size;
+    section_end = model->head->ofsRefs;
+    if (section_end <= model->refs[ref.ref].offset || section_end > model->size) section_end = model->size;
     FOR_LOOP(i, model->head->nRefs)
-        if (model->refs[i].offset > model->refs[ref.ref].offset && model->refs[i].offset < end)
-            end = model->refs[i].offset;
+        if (model->refs[i].offset > model->refs[ref.ref].offset &&
+            model->refs[i].offset < section_end)
+            section_end = model->refs[i].offset;
     return (m3Reader_t){
         .ent = model->refs[ref.ref],
-        .length = end - model->refs[ref.ref].offset,
+        .length = section_end - model->refs[ref.ref].offset,
         .valid = true,
         .model_valid = &((m3Model_t *)model)->valid,
         .data = (LPBYTE)model->buffer + model->refs[ref.ref].offset,
     };
 }
 
-void const *SC2_M3ReferenceData(m3Model_t const *model, Reference ref, DWORD *bytes) {
-    m3Reader_t reader = m3_make_reader(model, ref);
-    if (bytes) *bytes = reader.valid ? reader.length : 0;
-    return reader.valid ? reader.data : NULL;
+static BOOL m3_schema_reader(m3Model_t const *model, Reference ref, m3Schema_t const *schema,
+                             m3Reader_t *reader, LPDWORD stride) {
+    if (!model || !schema || !reader || !stride || !ref.nEntries) return false;
+    *reader = m3_make_reader(model, ref);
+    if (!reader->valid || memcmp(reader->ent.id, schema->id, 4) ||
+        reader->ent.version < schema->min_version || reader->ent.version > schema->max_version ||
+        reader->ent.nEntries != ref.nEntries)
+        return false;
+    *stride = m3_schema_stride(schema, reader->ent.version);
+    return *stride && ref.nEntries <= reader->length / *stride;
+}
+
+static BOOL m3_reference_reader(m3Model_t const *model, m3ReferenceRead_t const *read,
+                                m3Reader_t *reader) {
+    static const char no_id[4] = { 0 };
+    if (!model || !model->head || !model->valid || !read || !reader || !read->element_size)
+        return false;
+    if (!read->reference.nEntries) {
+        *reader = (m3Reader_t){ .valid = true };
+        return true;
+    }
+    *reader = m3_make_reader(model, read->reference);
+    if (!reader->valid || reader->ent.nEntries != read->reference.nEntries ||
+        (memcmp(read->section_id, no_id, 4) && memcmp(reader->ent.id, read->section_id, 4)) ||
+        read->reference.nEntries > reader->length / read->element_size)
+        return false;
+    return true;
+}
+
+BOOL SC2_M3ReferenceCount(m3Model_t const *model, m3ReferenceRead_t const *read, LPDWORD count) {
+    m3Reader_t reader;
+    if (!count || !m3_reference_reader(model, read, &reader)) return false;
+    *count = read->reference.nEntries;
+    return true;
+}
+
+BOOL SC2_M3ReferenceElement(m3Model_t const *model, m3ReferenceRead_t const *read, HANDLE out) {
+    m3Reader_t reader;
+    if (!out || !m3_reference_reader(model, read, &reader) ||
+        read->element_index >= read->reference.nEntries)
+        return false;
+    memcpy(out, (LPBYTE)reader.data + read->element_index * read->element_size, read->element_size);
+    return true;
 }
 
 DWORD SC2_M3VertexUVCount(DWORD flags) {
@@ -125,7 +216,14 @@ static void m3_read_vertex_reference(m3Model_t *model, m3Reader_t *sb) {
     m3_read(sb, &ref, sizeof(ref));
     stride = SC2_M3VertexDiskSize(model->vertexFlags);
     reader = m3_make_reader(model, ref);
-    count = reader.valid && stride ? MIN(ref.nEntries / stride, reader.length / stride) : 0;
+    if (!ref.nEntries) return;
+    if (!reader.valid || memcmp(reader.ent.id, "__8U", 4) || reader.ent.version ||
+        reader.ent.nEntries != ref.nEntries || !stride || ref.nEntries % stride ||
+        ref.nEntries > reader.length) {
+        model->valid = false;
+        return;
+    }
+    count = ref.nEntries / stride;
     model->vertices = count ? calloc(count + 1, sizeof(*model->vertices)) : NULL;
     model->verticesNum = model->vertices ? count : 0;
     if (count && !model->vertices) model->valid = false;
@@ -288,80 +386,127 @@ M3_READER(Bone) {
     M3_READ(sb, data->visibility, 0);
 }
 
-static void m3_init_model(m3Model_t *model, m3Reader_t sb) {
-    M3_REFR(&sb, model->modelName, Char, 0);
-    M3_READ(&sb, model->flags, 0);
-    M3_REFR(&sb, model->sequences, Sequence, 0);
-    M3_REFR(&sb, model->stc, SequenceTimeline, 0);
-    M3_REFR(&sb, model->stg, SequenceGetter, 0);
-    M3_READ(&sb, model->unknown0, 0);
-    M3_REFR(&sb, model->sts, SequenceValidator, 0);
-    M3_REFR(&sb, model->bones, Bone, 0);
-    M3_READ(&sb, model->numberOfBonesToCheckForSkin, 0);
-    M3_READ(&sb, model->vertexFlags, 0);
-    m3_read_vertex_reference(model, &sb);
-    M3_REFR(&sb, model->divisions, Divisions, 0);
-    M3_REFR(&sb, model->boneLookup, Uint16, 0);
-    M3_READ(&sb, model->boundings, 0);
-    M3_READ(&sb, model->unknown4, 0);
-    M3_READ(&sb, model->attachmentPoints, 0);
-    M3_READ(&sb, model->attachmentPointAddons, 0);
-    M3_READ(&sb, model->ligts, 0);
-    M3_READ(&sb, model->shbxData, 0);
-    M3_READ(&sb, model->cameras, 0);
-    M3_READ(&sb, model->unknown21, 0);
-    M3_REFR(&sb, model->materialReferences, MaterialReference, 0);
-    M3_REFR(&sb, model->materialStandard, Material, 0);
-    M3_READ(&sb, model->materialDisplacement, 0);
-    M3_REFR(&sb, model->materialComposite, CompositeMaterial, 0);
-    M3_READ(&sb, model->materialTerrain, 0);
-    M3_READ(&sb, model->materialVolume, 0);
-    M3_READ(&sb, model->materialUnknown1, 0);
-    M3_READ(&sb, model->materialCreep, 0);
-    M3_READ(&sb, model->materialVolumeNoise, 24);
-    M3_READ(&sb, model->materialSplatTerrainBake, 25);
-    M3_READ(&sb, model->materialUnknown2, 27);
-    M3_READ(&sb, model->materialLensFlare, 28);
-    M3_READ(&sb, model->particleEmitters, 0);
-    M3_READ(&sb, model->particleEmitterCopies, 0);
-    M3_READ(&sb, model->ribbonEmitters, 0);
-    M3_READ(&sb, model->projections, 0);
-    M3_READ(&sb, model->forces, 0);
-    M3_READ(&sb, model->warps, 0);
-    M3_READ(&sb, model->unknown22, 0);
-    M3_READ(&sb, model->rigidBodies, 0);
-    M3_READ(&sb, model->unknown23, 0);
-    M3_READ(&sb, model->physicsJoints, 0);
-    M3_READ(&sb, model->clothBehavior, 27);
-    M3_READ(&sb, model->unknown24, 0);
-    M3_READ(&sb, model->ikjtData, 0);
-    M3_READ(&sb, model->unknown25, 0);
-    M3_READ(&sb, model->unknown26, 24);
-    M3_READ(&sb, model->partsOfTurrentBehaviors, 0);
-    M3_READ(&sb, model->turrentBehaviors, 0);
-    M3_REFR(&sb, model->absoluteInverseBoneRestPositions, Matrix4, 0);
-    M3_READ(&sb, model->tightHitTest, 0);
-    M3_READ(&sb, model->fuzzyHitTestObjects, 0);
-    M3_READ(&sb, model->attachmentVolumes, 0);
-    M3_READ(&sb, model->attachmentVolumesAddon0, 0);
-    M3_READ(&sb, model->attachmentVolumesAddon1, 0);
-    M3_READ(&sb, model->billboardBehaviors, 0);
-    M3_READ(&sb, model->tmdData, 0);
-    M3_READ(&sb, model->unknown27, 0);
-    M3_READ(&sb, model->unknown28, 0);
+static void m3_init_model(m3Model_t *model, m3Reader_t *sb) {
+    M3_REFR(sb, model->modelName, Char, 0);
+    M3_READ(sb, model->flags, 0);
+    M3_REFR(sb, model->sequences, Sequence, 0);
+    M3_REFR(sb, model->stc, SequenceTimeline, 0);
+    M3_REFR(sb, model->stg, SequenceGetter, 0);
+    M3_READ(sb, model->unknown0, 0);
+    M3_REFR(sb, model->sts, SequenceValidator, 0);
+    M3_REFR(sb, model->bones, Bone, 0);
+    M3_READ(sb, model->numberOfBonesToCheckForSkin, 0);
+    M3_READ(sb, model->vertexFlags, 0);
+    m3_read_vertex_reference(model, sb);
+    M3_REFR(sb, model->divisions, Divisions, 0);
+    M3_REFR(sb, model->boneLookup, Uint16, 0);
+    M3_READ(sb, model->boundings, 0);
+    M3_READ(sb, model->unknown4, 0);
+    M3_READ(sb, model->attachmentPoints, 0);
+    M3_READ(sb, model->attachmentPointAddons, 0);
+    M3_READ(sb, model->ligts, 0);
+    M3_READ(sb, model->shbxData, 0);
+    M3_READ(sb, model->cameras, 0);
+    M3_READ(sb, model->unknown21, 0);
+    M3_REFR(sb, model->materialReferences, MaterialReference, 0);
+    M3_REFR(sb, model->materialStandard, Material, 0);
+    M3_READ(sb, model->materialDisplacement, 0);
+    M3_REFR(sb, model->materialComposite, CompositeMaterial, 0);
+    M3_READ(sb, model->materialTerrain, 0);
+    M3_READ(sb, model->materialVolume, 0);
+    M3_READ(sb, model->materialUnknown1, 0);
+    M3_READ(sb, model->materialCreep, 0);
+    M3_READ(sb, model->materialVolumeNoise, 24);
+    M3_READ(sb, model->materialSplatTerrainBake, 25);
+    M3_READ(sb, model->materialUnknown2, 27);
+    M3_READ(sb, model->materialLensFlare, 28);
+    M3_READ(sb, model->particleEmitters, 0);
+    M3_READ(sb, model->particleEmitterCopies, 0);
+    M3_READ(sb, model->ribbonEmitters, 0);
+    M3_READ(sb, model->projections, 0);
+    M3_READ(sb, model->forces, 0);
+    M3_READ(sb, model->warps, 0);
+    M3_READ(sb, model->unknown22, 0);
+    M3_READ(sb, model->rigidBodies, 0);
+    M3_READ(sb, model->unknown23, 0);
+    M3_READ(sb, model->physicsJoints, 0);
+    M3_READ(sb, model->clothBehavior, 27);
+    M3_READ(sb, model->unknown24, 0);
+    M3_READ(sb, model->ikjtData, 0);
+    M3_READ(sb, model->unknown25, 0);
+    M3_READ(sb, model->unknown26, 24);
+    M3_READ(sb, model->partsOfTurrentBehaviors, 0);
+    M3_READ(sb, model->turrentBehaviors, 0);
+    M3_REFR(sb, model->absoluteInverseBoneRestPositions, Matrix4, 0);
+    M3_READ(sb, model->tightHitTest, 0);
+    M3_READ(sb, model->fuzzyHitTestObjects, 0);
+    M3_READ(sb, model->attachmentVolumes, 0);
+    M3_READ(sb, model->attachmentVolumesAddon0, 0);
+    M3_READ(sb, model->attachmentVolumesAddon1, 0);
+    M3_READ(sb, model->billboardBehaviors, 0);
+    M3_READ(sb, model->tmdData, 0);
+    M3_READ(sb, model->unknown27, 0);
+    M3_READ(sb, model->unknown28, 0);
+}
+
+static DWORD m3_animation_value_stride(m3Model_t const *model, Reference ref) {
+    static const struct { char id[4]; DWORD stride; } values[] = {
+        { "_23I", 4 }, { "_23U", 4 }, { "_61I", 2 }, { "_61U", 2 }, { "LAER", 4 },
+        { "LOC\0", 4 }, { "2CEV", 8 }, { "3CEV", 12 }, { "TAUQ", 16 }, { "4CEV", 16 },
+        { "GALF", 4 }, { "SDNB", 28 },
+    };
+    if (!ref.nEntries || ref.ref >= model->head->nRefs) return ref.nEntries ? 0 : 1;
+    struct ReferenceEntry const *entry = &model->refs[ref.ref];
+    if (!memcmp(entry->id, "TNVE", 4))
+        return entry->version <= 2 ? 100 + entry->version * 4 : 0;
+    FOR_LOOP(i, sizeof(values) / sizeof(values[0]))
+        if (!memcmp(entry->id, values[i].id, 4)) return entry->version == 0 ? values[i].stride : 0;
+    return 0;
+}
+
+/* Animation remains renderer-owned, but every raw declaration must be safe before publication. */
+static BOOL m3_validate_animations(m3Model_t const *model) {
+    FOR_LOOP(i, model->stcNum) {
+        m3SequenceTimeline_t const *timeline = &model->stc[i];
+        if (timeline->animIdsNum != timeline->animRefsNum) return false;
+        FOR_LOOP(sd_ref, 13) {
+            m3ReferenceRead_t sd_read = { .reference = timeline->sd[sd_ref],
+                .element_size = sizeof(m3SequenceData_t) };
+            DWORD sd_count;
+            if (!SC2_M3ReferenceCount(model, &sd_read, &sd_count)) return false;
+            FOR_LOOP(sd_index, sd_count) {
+                m3SequenceData_t sd;
+                DWORD key_count, value_count, value_stride;
+                sd_read.element_index = sd_index;
+                if (!SC2_M3ReferenceElement(model, &sd_read, &sd)) return false;
+                m3ReferenceRead_t key_read = { .reference = sd.keys, .element_size = sizeof(m3Uint32_t),
+                    .section_id = "_23I" };
+                if (!SC2_M3ReferenceCount(model, &key_read, &key_count)) return false;
+                value_stride = m3_animation_value_stride(model, sd.values);
+                if (!value_stride) return false;
+                m3ReferenceRead_t value_read = { .reference = sd.values, .element_size = value_stride };
+                if (!SC2_M3ReferenceCount(model, &value_read, &value_count) || key_count != value_count)
+                    return false;
+            }
+        }
+    }
+    return true;
 }
 
 m3Model_t *SC2_M3Parse(void const *data, DWORD size) {
     m3Model_t *model = calloc(1, sizeof(*model));
+    m3Reader_t root;
+    DWORD root_stride;
     if (!model || !data || size < sizeof(struct MD33)) return model;
     model->buffer = malloc(size);
     if (!model->buffer) return model;
     model->size = size;
     memcpy(model->buffer, data, size);
     model->head = model->buffer;
-    if (memcmp(model->head->id, "43DM", 4) || model->head->ofsRefs >= model->size ||
+    if (memcmp(model->head->id, "43DM", 4) || model->head->ofsRefs < sizeof(struct MD33) ||
+        model->head->ofsRefs >= model->size ||
         model->head->nRefs > (model->size - model->head->ofsRefs) / sizeof(struct ReferenceEntry) ||
-        model->head->MODL.ref >= model->head->nRefs) {
+        model->head->MODL.nEntries != 1 || model->head->MODL.ref >= model->head->nRefs) {
         fprintf(stderr, "SC2_M3Parse: invalid header\n");
         /* Invalid MD34 bytes are not a parsed model; the old non-NULL head made callers upload zeros. */
         model->head = NULL;
@@ -376,10 +521,15 @@ m3Model_t *SC2_M3Parse(void const *data, DWORD size) {
         }
     model->type = model->refs[model->head->MODL.ref].version;
     model->valid = true;
-    m3_init_model(model, m3_make_reader(model, model->head->MODL));
-    if (!model->valid) {
-        fprintf(stderr, "SC2_M3Parse: truncated or malformed referenced section\n");
-        model->head = NULL;
+        if (!m3_schema_reader(model, model->head->MODL, &m3_schema_Model, &root, &root_stride)) {
+            fprintf(stderr, "SC2_M3Parse: invalid MODL root declaration\n");
+            model->head = NULL;
+            return model;
+        }
+        m3_init_model(model, &root);
+        if (!model->valid || root.readcount != root_stride || !m3_validate_animations(model)) {
+            fprintf(stderr, "SC2_M3Parse: truncated or malformed referenced section\n");
+            model->head = NULL;
     }
     return model;
 }

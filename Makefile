@@ -312,8 +312,10 @@ $(eval $(call test_schema,test-wow-abilities,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test
 $(eval $(call test_schema,test-wow-game,,$(WOW_TEST_CFLAGS),$(BIN_DIR)/test_wow_game$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_game.c $(WOW_DIR)/game/g_wow.c $(WOW_DIR)/game/g_world.c $(WOW_DIR)/game/g_ai.c $(WOW_DIR)/game/m_creature.c common/mpq.c $(call CSRC,shared),-lm -lz,))
 $(eval $(call test_schema,test-wow-ui,test-wow-assets,$(WOW_UI_TEST_CFLAGS),$(BIN_DIR)/test_wow_ui$(EXE_EXT),$(WOW_TEST_DIR)/test_wow_ui.c $(WOW_DIR)/ui/ui_main.c $(WOW_DIR)/ui/ui_lua.c $(WOW_DIR)/ui/ui_dbc.c $(WOW_DIR)/ui/ui_loading.c $(WOW_DIR)/ui/ui_xml.c common/mpq.c,-lshared $(LUA_LIBS) $(WOW_XML_LIBS) -lz,))
 $(eval $(call test_schema,test-sc2,test-sc2-assets $(SHARED_LIB) $(SHEET_LIB),$(SC2_TEST_CFLAGS),$(BIN_DIR)/test_sc2$(EXE_EXT),$(SC2_TEST_DIR)/test_sc2_main.c $(SC2_TEST_DIR)/test_sc2_map.c $(SC2_TEST_DIR)/test_sc2_layout.c $(SC2_TEST_DIR)/test_sc2_consoleui.c $(SC2_TEST_DIR)/test_sc2_dds.c $(SC2_TEST_DIR)/stb_sc2layout_impl.c $(SC2_DIR)/common/sc2_map.c $(SC2_DIR)/common/sc2_dds.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz $(SC2_XML_LIBS),))
-$(eval $(call test_schema,test-sc2-tabletop-assets,,$(SC2_TEST_CFLAGS),$(BIN_DIR)/test_sc2_tabletop_assets$(EXE_EXT),$(SC2_TEST_DIR)/test_sc2_tabletop_assets.c $(SC2_DIR)/visionos/sc2_tabletop_assets.c $(SC2_DIR)/common/sc2_dds.c,-lm -lpthread,))
+$(eval $(call test_schema,test-sc2-tabletop-assets,,$(SC2_TEST_CFLAGS) -DBZ_SC2A_TEST_HOOKS,$(BIN_DIR)/test_sc2_tabletop_assets$(EXE_EXT),$(SC2_TEST_DIR)/test_sc2_tabletop_assets.c $(SC2_DIR)/visionos/sc2_tabletop_assets.c $(SC2_DIR)/common/sc2_dds.c,-lm -lpthread,))
 $(eval $(call test_schema,test-sc2-tabletop-models,,$(SC2_TEST_CFLAGS),$(BIN_DIR)/test_sc2_tabletop_models$(EXE_EXT),$(SC2_TEST_DIR)/test_sc2_tabletop_models.c $(SC2_DIR)/visionos/sc2_tabletop_models.c $(SC2_DIR)/visionos/sc2_tabletop_assets.c $(SC2_DIR)/common/sc2_m3.c $(SC2_DIR)/common/sc2_dds.c,-lm -lpthread,))
+$(eval $(call test_schema,test-client-model-lifecycle,,$(CFLAGS) -Itests,$(BIN_DIR)/test_client_model_lifecycle$(EXE_EXT),tests/test_client_model_lifecycle.c,,,))
+test: test-client-model-lifecycle test-sc2-tabletop-models
 
 test-sc2-assets: sc2fixturegen mpqtool sc2map | $(TESTS_DIR)
 	@echo "[test-sc2-assets] generating SC2 terrain fixtures"
@@ -384,4 +386,4 @@ test-sc2-live: opensc2 $(SC2_HUD_LIVE_BIN)
 	    $(SC2_HUD_LIVE_BIN); \
 	fi
 
-.PHONY: default build shared tools font $(TOOL_NAMES) diag clean download renderer-wow game-wow ui-wow openwow renderer-sc2 game-sc2 opensc2 run run-sc2 build-run-sc2 m2tool-wow-orcmale-player install-wow test-wow-appearance test-wow-combat test-wow-abilities test-wow-game test-wow-ui test-wow-assets test-sc2 test-sc2-assets test-sc2-live test-sc2-tabletop-assets test-sc2-tabletop-models test-sc2-tabletop-runtime $(WC3_PHONY)
+.PHONY: default build shared tools font $(TOOL_NAMES) diag clean download renderer-wow game-wow ui-wow openwow renderer-sc2 game-sc2 opensc2 run run-sc2 build-run-sc2 m2tool-wow-orcmale-player install-wow test-client-model-lifecycle test-wow-appearance test-wow-combat test-wow-abilities test-wow-game test-wow-ui test-wow-assets test-sc2 test-sc2-assets test-sc2-live test-sc2-tabletop-assets test-sc2-tabletop-models test-sc2-tabletop-runtime $(WC3_PHONY)

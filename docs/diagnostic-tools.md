@@ -37,7 +37,9 @@ build/bin/m3tool \
 Pass archives in the same order as the runtime; later registrations override earlier ones. Empty
 layer paths print `dds=empty`, while missing, malformed, unsupported, and valid DDS payloads retain
 distinct statuses. Use this evidence before changing M3 declarations, region/bone lookup handling,
-or material status. Never copy retail model or texture bytes into fixtures.
+or material status. Strict declaration validation includes section IDs, version-specific disk
+strides, declared/physical counts, and animation reference element bounds. Never copy retail model
+or texture bytes into fixtures.
 
 ## Warcraft III map terrain inspection
 

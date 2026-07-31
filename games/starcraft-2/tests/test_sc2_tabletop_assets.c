@@ -116,6 +116,9 @@ typedef enum { FIXTURE_SHAPE_OK, FIXTURE_SHAPE_TOO_LARGE, FIXTURE_SHAPE_MALFORME
 static uint32_t g_fixture_generation;
 static uint32_t g_fixture_copy_count;
 static fixture_shape_t g_fixture_shape = FIXTURE_SHAPE_OK;
+static pthread_mutex_t g_terrain_image_hook_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_terrain_image_hook_cond = PTHREAD_COND_INITIALIZER;
+static bool g_terrain_image_hook_blocked, g_terrain_image_hook_entered;
 static char g_tex0_diffuse[BZ_SC2A_MAX_IDENTITY] = "Assets\\Textures\\good.dds";
 static char g_tex0_normal[BZ_SC2A_MAX_IDENTITY] = "Assets\\Textures\\missing.dds";
 static char g_tex1_diffuse[BZ_SC2A_MAX_IDENTITY] = "Assets\\Textures\\malformed.dds";
@@ -205,6 +208,17 @@ void BZ_SC2_TTA_Source(bzSC2ASource_t *source) {
         .terrain_token = fixture_terrain_token,
         .copy_terrain = fixture_copy_terrain,
     };
+}
+
+void BZ_SC2A_TestTerrainImageValidated(void) {
+    pthread_mutex_lock(&g_terrain_image_hook_lock);
+    if (g_terrain_image_hook_blocked) {
+        g_terrain_image_hook_entered = true;
+        pthread_cond_broadcast(&g_terrain_image_hook_cond);
+        while (g_terrain_image_hook_blocked)
+            pthread_cond_wait(&g_terrain_image_hook_cond, &g_terrain_image_hook_lock);
+    }
+    pthread_mutex_unlock(&g_terrain_image_hook_lock);
 }
 
 /* ---- Tests ------------------------------------------------------------------------------- */
@@ -627,6 +641,59 @@ static void test_path_confinement_end_to_end(void) {
     snprintf(g_tex1_diffuse, sizeof(g_tex1_diffuse), "Assets\\Textures\\malformed.dds"); /* restore */
 }
 
+static void test_overlong_image_identity_is_cached_once(void) {
+    char overlong[BZ_SC2A_MAX_IDENTITY + 32];
+    const bzSC2Image_t *first, *second;
+    memset(overlong, 'a', sizeof(overlong) - 1); overlong[sizeof(overlong) - 1] = '\0';
+    BZ_SC2A_Init();
+    first = BZ_SC2A_RegisterImage(BZ_SC2A_ABI_VERSION, overlong);
+    second = BZ_SC2A_RegisterImage(BZ_SC2A_ABI_VERSION, overlong);
+    ASSERT_EQ_INT(BZ_SC2AImage_Status(first), BZ_SC2A_ERR_PATH_CONFINEMENT);
+    ASSERT(first == second);
+    ASSERT_EQ_INT(BZ_SC2A_CacheMisses(), 1);
+    ASSERT_EQ_INT(BZ_SC2A_CacheHits(), 1);
+    ASSERT_EQ_INT(BZ_SC2A_PlaceholderLogs(), 1);
+    BZ_SC2AImage_Release(first); BZ_SC2AImage_Release(second);
+    BZ_SC2A_Shutdown();
+}
+
+typedef struct {
+    const bzSC2Terrain_t *terrain;
+    const bzSC2Image_t *image;
+} terrain_image_race_t;
+
+static void *register_terrain_image_after_validation(void *opaque) {
+    terrain_image_race_t *race = opaque;
+    race->image = BZ_SC2A_RegisterTerrainImage(BZ_SC2A_ABI_VERSION, race->terrain, 0,
+                                               BZ_SC2A_TERRAIN_CHANNEL_DIFFUSE);
+    return NULL;
+}
+
+static void test_terrain_image_preserves_captured_generation(void) {
+    terrain_image_race_t race = { 0 };
+    pthread_t thread;
+    g_fixture_generation = 15;
+    BZ_SC2A_Init(); BZ_SC2A_PublishTerrainFromGame();
+    race.terrain = BZ_SC2A_LatestTerrain(BZ_SC2A_ABI_VERSION);
+    pthread_mutex_lock(&g_terrain_image_hook_lock);
+    g_terrain_image_hook_blocked = true; g_terrain_image_hook_entered = false;
+    pthread_mutex_unlock(&g_terrain_image_hook_lock);
+    ASSERT_EQ_INT(pthread_create(&thread, NULL, register_terrain_image_after_validation, &race), 0);
+    pthread_mutex_lock(&g_terrain_image_hook_lock);
+    while (!g_terrain_image_hook_entered)
+        pthread_cond_wait(&g_terrain_image_hook_cond, &g_terrain_image_hook_lock);
+    pthread_mutex_unlock(&g_terrain_image_hook_lock);
+    BZ_SC2A_Shutdown(); BZ_SC2A_Init();
+    pthread_mutex_lock(&g_terrain_image_hook_lock);
+    g_terrain_image_hook_blocked = false; pthread_cond_broadcast(&g_terrain_image_hook_cond);
+    pthread_mutex_unlock(&g_terrain_image_hook_lock);
+    ASSERT_EQ_INT(pthread_join(thread, NULL), 0);
+    ASSERT_NOT_NULL(race.image);
+    ASSERT_EQ_INT(BZ_SC2AImage_Status(race.image), BZ_SC2A_ERR_TERMINAL);
+    BZ_SC2AImage_Release(race.image); BZ_SC2ATerrain_Release(race.terrain);
+    BZ_SC2A_Shutdown();
+}
+
 typedef enum { CONCURRENT_LATEST, CONCURRENT_REGISTER, CONCURRENT_PUBLISH, CONCURRENT_SHUTDOWN } concurrent_op_t;
 typedef struct {
     concurrent_op_t op;
@@ -707,6 +774,8 @@ int main(void) {
     RUN_TEST(test_slash_normalization_and_reload_reuse_image_cache);
     RUN_TEST(test_path_confinement_direct);
     RUN_TEST(test_path_confinement_end_to_end);
+    RUN_TEST(test_overlong_image_identity_is_cached_once);
+    RUN_TEST(test_terrain_image_preserves_captured_generation);
     RUN_TEST(test_concurrent_cache_publication_and_shutdown);
     TEST_RESULTS();
 }

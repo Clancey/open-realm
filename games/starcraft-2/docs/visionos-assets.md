@@ -15,15 +15,21 @@ material/layer descriptors. Layer 2A remains ABI v1 and adds only the append-onl
 - Terrain publication deep-copies the current authoritative `sc2Map_t` into one immutable allocation with trailing arrays.
 - Image registration validates and copies encoded DDS mip payloads; no OpenGL or renderer-private pointer crosses the ABI.
 - Callers release terrain and image handles explicitly. Retained handles remain readable across map replacement and shutdown.
-- A mutex protects publication, refcounts, cache state, and counters. Slow archive reads use a separate source mutex.
+- A mutex protects publication, refcounts, cache state, and counters. One provider mutex shared by
+  the image and model modules serializes every `FS_ReadFile()` call and provider shutdown.
 - Image paths are confined relative archive identities and normalized to backslashes before cache lookup.
 - Missing, malformed, unsupported, and oversized images remain exact cached placeholder statuses and log once per identity.
+- Overlong invalid identities use one bounded prefix-and-hash cache/log key, so repeat failures
+  remain cache hits and cannot allocate or log indefinitely.
 - Model handles use the same retained/cache-generation contract. One immutable allocation contains
   canonical vertices, U16 indices, divisions, regions, batches, bone lookups, material references,
   standard materials, composite sections, and flattened layers.
 - Model descriptors never contain parser allocations, archive pointers, SDL/OpenGL objects, or
   renderer-private pointers. Retained handles remain readable after registration reload or terminal
   shutdown.
+- Every typed trailing-array segment is aligned independently with `_Alignof(TYPE)`; byte-size and
+  offset arithmetic is checked before allocation. Terrain image registration carries its originally
+  captured source and generation through cache publication instead of recapturing lifecycle state.
 
 The cell grid is capped at 1024 per dimension. HMAP may be one sample larger. MASK is authored at eight times cell
 resolution, so it has a separate 8192 dimension cap and a 256 MiB decoded payload cap. DDS dimensions are capped at
@@ -81,7 +87,8 @@ resolution, renderer policy, Swift, RealityKit, and simulator work are Layer 2C 
 
 The diagnostic milestone used the exact desktop archive order and read-only retail files. All 178
 unique M3 identities exercised by TRaynor01 parse headlessly: 49 resolved catalog-object models and
-129 cliff variants. All are MODL version 23.
+129 cliff variants. All are MODL version 23. A strict declaration-validation sweep after parser
+hardening accepts all 178 with zero malformed or unsupported-version failures.
 
 | Inventory | Object models | Cliff models |
 | --- | ---: | ---: |
@@ -125,6 +132,10 @@ SC2DATA="$HOME/Downloads/Starcraft II/StarCraft2" make test-sc2-live test-sc2-ta
 make visionos-sc2
 ```
 
-`test-sc2-tabletop-assets` covers the shared generic image cache. `test-sc2-tabletop-models` covers
-ABI layouts, valid zero-geometry M3, malformed/missing/confined paths, cache reuse, reload, retained
-lifetime, and terminal behavior. Runtime live proof freezes Marine through the public model ABI.
+`test-sc2-tabletop-assets` covers the shared generic image cache, stable overlong keys, and terrain
+registration across shutdown/re-init. `test-sc2-tabletop-models` covers ABI layouts, exact root and
+section declarations, versioned disk strides, version-zero animation tables, typed-array alignment,
+cross-image/model provider serialization, malformed/missing/confined paths, cache reuse, reload,
+retained lifetime, and terminal behavior. `test-client-model-lifecycle` proves map-clear and final
+shutdown release every owned desktop model/portrait slot exactly once. Runtime live proof freezes
+Marine through the public model ABI.

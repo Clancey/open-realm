@@ -1,6 +1,7 @@
 #include "renderer/r_local.h"
 #include "games/starcraft-2/common/sc2_map.h"
 #include "r_m3.h"
+#include "r_m3_utils.h"
 
 #define M3_MAX_NODES 128
 
@@ -104,7 +105,7 @@ void M3_MakeBuffer(m3Model_t *model) {
 }
 
 m3Uint32_t M3_FindAnimRef(m3SequenceTimeline_t const *timeline, m3Uint32_t animID) {
-    if (!timeline)
+    if (!timeline || timeline->animIdsNum != timeline->animRefsNum)
         return 0;
     M3_FOR_EACH(Uint32, it, timeline->animIds) {
         if (animID == *it) {
@@ -113,22 +114,6 @@ m3Uint32_t M3_FindAnimRef(m3SequenceTimeline_t const *timeline, m3Uint32_t animI
     }
     return 0;
 }
-
-DWORD M3_FindKeyAtTime(m3Uint32_t const *keys, DWORD numkeys, DWORD time, float *t) {
-    if (numkeys == 0 || *keys > time)
-        return 0;
-    FOR_LOOP(b, numkeys) {
-        if (keys[b] > time) {
-            DWORD a = b - 1;
-            *t = (float)(time - keys[a]) / (float)(keys[b] - keys[a]);
-            return b;
-        }
-    }
-    *t = 1;
-    return numkeys - 1;
-}
-
-#define M3_GET_POINTER(MODEL, REF, TYPE) ((m3##TYPE##_t const *)SC2_M3ReferenceData(MODEL, REF, NULL))
 
 #define M3_GET_ANIM_VALUE(ANIMREF, DATATYPE) \
 M3_Get##ANIMREF##AnimValue(m3Model_t const *model, \
@@ -140,23 +125,29 @@ M3_Get##ANIMREF##AnimValue(m3Model_t const *model, \
     if (anim == 0) return animref->initValue; \
     DWORD const sdref = anim >> 16; \
     DWORD const sdindex = anim & 0xffff; \
-    if (sdref >= 13 || sdindex >= timeline->sd[sdref].nEntries) return animref->initValue; \
-    m3SequenceData_t const *sdbase = M3_GET_POINTER(model, timeline->sd[sdref], SequenceData); \
-    if (!sdbase) return animref->initValue; \
-    m3SequenceData_t const *sd = sdbase + sdindex; \
+    m3SequenceData_t sd; \
     m3##ANIMREF##_t output = animref->initValue; \
-    m3Float32_t t = 0.f; \
-    m3Uint32_t const *keys = M3_GET_POINTER(model, sd->keys, Uint32); \
-    if (!keys) return animref->initValue; \
-    DWORD key = M3_FindKeyAtTime(keys, sd->keys.nEntries, time, &t); \
-    if (key > 0) { \
-        m3##ANIMREF##_t const *values = M3_GET_POINTER(model, sd->values, ANIMREF); \
-        if (!values || key >= sd->values.nEntries) return animref->initValue; \
-        R_EvalKeyframeValue(values+key-1, values+key, t, DATATYPE, TRACK_LINEAR, &output); \
-        return output; \
-    } else { \
+    m3##ANIMREF##_t values[2]; \
+    m3KeySpan_t span; \
+    DWORD key_count, value_count; \
+    if (sdref >= 13) return animref->initValue; \
+    m3ReferenceRead_t sd_read = { .reference = timeline->sd[sdref], \
+        .element_size = sizeof(m3SequenceData_t), .element_index = sdindex }; \
+    if (!SC2_M3ReferenceElement(model, &sd_read, &sd)) return animref->initValue; \
+    m3ReferenceRead_t key_read = { .reference = sd.keys, .element_size = sizeof(m3Uint32_t), \
+        .section_id = "_23I" }; \
+    m3ReferenceRead_t value_read = { .reference = sd.values, .element_size = sizeof(m3##ANIMREF##_t) }; \
+    if (!SC2_M3ReferenceCount(model, &key_read, &key_count) || \
+        !SC2_M3ReferenceCount(model, &value_read, &value_count) || key_count != value_count) \
         return animref->initValue; \
-    } \
+    if (!m3_find_key_span(model, sd.keys, time, &span)) return animref->initValue; \
+    value_read.element_index = span.left; \
+    if (!SC2_M3ReferenceElement(model, &value_read, &values[0])) return animref->initValue; \
+    if (span.left == span.right) return values[0]; \
+    value_read.element_index = span.right; \
+    if (!SC2_M3ReferenceElement(model, &value_read, &values[1])) return animref->initValue; \
+    R_EvalKeyframeValue(&values[0], &values[1], span.fraction, DATATYPE, TRACK_LINEAR, &output); \
+    return output; \
 }
 
 DWORD   M3_GET_ANIM_VALUE(Uint32,  TDATA_INT1);
