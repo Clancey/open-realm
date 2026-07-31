@@ -33,15 +33,18 @@ BZ_XR_BRIDGE_TRANSPORT_DIR := platform/bridge
 BZ_XR_LIB_DIR  := $(LIB_DIR)/visionos
 BZ_XR_WC3_DATA_TOOL := platform/apple/visionos/scripts/wc3_data.sh
 BZ_XR_WC3_DATA_TEST := platform/apple/visionos/tests/test_wc3_data.sh
+BZ_XR_SC2_DATA_TOOL := platform/apple/visionos/scripts/sc2_data.sh
+BZ_XR_SC2_DATA_TEST := platform/apple/visionos/tests/test_sc2_data.sh
 BZ_XR_APP_STAGE_DIR ?=
 
 # Build-time retail-data contract for the later app shell. The caller supplies
 # the app/staging root; the helper owns only Resources/Warcraft III beneath it.
-.PHONY: test-visionos-wc3-data visionos-verify-wc3-source visionos-stage-wc3-data visionos-verify-wc3-data
+.PHONY: test-visionos-wc3-data visionos-verify-wc3-source visionos-stage-wc3-data visionos-verify-wc3-data \
+	test-visionos-sc2-data visionos-verify-sc2-source visionos-stage-sc2-data visionos-verify-sc2-data
 test-visionos-wc3-data:
 	@"$(BZ_XR_WC3_DATA_TEST)"
 
-test: test-visionos-wc3-data
+test: test-visionos-wc3-data test-visionos-sc2-data
 
 visionos-verify-wc3-source:
 	@"$(BZ_XR_WC3_DATA_TOOL)" verify-source
@@ -57,6 +60,25 @@ visionos-verify-wc3-data:
 		echo "visionos-verify-wc3-data: set BZ_XR_APP_STAGE_DIR to an app/staging root" >&2; exit 2; \
 	fi
 	@"$(BZ_XR_WC3_DATA_TOOL)" verify-bundle "$(BZ_XR_APP_STAGE_DIR)"
+
+test-visionos-sc2-data:
+	@"$(BZ_XR_SC2_DATA_TEST)"
+	@"$(BZ_XR_SC2_DATA_TOOL)" verify-repository
+
+visionos-verify-sc2-source:
+	@"$(BZ_XR_SC2_DATA_TOOL)" verify-source
+
+visionos-stage-sc2-data:
+	@if [ -z "$(strip $(BZ_XR_APP_STAGE_DIR))" ]; then \
+		echo "visionos-stage-sc2-data: set BZ_XR_APP_STAGE_DIR to an app/staging root" >&2; exit 2; \
+	fi
+	@"$(BZ_XR_SC2_DATA_TOOL)" stage "$(BZ_XR_APP_STAGE_DIR)"
+
+visionos-verify-sc2-data:
+	@if [ -z "$(strip $(BZ_XR_APP_STAGE_DIR))" ]; then \
+		echo "visionos-verify-sc2-data: set BZ_XR_APP_STAGE_DIR to an app/staging root" >&2; exit 2; \
+	fi
+	@"$(BZ_XR_SC2_DATA_TOOL)" verify-bundle "$(BZ_XR_APP_STAGE_DIR)"
 
 # Independent from the desktop CFLAGS/WC3_CFLAGS: those pick up Darwin's
 # `-arch $(ARCH)` (conflicts with `-target`) and Homebrew include paths that
@@ -104,7 +126,8 @@ $(1): $(3)
 	@mkdir -p $$(@D)
 	@echo "[$(2):$(5)]"
 	@printf '\043include "%s"\n' $(3) | \
-		xcrun --sdk $(5) clang -target $(6) -isysroot "$$$$(xcrun --sdk $(5) --show-sdk-path)" $(4) -x c -c -o $$@ -
+		xcrun --sdk $(5) clang -target $(6) -isysroot "$$$$(xcrun --sdk $(5) --show-sdk-path)" \
+		-I"$$$$(xcrun --sdk $(5) --show-sdk-path)/usr/include/libxml2" $(4) -x c -c -o $$@ -
 endef
 
 BZ_XR_TARGETS := xrsimulator xros
@@ -210,6 +233,109 @@ $(foreach t,$(BZ_XR_TARGETS),$(eval $(call bz_xr_bridge_rules,$(t))))
 
 .PHONY: visionos-bridge
 visionos-bridge: xrsimulator-bridge xros-bridge
+
+# ---------------------------------------------------------------------------
+# StarCraft II snapshot-only foundation
+# ---------------------------------------------------------------------------
+BZ_XR_SC2_CFLAGS := $(BZ_XR_BASE_CFLAGS) -I$(SC2_DIR) -I$(SC2_DIR)/common \
+	-DSC2 -DOW3_LOAD_ALL_MPQS -DSTB_SC2LAYOUT_IMPLEMENTATION -DSTB_SC2LAYOUT_GLOBALS \
+	-Wno-unused-function
+BZ_XR_SC2_ENGINE_SRCS := \
+	$(shell find common -name '*.c' ! -name main.c ! -name macos.c ! -name world.c ! -name routing.c | sort) \
+	$(shell find server -name '*.c' | sort) \
+	$(shell find $(BZ_XR_TT_CLIENT_DIR) -name '*.c' | sort) \
+	$(BZ_XR_BRIDGE_TRANSPORT_DIR)/bz_tabletop_transport.c \
+	client/cl_main.c client/cl_parse.c client/cl_view.c client/cl_tent.c client/keys.c
+BZ_XR_SC2_GAME_SRCS := $(shell find $(SC2_DIR)/game -name '*.c' | sort) \
+	$(SC2_DIR)/visionos/sc2_tabletop_game.c
+
+define bz_xr_sc2_platform_rules
+BZ_XR_SC2_$(1)_DIR := $$(BZ_XR_LIB_DIR)/sc2/$(1)
+BZ_XR_SC2_$(1)_ENGINE_ARCHIVE := $$(BZ_XR_SC2_$(1)_DIR)/libopensc2-engine.a
+BZ_XR_SC2_$(1)_BRIDGE_ARCHIVE := $$(BZ_XR_SC2_$(1)_DIR)/libopensc2-bridge.a
+BZ_XR_SC2_$(1)_SMOKE := $$(BZ_XR_SC2_$(1)_DIR)/bridge-link-smoke
+
+$$(eval $$(call bz_xr_unity_o,$$(BZ_XR_SC2_$(1)_DIR)/engine.o,sc2-engine,$$(BZ_XR_SC2_ENGINE_SRCS),$$(BZ_XR_SC2_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+$$(eval $$(call bz_xr_unity_o,$$(BZ_XR_SC2_$(1)_DIR)/game.o,sc2-game,$$(BZ_XR_SC2_GAME_SRCS),$$(BZ_XR_SC2_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+$$(eval $$(call bz_xr_unity_o,$$(BZ_XR_SC2_$(1)_DIR)/sheet.o,sc2-sheet,$$(BZ_XR_SHEET_SRCS),$$(BZ_XR_BASE_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+$$(eval $$(call bz_xr_unity_o,$$(BZ_XR_SC2_$(1)_DIR)/shared.o,sc2-shared,$$(BZ_XR_SHARED_SRCS),$$(BZ_XR_BASE_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+$$(eval $$(call bz_xr_bridge_c_o,$$(BZ_XR_SC2_$(1)_DIR)/bz_tabletop_lifecycle.o,$$(BZ_XR_BRIDGE_DIR)/bz_tabletop_lifecycle.c,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+$$(eval $$(call bz_xr_bridge_mm_o,$$(BZ_XR_SC2_$(1)_DIR)/bz_tabletop_bridge.o,$$(BZ_XR_BRIDGE_DIR)/bz_tabletop_bridge.mm,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+
+$$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE): $$(BZ_XR_SC2_$(1)_DIR)/engine.o $$(BZ_XR_SC2_$(1)_DIR)/game.o $$(BZ_XR_SC2_$(1)_DIR)/sheet.o $$(BZ_XR_SC2_$(1)_DIR)/shared.o
+	@echo "[archive sc2-$(1)-engine]"
+	@ar rcs $$@ $$^
+
+$$(BZ_XR_SC2_$(1)_BRIDGE_ARCHIVE): $$(BZ_XR_SC2_$(1)_DIR)/bz_tabletop_lifecycle.o $$(BZ_XR_SC2_$(1)_DIR)/bz_tabletop_bridge.o
+	@echo "[archive sc2-$(1)-bridge]"
+	@ar rcs $$@ $$^
+
+$$(BZ_XR_SC2_$(1)_SMOKE): $$(BZ_XR_SC2_$(1)_BRIDGE_ARCHIVE) $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) $$(BZ_XR_BRIDGE_DIR)/smoke/bz_tabletop_link_smoke.mm
+	@echo "[link-check sc2-$(1)]"
+	@xcrun --sdk $$(BZ_XR_SDK_$(1)) clang++ -target $$(BZ_XR_TRIPLE_$(1)) \
+		-isysroot "$$$$(xcrun --sdk $$(BZ_XR_SDK_$(1)) --show-sdk-path)" $$(BZ_XR_BRIDGE_CXXFLAGS) \
+		-x objective-c++ $$(BZ_XR_BRIDGE_DIR)/smoke/bz_tabletop_link_smoke.mm -x none \
+		$$(BZ_XR_SC2_$(1)_BRIDGE_ARCHIVE) $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) \
+		-framework Foundation -lxml2 -lpthread -lz -o $$@
+	@file $$@ | grep -q 'arm64'
+	@xcrun vtool -show-build $$@ | grep -q 'platform $(if $(filter xrsimulator,$(1)),VISIONOSSIMULATOR,VISIONOS)'
+	@xcrun vtool -show-build $$@ | grep -q 'minos $$(BZ_XR_MIN_OS)'
+	@if otool -L $$@ | grep -Ei 'SDL|OpenGL|/opt/homebrew|/usr/local'; then \
+		echo "visionos-sc2-$(1): forbidden desktop dependency" >&2; exit 1; \
+	fi
+	@if strings $$@ $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) $$(BZ_XR_SC2_$(1)_BRIDGE_ARCHIVE) | \
+		grep -E '/Users/|/opt/homebrew|/usr/local'; then \
+		echo "visionos-sc2-$(1): forbidden developer path" >&2; exit 1; \
+	fi
+	@if nm -u $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE) | grep -q 'BZ_TTA_'; then \
+		echo "visionos-sc2-$(1): snapshot-only archive references the asset ABI" >&2; exit 1; \
+	fi
+
+.PHONY: visionos-sc2-$(1)
+visionos-sc2-$(1): $$(BZ_XR_SC2_$(1)_SMOKE)
+endef
+
+$(foreach t,$(BZ_XR_TARGETS),$(eval $(call bz_xr_sc2_platform_rules,$(t))))
+
+.PHONY: visionos-sc2
+visionos-sc2: visionos-sc2-xrsimulator visionos-sc2-xros
+
+# Host-native proof uses the same real source groups as the cross archives.
+BZ_SC2_TT_TEST_DIR := $(TESTS_DIR)/sc2-tabletop-runtime
+BZ_SC2_TT_TEST_BIN := $(BIN_DIR)/test_sc2_tabletop_runtime$(EXE_EXT)
+BZ_SC2_TT_TEST_ENGINE_O := $(BZ_SC2_TT_TEST_DIR)/engine.o
+BZ_SC2_TT_TEST_GAME_O := $(BZ_SC2_TT_TEST_DIR)/game.o
+
+$(BZ_SC2_TT_TEST_ENGINE_O): $(BZ_XR_SC2_ENGINE_SRCS)
+	@mkdir -p $(@D)
+	@printf '\043include "%s"\n' $(BZ_XR_SC2_ENGINE_SRCS) | \
+		$(CC) $(SC2_IMPL_CFLAGS) -x c -c -o $@ -
+
+$(BZ_SC2_TT_TEST_GAME_O): $(BZ_XR_SC2_GAME_SRCS)
+	@mkdir -p $(@D)
+	@printf '\043include "%s"\n' $(BZ_XR_SC2_GAME_SRCS) | \
+		$(CC) $(SC2_IMPL_CFLAGS) -x c -c -o $@ -
+
+$(BZ_SC2_TT_TEST_BIN): $(BZ_SC2_TT_TEST_ENGINE_O) $(BZ_SC2_TT_TEST_GAME_O) \
+	$(BZ_XR_BRIDGE_DIR)/bz_tabletop_lifecycle.c $(SC2_TEST_DIR)/test_sc2_tabletop_runtime.c \
+	$(SHARED_LIB) $(SHEET_LIB) | $(BIN_DIR)
+	@$(CC) $(SC2_IMPL_CFLAGS) -o $@ $(SC2_TEST_DIR)/test_sc2_tabletop_runtime.c \
+		$(BZ_XR_BRIDGE_DIR)/bz_tabletop_lifecycle.c $(BZ_SC2_TT_TEST_ENGINE_O) $(BZ_SC2_TT_TEST_GAME_O) \
+		$(RPATH) $(LDFLAGS) -lsheet -lshared -lxml2 -lm -lz -lpthread
+
+.PHONY: test-sc2-tabletop-runtime test-sc2-tabletop-live
+test-sc2-tabletop-runtime: test-sc2-assets $(BZ_SC2_TT_TEST_BIN)
+	@$(BZ_SC2_TT_TEST_BIN)
+
+test-sc2-tabletop-live: $(BZ_SC2_TT_TEST_BIN)
+	@if [ ! -d "$$SC2_DATA" ]; then \
+		echo "SKIP test-sc2-tabletop-live: $$SC2_DATA not found"; \
+	else \
+		BZ_SC2_DATA_DIR="$$SC2_DATA" "$(BZ_XR_SC2_DATA_TOOL)" verify-source && \
+			$(BZ_SC2_TT_TEST_BIN) "$$SC2_DATA" TRaynor01 snapshot-only; \
+	fi
+
+test: test-sc2-tabletop-runtime
 
 # Native SwiftUI/RealityKit shell with live production mode, explicit fixture
 # tests, and a thin adapter over the Layer-2 lifecycle/transport archives.

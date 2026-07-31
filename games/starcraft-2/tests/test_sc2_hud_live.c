@@ -69,7 +69,7 @@ static void capture_output(void) {
     }
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
-             "\"%s\" -data \"%s\" +r_module stdout +map TRaynor01 +com_frame_limit 5 2>/dev/null",
+             "\"%s\" -data \"%s\" +r_module stdout +map TRaynor01 +com_frame_limit 5 2>&1",
              SC2_BINARY, data);
 
     FILE *fp = popen(cmd, "r");
@@ -215,6 +215,11 @@ static void test_hud_gas_icon_drawn(void) {
 static void test_hud_supply_icon_drawn(void) {
     capture_output();
     ASSERT_LINE("icon-supply.dds");
+}
+
+static void test_hud_all_logical_resources_resolve(void) {
+    capture_output();
+    ASSERT_NO_LINE("SC2_HUD: unresolved UI resource");
 }
 
 /* ------------------------------------------------------------------ */
@@ -427,6 +432,7 @@ int main(void) {
     RUN_TEST(test_hud_mineral_icon_drawn);
     RUN_TEST(test_hud_gas_icon_drawn);
     RUN_TEST(test_hud_supply_icon_drawn);
+    RUN_TEST(test_hud_all_logical_resources_resolve);
     printf("\n");
 
     printf("[resource label texts]\n");

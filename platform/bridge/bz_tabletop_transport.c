@@ -17,7 +17,7 @@
  * before doing anything that would be unsafe post-shutdown.
  */
 #include "bz_tabletop_transport.h"
-#include "bz_tabletop_assets.h"
+#include "bz_tabletop_game.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -147,8 +147,8 @@ void BZ_TT_Init(void) {
     g_generation = 0;
     g_initialized = true;
     g_terminal = false;
-    /* One lock makes transport and asset lifecycle state externally atomic. */
-    BZ_TTA_Init();
+    /* One lock makes transport and selected-game publication state externally atomic. */
+    BZ_GameTabletopInit();
     pthread_mutex_unlock(&g_lock);
     fprintf(stderr, "BZTabletopTransport: initialized, abi_version=%u\n", BZ_TABLETOP_ABI_VERSION);
 }
@@ -156,7 +156,7 @@ void BZ_TT_Init(void) {
 void BZ_TT_Shutdown(void) {
     pthread_mutex_lock(&g_lock);
     g_terminal = true;
-    BZ_TTA_Shutdown();
+    BZ_GameTabletopShutdown();
     pthread_mutex_unlock(&g_lock);
     fprintf(stderr, "BZTabletopTransport: shutdown (terminal)\n");
 }
@@ -520,7 +520,8 @@ static void BuildEntity(bzTTEntity_t *out, centity_t const *ce) {
     out->splat = es->splat;
     out->shadow = es->shadow;
     out->shadow_rect = es->shadow_rect;
-    out->selected = ce->selected;
+    /* The server stamps per-client RF_SELECTED; ce->selected is only speculative desktop input state. */
+    out->selected = es->renderfx & RF_SELECTED;
 }
 
 static void BuildEntities(bzTTSnapshot_t *snap) {
@@ -531,6 +532,8 @@ static void BuildEntities(bzTTSnapshot_t *snap) {
             continue;
         if (written < BZ_TT_MAX_ENTITIES) {
             BuildEntity(&snap->entities[written], &cl.ents[i]);
+            if (snap->entities[written].selected && snap->num_selected < BZ_TT_MAX_SELECTED_ENTITIES)
+                snap->selected_ids[snap->num_selected++] = snap->entities[written].number;
             written++;
         } else {
             overflow++;
@@ -736,10 +739,6 @@ void BZ_TT_PublishSnapshotFromClient(void) {
     snap->conn_state = (bzTTConnState_t)cls.state;
     BuildMap(snap);
     BuildPlayer(&snap->player);
-    snap->num_selected = cl.selection.num_selected < BZ_TT_MAX_SELECTED_ENTITIES
-                             ? cl.selection.num_selected
-                             : BZ_TT_MAX_SELECTED_ENTITIES;
-    memcpy(snap->selected_ids, cl.selection.entity_nums, snap->num_selected * sizeof(uint32_t));
     BuildEntities(snap);
     BuildFog(snap);
     _Static_assert(sizeof(snap->configstrings) == sizeof(cl.configstrings), "configstring block shape must match cl.configstrings");
@@ -765,5 +764,5 @@ void BZ_TT_PublishSnapshotFromClient(void) {
         SnapshotReleaseLocked(old);
     }
     pthread_mutex_unlock(&g_lock);
-    BZ_TTA_PublishTerrainFromGame();
+    BZ_GameTabletopPublish();
 }
