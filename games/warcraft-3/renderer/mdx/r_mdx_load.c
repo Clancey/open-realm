@@ -1,4 +1,5 @@
 #include "r_mdx.h"
+#include "r_mdx_lifecycle.h"
 #include "renderer/r_local.h"
 
 #define LPCSTR const char *
@@ -901,96 +902,15 @@ mdxModel_t *R_LoadModelMDLX(void *data, DWORD size) {
     return model;
 }
 
-void MDLX_ReleaseModelNode(mdxNode_t *node) {
-    SAFE_DELETE(node->translation, ri.MemFree);
-    SAFE_DELETE(node->rotation, ri.MemFree);
-    SAFE_DELETE(node->scale, ri.MemFree);
-}
-
-void MDLX_ReleaseModelGeoset(mdxGeoset_t *geoset) {
+static void MDLX_ReleaseModelGeosetGPU(mdxGeoset_t *geoset) {
     R_Call(glDeleteVertexArrays, 1, &geoset->vertexArrayBuffer);
     R_Call(glDeleteBuffers, MAX_MDLX_BUFFERS, geoset->buffer);
-
-    SAFE_DELETE(geoset->next, MDLX_ReleaseModelGeoset);
-    SAFE_DELETE(geoset->vertices, ri.MemFree);
-    SAFE_DELETE(geoset->normals, ri.MemFree);
-    SAFE_DELETE(geoset->texcoord, ri.MemFree);
-    SAFE_DELETE(geoset->matrices, ri.MemFree);
-    SAFE_DELETE(geoset->matrixPalette, ri.MemFree);
-    SAFE_DELETE(geoset->primitiveTypes, ri.MemFree);
-    SAFE_DELETE(geoset->primitiveCounts, ri.MemFree);
-    SAFE_DELETE(geoset->triangles, ri.MemFree);
-    SAFE_DELETE(geoset->vertexGroups, ri.MemFree);
-    SAFE_DELETE(geoset->matrixGroupSizes, ri.MemFree);
-    SAFE_DELETE(geoset->bounds, ri.MemFree);
-    SAFE_DELETE(geoset, ri.MemFree);
-}
-
-void MDLX_ReleaseModelMaterial(mdxMaterial_t *material) {
-    SAFE_DELETE(material->next, MDLX_ReleaseModelMaterial);
-    if (material->layers) {
-        FOR_LOOP(i, material->num_layers) {
-            SAFE_DELETE(material->layers[i].alpha, ri.MemFree);
-            SAFE_DELETE(material->layers[i].flipbook, ri.MemFree);
-        }
-        ri.MemFree(material->layers);
-    }
-    SAFE_DELETE(material->emission, ri.MemFree);
-    SAFE_DELETE(material->alpha, ri.MemFree);
-    SAFE_DELETE(material->flipbook, ri.MemFree);
-    SAFE_DELETE(material, ri.MemFree);
-}
-
-void MDLX_ReleaseModelTextureAnim(mdxTextureAnim_t *textureAnim) {
-    SAFE_DELETE(textureAnim->next, MDLX_ReleaseModelTextureAnim);
-    SAFE_DELETE(textureAnim->translation, ri.MemFree);
-    SAFE_DELETE(textureAnim->rotation, ri.MemFree);
-    SAFE_DELETE(textureAnim->scale, ri.MemFree);
-    SAFE_DELETE(textureAnim, ri.MemFree);
-}
-
-void MDLX_ReleaseModelBone(mdxBone_t *bone) {
-    MDLX_ReleaseModelNode(&bone->node);
-    SAFE_DELETE(bone->next, MDLX_ReleaseModelBone);
-    SAFE_DELETE(bone, ri.MemFree);
-}
-
-void MDLX_ReleaseModelGeosetAnim(mdxGeosetAnim_t *geosetAnim) {
-    SAFE_DELETE(geosetAnim->next, MDLX_ReleaseModelGeosetAnim);
-    SAFE_DELETE(geosetAnim->alphas, ri.MemFree);
-    SAFE_DELETE(geosetAnim->colors, ri.MemFree);
-    SAFE_DELETE(geosetAnim, ri.MemFree);
-}
-
-void MDLX_ReleaseModelHelper(mdxHelper_t *helper) {
-    MDLX_ReleaseModelNode(&helper->node);
-    SAFE_DELETE(helper->next, MDLX_ReleaseModelHelper);
-    SAFE_DELETE(helper, ri.MemFree);
-}
-
-void MDLX_ReleaseModelLight(mdxLight_t *light) {
-    MDLX_ReleaseModelNode(&light->node);
-    SAFE_DELETE(light->next, MDLX_ReleaseModelLight);
-    SAFE_DELETE(light->keytracks.Visibility, ri.MemFree);
-    SAFE_DELETE(light->keytracks.Color, ri.MemFree);
-    SAFE_DELETE(light->keytracks.Intensity, ri.MemFree);
-    SAFE_DELETE(light->keytracks.AmbColor, ri.MemFree);
-    SAFE_DELETE(light->keytracks.AmbIntensity, ri.MemFree);
-    SAFE_DELETE(light->keytracks.AttenuationStart, ri.MemFree);
-    SAFE_DELETE(light->keytracks.AttenuationEnd, ri.MemFree);
-    SAFE_DELETE(light, ri.MemFree);
 }
 
 void MDLX_Release(mdxModel_t *model) {
-    SAFE_DELETE(model->geosets, MDLX_ReleaseModelGeoset);
-    SAFE_DELETE(model->materials, MDLX_ReleaseModelMaterial);
-    SAFE_DELETE(model->textureAnims, MDLX_ReleaseModelTextureAnim);
-    SAFE_DELETE(model->bones, MDLX_ReleaseModelBone);
-    SAFE_DELETE(model->geosetAnims, MDLX_ReleaseModelGeosetAnim);
-    SAFE_DELETE(model->helpers, MDLX_ReleaseModelHelper);
-    SAFE_DELETE(model->lights, MDLX_ReleaseModelLight);
-    SAFE_DELETE(model->textures, ri.MemFree);
-    SAFE_DELETE(model->sequences, ri.MemFree);
-    SAFE_DELETE(model->globalSequences, ri.MemFree);
-    SAFE_DELETE(model->pivots, ri.MemFree);
+    mdxReleaseAPI_t api = {
+        .mem_free = ri.MemFree, .release_geoset_gpu = MDLX_ReleaseModelGeosetGPU,
+        .unregister_texture = R_UnregisterTextureFile,
+    };
+    mdx_release_owned_model(&model, &api);
 }

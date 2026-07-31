@@ -30,7 +30,8 @@ static DWORD cl_realtime = 0;
 /* Map transitions and terminal shutdown share the renderer-handle ownership boundary. */
 static void CL_ReleaseModels(void) {
     clModelHandles_t handles = {
-        .models = cl.models, .portraits = cl.portraits, .count = MAX_MODELS, .release_model = re.ReleaseModel,
+        .models = cl.models, .portraits = cl.portraits, .move_confirmation = &cl.moveConfirmation,
+        .count = MAX_MODELS, .release_model = re.ReleaseModel,
     };
     CL_ReleaseModelHandles(&handles);
 }

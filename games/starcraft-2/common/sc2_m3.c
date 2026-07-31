@@ -19,6 +19,22 @@ typedef struct {
     m3StrideFunc_t version_stride;
 } m3Schema_t;
 
+/* Aliased references decode independently, so charge the complete allocation and work before touching memory. */
+static BOOL m3_budget_charge(m3Model_t *model, uint64_t bytes, uint64_t work) {
+    if (model->budget_exceeded) return false;
+    if (bytes > SC2_M3_MAX_DECODED_BYTES - model->decoded_bytes ||
+        work > SC2_M3_MAX_PARSE_WORK - model->parse_work) {
+        fprintf(stderr, "SC2_M3Parse: parse budget exceeded (bytes=%llu+%llu work=%llu+%llu)\n",
+                (unsigned long long)model->decoded_bytes, (unsigned long long)bytes,
+                (unsigned long long)model->parse_work, (unsigned long long)work);
+        model->budget_exceeded = true;
+        model->valid = false;
+        return false;
+    }
+    model->decoded_bytes += bytes; model->parse_work += work;
+    return true;
+}
+
 #define M3_READ(BUFFER, VAR, VERSION) \
 if ((BUFFER)->ent.version > VERSION || VERSION == 0) m3_read(BUFFER, &VAR, sizeof(VAR));
 
@@ -33,11 +49,12 @@ static void m3_read_##TYPE(m3Model_t *model, m3Reader_t *sb, m3##TYPE##_t *data)
     if (!m3_schema_reader(MODEL, REF, &m3_schema_##TYPE, &reader, &stride) || (REF).nEntries == UINT32_MAX) { \
         (MODEL)->valid = false; break; \
     } \
+    if (!m3_budget_charge(MODEL, ((uint64_t)(REF).nEntries + 1) * sizeof(m3##TYPE##_t), (REF).nEntries)) break; \
     TARGET##Num = (REF).nEntries; \
     TARGET = TARGET##Num ? calloc(TARGET##Num + 1, sizeof(m3##TYPE##_t)) : NULL; \
     if (TARGET##Num && !TARGET) { TARGET##Num = 0; (MODEL)->valid = false; } \
     FOR_LOOP(n, TARGET##Num) m3_read_##TYPE(MODEL, &reader, &TARGET[n]); \
-    if (reader.readcount != TARGET##Num * stride) (MODEL)->valid = false; \
+    if (reader.readcount != (uint64_t)TARGET##Num * stride) (MODEL)->valid = false; \
 } while (0)
 
 #define M3_REFR(BUFFER, TARGET, TYPE, VERSION) do { \
@@ -106,25 +123,36 @@ static DWORD m3_schema_stride(m3Schema_t const *schema, DWORD version) {
 }
 
 static m3Reader_t m3_make_reader(m3Model_t const *model, Reference ref) {
-    DWORD section_end;
-    if (!model || !model->buffer || !model->refs || !model->head || !ref.nEntries)
+    if (!model || !model->buffer || !model->refs || !model->ref_lengths || !model->head || !ref.nEntries)
         return (m3Reader_t){ 0 };
     if (ref.ref >= model->head->nRefs || model->refs[ref.ref].offset >= model->size ||
         model->refs[ref.ref].offset >= model->head->ofsRefs)
         return (m3Reader_t){ 0 };
-    section_end = model->head->ofsRefs;
-    if (section_end <= model->refs[ref.ref].offset || section_end > model->size) section_end = model->size;
-    FOR_LOOP(i, model->head->nRefs)
-        if (model->refs[i].offset > model->refs[ref.ref].offset &&
-            model->refs[i].offset < section_end)
-            section_end = model->refs[i].offset;
     return (m3Reader_t){
         .ent = model->refs[ref.ref],
-        .length = section_end - model->refs[ref.ref].offset,
+        .length = model->ref_lengths[ref.ref],
         .valid = true,
         .model_valid = &((m3Model_t *)model)->valid,
         .data = (LPBYTE)model->buffer + model->refs[ref.ref].offset,
     };
+}
+
+/* Build section bounds once; the charged quadratic scan cannot be multiplied by aliased references. */
+static BOOL m3_init_reference_lengths(m3Model_t *model) {
+    DWORD count = model->head->nRefs;
+    if (!m3_budget_charge(model, ((uint64_t)count + 1) * sizeof(*model->ref_lengths),
+                          (uint64_t)count * count))
+        return false;
+    model->ref_lengths = calloc(count + 1, sizeof(*model->ref_lengths));
+    if (!model->ref_lengths) return model->valid = false;
+    FOR_LOOP(i, count) {
+        DWORD section_end = model->head->ofsRefs;
+        FOR_LOOP(j, count)
+            if (model->refs[j].offset > model->refs[i].offset && model->refs[j].offset < section_end)
+                section_end = model->refs[j].offset;
+        model->ref_lengths[i] = section_end - model->refs[i].offset;
+    }
+    return true;
 }
 
 static BOOL m3_schema_reader(m3Model_t const *model, Reference ref, m3Schema_t const *schema,
@@ -230,6 +258,7 @@ static void m3_read_vertex_reference(m3Model_t *model, m3Reader_t *sb) {
         return;
     }
     count = ref.nEntries / stride;
+    if (!m3_budget_charge(model, ((uint64_t)count + 1) * sizeof(*model->vertices), count)) return;
     model->vertices = count ? calloc(count + 1, sizeof(*model->vertices)) : NULL;
     model->verticesNum = model->vertices ? count : 0;
     if (count && !model->vertices) model->valid = false;
@@ -478,7 +507,7 @@ static DWORD m3_animation_value_stride(m3Model_t const *model, Reference ref) {
 }
 
 /* Animation remains renderer-owned, but every raw declaration must be safe before publication. */
-static BOOL m3_validate_animations(m3Model_t const *model) {
+static BOOL m3_validate_animations(m3Model_t *model) {
     FOR_LOOP(i, model->stcNum) {
         m3SequenceTimeline_t const *timeline = &model->stc[i];
         if (timeline->animIdsNum != timeline->animRefsNum) return false;
@@ -487,6 +516,7 @@ static BOOL m3_validate_animations(m3Model_t const *model) {
                 .element_size = sizeof(m3SequenceData_t) };
             DWORD sd_count;
             if (!SC2_M3ReferenceCount(model, &sd_read, &sd_count)) return false;
+            if (!m3_budget_charge(model, 0, sd_count)) return false;
             FOR_LOOP(sd_index, sd_count) {
                 m3SequenceData_t sd;
                 DWORD key_count, value_count, value_stride;
@@ -503,6 +533,16 @@ static BOOL m3_validate_animations(m3Model_t const *model) {
             }
         }
     }
+    return true;
+}
+
+/* Region walks revisit decoded vertices and faces, so reserve that bounded validation work once. */
+static BOOL m3_charge_geometry_work(m3Model_t *model) {
+    FOR_LOOP(d, model->divisionsNum)
+        FOR_LOOP(r, model->divisions[d].regionsNum)
+            if (!m3_budget_charge(model, 0, (uint64_t)model->divisions[d].regions[r].triangleIndicesCount +
+                                  model->divisions[d].regions[r].verticesCount))
+                return false;
     return true;
 }
 
@@ -542,6 +582,8 @@ m3Model_t *SC2_M3Parse(void const *data, DWORD size) {
     m3Reader_t root;
     DWORD root_stride;
     if (!model || !data || size < sizeof(struct MD33)) return model;
+    if (size > SC2_M3_MAX_DECODED_BYTES) { model->budget_exceeded = true; return model; }
+    model->decoded_bytes = size;
     model->buffer = malloc(size);
     if (!model->buffer) return model;
     model->size = size;
@@ -557,28 +599,30 @@ m3Model_t *SC2_M3Parse(void const *data, DWORD size) {
         return model;
     }
     model->refs = (struct ReferenceEntry *)((LPBYTE)model->buffer + model->head->ofsRefs);
+    model->valid = true;
+    if (!m3_budget_charge(model, 0, model->head->nRefs)) { model->head = NULL; return model; }
     FOR_LOOP(i, model->head->nRefs)
         if (model->refs[i].offset >= model->size || model->refs[i].offset >= model->head->ofsRefs) {
             fprintf(stderr, "SC2_M3Parse: reference %u offset is out of bounds\n", i);
             model->head = NULL;
             return model;
         }
+    if (!m3_init_reference_lengths(model)) { model->head = NULL; return model; }
     model->type = model->refs[model->head->MODL.ref].version;
-    model->valid = true;
-        if (!m3_schema_reader(model, model->head->MODL, &m3_schema_Model, &root, &root_stride)) {
-            fprintf(stderr, "SC2_M3Parse: invalid MODL root declaration\n");
-            if (!memcmp(model->refs[model->head->MODL.ref].id, "LDOM", 4) &&
-                model->refs[model->head->MODL.ref].nEntries == 1 &&
-                !m3_stride_model(model->refs[model->head->MODL.ref].version))
-                model->unsupported = true;
-            model->head = NULL;
-            return model;
-        }
-        m3_init_model(model, &root);
-        if (!model->valid || root.readcount != root_stride || !m3_validate_animations(model) ||
-            !SC2_M3ValidateGeometry(model)) {
-            fprintf(stderr, "SC2_M3Parse: truncated or malformed referenced section\n");
-            model->head = NULL;
+    if (!m3_schema_reader(model, model->head->MODL, &m3_schema_Model, &root, &root_stride)) {
+        fprintf(stderr, "SC2_M3Parse: invalid MODL root declaration\n");
+        if (!memcmp(model->refs[model->head->MODL.ref].id, "LDOM", 4) &&
+            model->refs[model->head->MODL.ref].nEntries == 1 &&
+            !m3_stride_model(model->refs[model->head->MODL.ref].version))
+            model->unsupported = true;
+        model->head = NULL;
+        return model;
+    }
+    m3_init_model(model, &root);
+    if (!model->valid || root.readcount != root_stride || !m3_validate_animations(model) ||
+        !m3_charge_geometry_work(model) || !SC2_M3ValidateGeometry(model)) {
+        fprintf(stderr, "SC2_M3Parse: truncated or malformed referenced section\n");
+        model->head = NULL;
     }
     return model;
 }
@@ -642,6 +686,7 @@ void SC2_M3Free(m3Model_t *model) {
     }
     free(model->materialComposite);
     free(model->absoluteInverseBoneRestPositions);
+    free(model->ref_lengths);
     free(model->buffer);
     free(model);
 }

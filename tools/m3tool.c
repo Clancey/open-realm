@@ -142,6 +142,8 @@ static void PrintModelInfo(m3Model_t const *m3) {
     fprintf(stderr, "  bone_lookup: %u\n", (unsigned)m3->boneLookupNum);
     fprintf(stderr, "  sequences: %u\n", (unsigned)m3->sequencesNum);
     fprintf(stderr, "  materials: %u\n", (unsigned)m3->materialStandardNum);
+    fprintf(stderr, "  parse_budget: decoded_bytes=%llu work=%llu\n",
+            (unsigned long long)m3->decoded_bytes, (unsigned long long)m3->parse_work);
     fprintf(stderr,
             "  bounds: min=(%.3f %.3f %.3f) max=(%.3f %.3f %.3f) size=(%.3f %.3f %.3f)\n",
             bounds.min.x, bounds.min.y, bounds.min.z,

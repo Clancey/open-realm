@@ -3,6 +3,9 @@
 
 #include "common/shared.h"
 
+#define SC2_M3_MAX_DECODED_BYTES (256u * 1024u * 1024u)
+#define SC2_M3_MAX_PARSE_WORK    (16u * 1024u * 1024u)
+
 #define M3_ENTRIES(TYPE, NAME)\
 DWORD NAME##Num; \
 m3##TYPE##_t *NAME;
@@ -371,12 +374,16 @@ typedef struct {
 typedef struct m3Model_s {
     struct MD33* head;
     struct ReferenceEntry* refs;
+    DWORD *ref_lengths;
     struct render_buffer *renbuf;
     HANDLE buffer;
     DWORD size;
     DWORD type;
     BOOL valid;
     BOOL unsupported;
+    BOOL budget_exceeded;
+    uint64_t decoded_bytes;
+    uint64_t parse_work;
     
     
     M3_ENTRIES(Char, modelName);

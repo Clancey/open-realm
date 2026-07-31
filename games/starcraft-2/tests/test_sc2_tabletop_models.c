@@ -171,6 +171,41 @@ static void *build_bone_count_m3(uint32_t *size, uint32_t bone_count) {
     return data;
 }
 
+/* Shared source sections are legal, but repeated deep decoding must remain cumulatively bounded. */
+static void *build_aliased_material_m3(uint32_t *size, uint32_t material_count, uint32_t string_bytes,
+                                       uint32_t dummy_refs) {
+    uint32_t materials_offset = 816;
+    uint32_t layer_offset = materials_offset + material_count * 280;
+    uint32_t string_offset = layer_offset + 356;
+    uint32_t refs_offset = (string_offset + string_bytes + 15) & ~15u;
+    uint8_t *data;
+    struct MD33 *head;
+    struct ReferenceEntry *refs;
+    *size = refs_offset + (4 + dummy_refs) * sizeof(*refs);
+    data = calloc(1, *size); head = (struct MD33 *)data;
+    refs = (struct ReferenceEntry *)(data + refs_offset);
+    memcpy(head->id, "43DM", 4); head->ofsRefs = refs_offset; head->nRefs = 4 + dummy_refs;
+    head->MODL = (Reference){ .nEntries = 1, .ref = 0 };
+    memcpy(refs[0].id, "LDOM", 4); refs[0].offset = 32; refs[0].nEntries = 1; refs[0].version = 23;
+    memcpy(refs[1].id, "_TAM", 4); refs[1].offset = materials_offset;
+    refs[1].nEntries = material_count; refs[1].version = 16;
+    memcpy(refs[2].id, "RYAL", 4); refs[2].offset = layer_offset; refs[2].nEntries = 1;
+    memcpy(refs[3].id, "RAHC", 4); refs[3].offset = string_offset;
+    refs[3].nEntries = string_bytes;
+    FOR_LOOP(i, dummy_refs) {
+        memcpy(refs[4 + i].id, "RAHC", 4); refs[4 + i].offset = string_offset;
+        refs[4 + i].nEntries = string_bytes;
+    }
+    put_ref(data + 32, 312, (Reference){ .nEntries = material_count, .ref = 1 });
+    put_ref(data + layer_offset, 4, (Reference){ .nEntries = string_bytes, .ref = 3 });
+    FOR_LOOP(m, material_count)
+        FOR_LOOP(layer, 14)
+            put_ref(data + materials_offset + m * 280, 52 + layer * 12,
+                    (Reference){ .nEntries = 1, .ref = 2 });
+    memset(data + string_offset, 'A', string_bytes);
+    return data;
+}
+
 typedef enum { BAD_VERTEX_RANGE, BAD_INDEX_RANGE, BAD_FACE_VALUE, BAD_BONE_INDEX } bad_geometry_t;
 
 static void *build_bad_geometry_m3(uint32_t *size, bad_geometry_t bad) {
@@ -497,6 +532,26 @@ static void test_renderer_bone_capability(void) {
     ASSERT(!m3_renderer_model_supported(&boundary));
 }
 
+static void test_parser_reference_amplification_budget(void) {
+    uint32_t size;
+    void *data = build_aliased_material_m3(&size, 1, 64, 0);
+    m3Model_t *model = SC2_M3Parse(data, size);
+    ASSERT_NOT_NULL(model); ASSERT_NOT_NULL(model->head); ASSERT_EQ_INT(model->materialStandardNum, 1);
+    ASSERT(!model->budget_exceeded);
+    SC2_M3Free(model); free(data);
+    data = build_aliased_material_m3(&size, 100, 1u << 20, 0);
+    model = SC2_M3Parse(data, size);
+    ASSERT_NOT_NULL(model); ASSERT_NULL(model->head); ASSERT(model->budget_exceeded);
+    ASSERT(model->decoded_bytes <= SC2_M3_MAX_DECODED_BYTES);
+    ASSERT(model->parse_work <= SC2_M3_MAX_PARSE_WORK);
+    SC2_M3Free(model); free(data);
+    data = build_aliased_material_m3(&size, 100, 64, 5000);
+    model = SC2_M3Parse(data, size);
+    ASSERT_NOT_NULL(model); ASSERT_NULL(model->head); ASSERT(model->budget_exceeded);
+    ASSERT(model->parse_work <= SC2_M3_MAX_PARSE_WORK);
+    SC2_M3Free(model); free(data);
+}
+
 static void *register_same_model(void *unused) {
     const bzSC2Model_t *model;
     (void)unused;
@@ -575,6 +630,7 @@ int main(void) {
     RUN_TEST(test_odd_indices_keep_all_trailing_arrays_aligned);
     RUN_TEST(test_geometry_validation_rejects_ranges_and_faces);
     RUN_TEST(test_renderer_bone_capability);
+    RUN_TEST(test_parser_reference_amplification_budget);
     RUN_TEST(test_concurrent_same_identity_publication);
     RUN_TEST(test_model_and_image_misses_share_provider_serialization);
     TEST_RESULTS();

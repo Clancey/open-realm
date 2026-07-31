@@ -337,7 +337,8 @@ static bzSC2Model_t *load_model(const char *identity, bzSC2MResult_t *status, ui
     parsed = SC2_M3Parse(raw, size);
     if (g_model_source.free_file) g_model_source.free_file(raw);
     if (!parsed || !parsed->head) {
-        *status = parsed && parsed->unsupported ? BZ_SC2M_ERR_UNSUPPORTED : BZ_SC2M_ERR_MALFORMED;
+        *status = parsed && parsed->budget_exceeded ? BZ_SC2M_ERR_TOO_LARGE :
+                 parsed && parsed->unsupported ? BZ_SC2M_ERR_UNSUPPORTED : BZ_SC2M_ERR_MALFORMED;
         SC2_M3Free(parsed); return NULL;
     }
     model = export_model(identity, parsed, generation, status);
