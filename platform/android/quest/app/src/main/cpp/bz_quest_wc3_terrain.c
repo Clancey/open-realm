@@ -472,8 +472,21 @@ const char *bz_quest_wc3_terrain_status_string(bzQuestWc3TerrainStatus_t status)
         case BZ_QUEST_WC3_TERRAIN_ERR_NO_GROUND_TEXTURES: return "no ground textures";
         case BZ_QUEST_WC3_TERRAIN_ERR_CHUNK_OUT_OF_RANGE: return "chunk out of range";
         case BZ_QUEST_WC3_TERRAIN_ERR_CAPACITY: return "capacity overflow";
+        case BZ_QUEST_WC3_TERRAIN_ERR_ROW_STRIDE_TOO_SHORT: return "row stride shorter than tight width*4";
         default: return "unknown";
     }
+}
+
+bzQuestWc3TerrainStatus_t bz_quest_wc3_terrain_repack_texture_tight(
+    const uint8_t *srcPixels, uint32_t srcRowBytes, uint32_t width, uint32_t height, uint8_t *dstTight,
+    uint32_t dstCapacity) {
+    if (!srcPixels || !dstTight || !width || !height) return BZ_QUEST_WC3_TERRAIN_ERR_INVALID_ARGUMENT;
+    if (srcRowBytes < width * 4u) return BZ_QUEST_WC3_TERRAIN_ERR_ROW_STRIDE_TOO_SHORT;
+    uint64_t tightBytes = (uint64_t)width * 4u * height;
+    if (tightBytes > dstCapacity) return BZ_QUEST_WC3_TERRAIN_ERR_CAPACITY;
+    for (uint32_t y = 0; y < height; y++)
+        memcpy(dstTight + (size_t)y * width * 4, srcPixels + (size_t)y * srcRowBytes, (size_t)width * 4);
+    return BZ_QUEST_WC3_TERRAIN_OK;
 }
 
 void bz_quest_wc3_terrain_chunk_key(const char *terrainIdentity, uint32_t chunkX, uint32_t chunkZ,

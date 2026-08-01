@@ -334,10 +334,11 @@ static void *texture_cache_create(const bzQuestWc3CacheKey_t *key, void *userdat
         BZ_QUEST_LOGE("bz_quest_vk_wc3_terrain: texture_cache_create missing pending texture");
         return NULL;
     }
-    uint32_t dataBytes = vkTerrain->pendingTextureRowBytes * vkTerrain->pendingTextureHeight;
-    if (!dataBytes || dataBytes > BZ_QUEST_VK_WC3_TERRAIN_STAGING_BYTES) {
-        BZ_QUEST_LOGE("bz_quest_vk_wc3_terrain: texture '%s' oversized (%u bytes)", vkTerrain->pendingTextureIdentity,
-                      dataBytes);
+    uint32_t width = vkTerrain->pendingTextureWidth, height = vkTerrain->pendingTextureHeight;
+    VkDeviceSize tightBytes = (VkDeviceSize)width * 4 * height;
+    if (!tightBytes || tightBytes > BZ_QUEST_VK_WC3_TERRAIN_STAGING_BYTES) {
+        BZ_QUEST_LOGE("bz_quest_vk_wc3_terrain: texture '%s' oversized (%llu bytes)", vkTerrain->pendingTextureIdentity,
+                      (unsigned long long)tightBytes);
         return NULL;
     }
 
@@ -346,8 +347,8 @@ static void *texture_cache_create(const bzQuestWc3CacheKey_t *key, void *userdat
     VkImageCreateInfo imageInfo = {0};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent.width = vkTerrain->pendingTextureWidth;
-    imageInfo.extent.height = vkTerrain->pendingTextureHeight;
+    imageInfo.extent.width = width;
+    imageInfo.extent.height = height;
     imageInfo.extent.depth = 1;
     imageInfo.mipLevels = 1;
     imageInfo.arrayLayers = 1;
@@ -386,18 +387,34 @@ static void *texture_cache_create(const bzQuestWc3CacheKey_t *key, void *userdat
     }
 
     void *mapped = NULL;
-    if (vkMapMemory(vkTerrain->vk->device, vkTerrain->stagingMemory, 0, dataBytes, 0, &mapped) != VK_SUCCESS) {
+    if (vkMapMemory(vkTerrain->vk->device, vkTerrain->stagingMemory, 0, tightBytes, 0, &mapped) != VK_SUCCESS) {
         BZ_QUEST_LOGE("bz_quest_vk_wc3_terrain: vkMapMemory (texture staging) failed");
         vkDestroyImage(vkTerrain->vk->device, image, NULL);
         vkFreeMemory(vkTerrain->vk->device, memory, NULL);
         return NULL;
     }
-    memcpy(mapped, vkTerrain->pendingTexturePixels, dataBytes);
+    /* Re-pack to a tight width*4 row stride via the shared, host-testable pure
+     * helper: rowBytes may exceed width*4 (BLP row padding) but
+     * vkCmdCopyBufferToImage's bufferRowLength=0 below means "tightly
+     * packed", so the staging buffer must already be tightly packed
+     * regardless of the source's own row stride. Also rejects a too-short
+     * rowBytes rather than reading past a row's true end. Mirrors
+     * bz_quest_vk_wc3.c's texture_cache_create() model-texture upload path. */
+    bzQuestWc3TerrainStatus_t repackStatus = bz_quest_wc3_terrain_repack_texture_tight(
+        vkTerrain->pendingTexturePixels, vkTerrain->pendingTextureRowBytes, width, height, (uint8_t *)mapped,
+        (uint32_t)tightBytes);
+    if (repackStatus != BZ_QUEST_WC3_TERRAIN_OK) {
+        BZ_QUEST_LOGE("bz_quest_vk_wc3_terrain: texture '%s' repack failed: %s", vkTerrain->pendingTextureIdentity,
+                      bz_quest_wc3_terrain_status_string(repackStatus));
+        vkUnmapMemory(vkTerrain->vk->device, vkTerrain->stagingMemory);
+        vkDestroyImage(vkTerrain->vk->device, image, NULL);
+        vkFreeMemory(vkTerrain->vk->device, memory, NULL);
+        return NULL;
+    }
     vkUnmapMemory(vkTerrain->vk->device, vkTerrain->stagingMemory);
 
     {
-        TerrainTextureUploadCtx_t ctx = {vkTerrain, image, vkTerrain->pendingTextureWidth,
-                                         vkTerrain->pendingTextureHeight};
+        TerrainTextureUploadCtx_t ctx = {vkTerrain, image, width, height};
         if (!run_one_time_upload(vkTerrain, record_texture_upload, &ctx)) {
             vkDestroyImage(vkTerrain->vk->device, image, NULL);
             vkFreeMemory(vkTerrain->vk->device, memory, NULL);

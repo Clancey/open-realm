@@ -1454,13 +1454,25 @@ frames, same-generation dedup, create-failure retry, and generation-reset
 eviction, using the same fake-cache harness as the existing hit/miss/eviction
 test.
 
+Texture uploads also re-pack into a tightly-packed staging buffer one row at
+a time via the shared, host-testable `bz_quest_wc3_terrain_repack_texture_tight()`
+helper (mirroring `bz_quest_vk_wc3.c`'s model-texture upload path exactly):
+`vkCmdCopyBufferToImage`'s `bufferRowLength = 0` always means "tightly
+packed" regardless of the source's own row stride, so a source row stride
+wider than `width*4` (e.g. BLP row padding) must never be flat-copied as-is
+into the staging buffer. A source `rowBytes` shorter than `width*4` is
+rejected outright (it would read past a row's true end), never silently
+truncated. `test_repack_texture_tight_*` covers tight input, padded input,
+an undersized destination, and an invalid too-short stride.
+
 `test_bz_quest_wc3_terrain.c` host-covers the pure chunk builder's critical
 paths: scale rejection, 32x32 tail-chunk clamping, authoritative quad winding,
 ground splat atlas selection, water opacity, cliff detection/material fallback,
 stable cache-key generation, the blended-pipeline depth-compare structural
-assertion, and the texture upload budget/retry/dedup/reset scenarios above.
-The existing descriptor-pool headroom script now structurally checks the
-terrain texture descriptor pool's required `capacity + 1` spare slot too.
+assertion, the texture upload budget/retry/dedup/reset scenarios, and the
+row-padding-safe texture repack helper (see the two subsections above). The
+existing descriptor-pool headroom script now structurally checks the terrain
+texture descriptor pool's required `capacity + 1` spare slot too.
 
 ## Manifest requirements
 

@@ -588,6 +588,75 @@ static void test_texture_budget_generation_reset_evicts_and_allows_fresh_upload(
     bz_quest_wc3_cache_shutdown(&cache);
 }
 
+/* ------------------------------------------------------------------ */
+/* Regression: PR #21 review defect 3 - texture row-padding upload bug */
+/* ------------------------------------------------------------------ */
+
+static void test_repack_texture_tight_passes_through_already_tight_rows(void) {
+    const uint32_t width = 2, height = 2;
+    uint8_t src[2 * 2 * 4];
+    for (uint32_t i = 0; i < sizeof(src); i++) src[i] = (uint8_t)(i + 1);
+    uint8_t dst[2 * 2 * 4];
+    memset(dst, 0xAA, sizeof(dst));
+    ASSERT_EQ_INT(bz_quest_wc3_terrain_repack_texture_tight(src, width * 4, width, height, dst, sizeof(dst)),
+                 BZ_QUEST_WC3_TERRAIN_OK);
+    ASSERT(memcmp(src, dst, sizeof(src)) == 0);
+}
+
+static void test_repack_texture_tight_strips_source_row_padding(void) {
+    /* Source rows are padded to 24 bytes (width*4=8 real bytes + 16 padding),
+     * simulating a BLP-derived producer whose row stride exceeds width*4.
+     * The repacked destination must contain only the real per-row pixel
+     * bytes, tightly packed with no gaps - this is exactly what
+     * vkCmdCopyBufferToImage's bufferRowLength=0 assumes of the staging
+     * buffer. */
+    const uint32_t width = 2, height = 2, rowBytes = 24;
+    uint8_t src[24 * 2];
+    memset(src, 0xEE, sizeof(src)); /* padding poison: must never reach dst */
+    for (uint32_t y = 0; y < height; y++)
+        for (uint32_t x = 0; x < width * 4; x++) src[y * rowBytes + x] = (uint8_t)(y * 10 + x);
+    uint8_t dst[2 * 2 * 4];
+    memset(dst, 0xAA, sizeof(dst));
+    ASSERT_EQ_INT(bz_quest_wc3_terrain_repack_texture_tight(src, rowBytes, width, height, dst, sizeof(dst)),
+                 BZ_QUEST_WC3_TERRAIN_OK);
+    for (uint32_t y = 0; y < height; y++)
+        for (uint32_t x = 0; x < width * 4; x++) ASSERT_EQ_INT(dst[y * width * 4 + x], (uint8_t)(y * 10 + x));
+    for (uint32_t i = 0; i < sizeof(dst); i++) ASSERT(dst[i] != 0xEE);
+}
+
+static void test_repack_texture_tight_rejects_row_stride_shorter_than_width(void) {
+    const uint32_t width = 4, height = 2;
+    uint8_t src[4 * 4 * 2];
+    memset(src, 0, sizeof(src));
+    uint8_t dst[4 * 4 * 2];
+    /* rowBytes < width*4 would make the per-row copy read past the true end
+     * of a row (into the next row, or past the buffer's last row) - this
+     * must be a hard rejection, never a silent truncation or OOB read. */
+    ASSERT_EQ_INT(bz_quest_wc3_terrain_repack_texture_tight(src, width * 4 - 1, width, height, dst, sizeof(dst)),
+                 BZ_QUEST_WC3_TERRAIN_ERR_ROW_STRIDE_TOO_SHORT);
+}
+
+static void test_repack_texture_tight_rejects_undersized_destination(void) {
+    const uint32_t width = 4, height = 4;
+    uint8_t src[4 * 4 * 4];
+    memset(src, 0, sizeof(src));
+    uint8_t dst[4 * 4 * 4 - 1];
+    ASSERT_EQ_INT(bz_quest_wc3_terrain_repack_texture_tight(src, width * 4, width, height, dst, sizeof(dst)),
+                 BZ_QUEST_WC3_TERRAIN_ERR_CAPACITY);
+}
+
+static void test_repack_texture_tight_rejects_null_or_zero_dimension_arguments(void) {
+    uint8_t buf[16];
+    ASSERT_EQ_INT(bz_quest_wc3_terrain_repack_texture_tight(NULL, 16, 1, 1, buf, sizeof(buf)),
+                 BZ_QUEST_WC3_TERRAIN_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(bz_quest_wc3_terrain_repack_texture_tight(buf, 16, 1, 1, NULL, sizeof(buf)),
+                 BZ_QUEST_WC3_TERRAIN_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(bz_quest_wc3_terrain_repack_texture_tight(buf, 16, 0, 1, buf, sizeof(buf)),
+                 BZ_QUEST_WC3_TERRAIN_ERR_INVALID_ARGUMENT);
+    ASSERT_EQ_INT(bz_quest_wc3_terrain_repack_texture_tight(buf, 16, 1, 0, buf, sizeof(buf)),
+                 BZ_QUEST_WC3_TERRAIN_ERR_INVALID_ARGUMENT);
+}
+
 void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_measure_computes_scale_and_cell_size);
     RUN_TEST(test_measure_rejects_non_square_tiles);
@@ -612,4 +681,9 @@ void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_texture_budget_same_generation_reoffer_is_a_dedup_no_op);
     RUN_TEST(test_texture_budget_create_failure_is_retried_next_frame);
     RUN_TEST(test_texture_budget_generation_reset_evicts_and_allows_fresh_upload);
+    RUN_TEST(test_repack_texture_tight_passes_through_already_tight_rows);
+    RUN_TEST(test_repack_texture_tight_strips_source_row_padding);
+    RUN_TEST(test_repack_texture_tight_rejects_row_stride_shorter_than_width);
+    RUN_TEST(test_repack_texture_tight_rejects_undersized_destination);
+    RUN_TEST(test_repack_texture_tight_rejects_null_or_zero_dimension_arguments);
 }

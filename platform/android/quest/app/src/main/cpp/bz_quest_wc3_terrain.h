@@ -118,6 +118,7 @@ typedef enum {
     BZ_QUEST_WC3_TERRAIN_ERR_NO_GROUND_TEXTURES,
     BZ_QUEST_WC3_TERRAIN_ERR_CHUNK_OUT_OF_RANGE,
     BZ_QUEST_WC3_TERRAIN_ERR_CAPACITY,
+    BZ_QUEST_WC3_TERRAIN_ERR_ROW_STRIDE_TOO_SHORT,
 } bzQuestWc3TerrainStatus_t;
 
 typedef struct {
@@ -232,6 +233,17 @@ bzQuestWc3TerrainStatus_t bz_quest_wc3_terrain_build_chunk(const bzQuestWc3Terra
                                                            uint32_t chunkX, uint32_t chunkZ,
                                                            bzQuestWc3TerrainChunk_t *outChunk);
 const char *bz_quest_wc3_terrain_status_string(bzQuestWc3TerrainStatus_t status);
+/* Re-packs a possibly row-padded RGBA8 source image into a tightly-packed
+ * (rowBytes == width*4) destination buffer, one row at a time. Vulkan's
+ * vkCmdCopyBufferToImage with bufferRowLength=0 always assumes a tightly
+ * packed source, so any staging buffer fed from a row-padded producer (e.g.
+ * BLP-derived textures) must go through this before upload. Rejects
+ * srcRowBytes < width*4 (would read past the end of a row/buffer) and
+ * dstCapacity < width*4*height (would overflow the destination) rather than
+ * silently truncating or reading out of bounds. */
+bzQuestWc3TerrainStatus_t bz_quest_wc3_terrain_repack_texture_tight(
+    const uint8_t *srcPixels, uint32_t srcRowBytes, uint32_t width, uint32_t height, uint8_t *dstTight,
+    uint32_t dstCapacity);
 void bz_quest_wc3_terrain_chunk_key(const char *terrainIdentity, uint32_t chunkX, uint32_t chunkZ,
                                     char outKey[BZ_QUEST_WC3_TERRAIN_MAX_KEY]);
 bool bz_quest_wc3_terrain_key_equal(const char *a, const char *b);
