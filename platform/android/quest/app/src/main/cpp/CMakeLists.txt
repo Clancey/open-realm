@@ -244,6 +244,7 @@ add_library(bz_quest_native SHARED
     bz_quest_wc3_cache.c
     bz_quest_wc3_capture.c
     bz_quest_wc3_terrain_capture.c
+    bz_quest_wc3_anim.c
     bz_quest_vk_wc3.c
     bz_quest_vk_wc3_terrain.c
 )

@@ -50,6 +50,7 @@ test-quest-host-tests:
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wc3_render.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wc3_cache.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wc3_terrain.c \
+		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wc3_anim.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_pure.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_scene.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_data.c \
@@ -57,6 +58,7 @@ test-quest-host-tests:
 		$(BZ_QUEST_CPP_DIR)/bz_quest_wc3_render.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_wc3_cache.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_wc3_terrain.c \
+		$(BZ_QUEST_CPP_DIR)/bz_quest_wc3_anim.c \
 		-lm -o $(BZ_QUEST_HOST_TEST_BIN)
 	@$(BZ_QUEST_HOST_TEST_BIN)
 	@rm -f $(BZ_QUEST_HOST_TEST_BIN)
