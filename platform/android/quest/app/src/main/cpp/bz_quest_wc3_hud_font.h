@@ -92,7 +92,7 @@ bool bz_quest_wc3_hud_font_build_atlas(uint8_t *dst, uint32_t dstCapacity);
  * rule - see AGENTS.md) rather than the blank NUL glyph, which would render
  * as invisible, undiagnosable empty space. Returns false iff the remap
  * happened (the caller/capture layer uses this to log once per unique
- * unsupported byte value - see bz_quest_wc3_hud.c).
+ * unsupported byte value - see bz_quest_vk_wc3_hud.c).
  */
 bool bz_quest_wc3_hud_font_glyph_uv(unsigned char c, float *outU0, float *outV0, float *outU1, float *outV1);
 
@@ -105,8 +105,10 @@ bool bz_quest_wc3_hud_font_glyph_uv(unsigned char c, float *outU0, float *outV0,
  * pitch. Writes up to `cap` glyphs (cap must be <=
  * BZ_QUEST_HUD_FONT_MAX_GLYPHS_PER_RUN) into `outQuads`, sets *outCount to
  * the number written, and returns true iff every character in `text` fit
- * (false means the string was truncated at `cap` glyphs - the caller is
- * responsible for any once-per-string truncation diagnostic). Space (' ')
+ * (false means the string was truncated at `cap` glyphs - the caller,
+ * bz_quest_vk_wc3_hud.c's build_text_vertices(), is responsible for any
+ * once-per-run truncation diagnostic since this function is pure and
+ * never logs). Space (' ')
  * characters still consume advance width but write no glyph quad (nothing
  * to draw). Returns false immediately (leaving *outCount at 0) for a NULL
  * text/outQuads/outCount or non-positive scale.

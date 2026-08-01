@@ -126,6 +126,56 @@ if ! grep -q 'bzQuestVkWc3Hud_t wc3Hud;' "$RENDERER_H"; then
     FAIL=1
 fi
 
+# --- PR #24 review defect 2: create_font_atlas() must clean up every
+# partial VkImage/memory/view on failure instead of leaking it on retry
+# (see destroy_font_image()'s and create_font_atlas()'s doc comments in
+# $VK_HUD_C). Each of the function's 7 failure points after image creation
+# begins must call destroy_font_image(vkHud) before returning false, and
+# the whole file must have exactly one more call site: the unconditional
+# teardown in bz_quest_vk_wc3_hud_destroy().
+CREATE_FONT_ATLAS_BODY=$(awk '/^static bool create_font_atlas/,/^}/' "$VK_HUD_C")
+CREATE_ATLAS_CLEANUP_COUNT=$(printf '%s\n' "$CREATE_FONT_ATLAS_BODY" | grep -c 'destroy_font_image(vkHud);' || true)
+TOTAL_CLEANUP_COUNT=$(grep -c 'destroy_font_image(vkHud);' "$VK_HUD_C" || true)
+if [ "$CREATE_ATLAS_CLEANUP_COUNT" -ne 7 ]; then
+    echo "test-wc3-hud-layout: $VK_HUD_C's create_font_atlas() no longer cleans up via destroy_font_image(vkHud) at all 7 failure points (found $CREATE_ATLAS_CLEANUP_COUNT)" >&2
+    FAIL=1
+fi
+if [ "$TOTAL_CLEANUP_COUNT" -ne 8 ]; then
+    echo "test-wc3-hud-layout: $VK_HUD_C should call destroy_font_image(vkHud) exactly 8 times total (7 in create_font_atlas + 1 in bz_quest_vk_wc3_hud_destroy), found $TOTAL_CLEANUP_COUNT" >&2
+    FAIL=1
+fi
+DESTROY_DEF_LINE=$(grep -n '^static void destroy_font_image' "$VK_HUD_C" | head -n1 | cut -d: -f1)
+CREATE_ATLAS_DEF_LINE=$(grep -n '^static bool create_font_atlas' "$VK_HUD_C" | head -n1 | cut -d: -f1)
+if [ -z "$DESTROY_DEF_LINE" ] || [ -z "$CREATE_ATLAS_DEF_LINE" ] || ! [ "$DESTROY_DEF_LINE" -lt "$CREATE_ATLAS_DEF_LINE" ]; then
+    echo "test-wc3-hud-layout: $VK_HUD_C must define destroy_font_image() before create_font_atlas() so the latter can call it directly" >&2
+    FAIL=1
+fi
+
+# --- PR #24 review defect 3: build_text_vertices() must not discard
+# bz_quest_wc3_hud_font_layout_text()'s truncation signal, and must scan
+# for/log unsupported bytes via bz_quest_wc3_hud_font_glyph_uv() - both
+# routed through this file's own once-per-condition dedup helper (see
+# bz_quest_vk_wc3.c's identical convention).
+if ! grep -q 'static bool vk_hud_log_once' "$VK_HUD_C" || ! grep -q 'define VK_WC3_HUD_LOG_ONCE' "$VK_HUD_C"; then
+    echo "test-wc3-hud-layout: $VK_HUD_C no longer defines its own file-local vk_hud_log_once/VK_WC3_HUD_LOG_ONCE dedup helper" >&2
+    FAIL=1
+fi
+if grep -q 'bz_quest_wc3_hud_font_layout_text(run->text' "$VK_HUD_C" && \
+   ! grep -q 'fitEntirely = bz_quest_wc3_hud_font_layout_text(run->text' "$VK_HUD_C"; then
+    echo "test-wc3-hud-layout: $VK_HUD_C's build_text_vertices() must capture bz_quest_wc3_hud_font_layout_text()'s truncation return instead of discarding it" >&2
+    FAIL=1
+fi
+if ! grep -q 'bz_quest_wc3_hud_font_glyph_uv(uc,' "$VK_HUD_C"; then
+    echo "test-wc3-hud-layout: $VK_HUD_C's build_text_vertices() no longer scans each run's bytes via bz_quest_wc3_hud_font_glyph_uv() for unsupported-byte diagnostics" >&2
+    FAIL=1
+fi
+if ! grep -q 'VK_WC3_HUD_LOG_ONCE("hud-text-truncated"' "$VK_HUD_C" || \
+   ! grep -q 'VK_WC3_HUD_LOG_ONCE("hud-text-unsupported-byte"' "$VK_HUD_C" || \
+   ! grep -q 'VK_WC3_HUD_LOG_ONCE("hud-status-text-truncated"' "$VK_HUD_C"; then
+    echo "test-wc3-hud-layout: $VK_HUD_C must log truncated text runs, unsupported bytes, and statusTextTruncated once each via VK_WC3_HUD_LOG_ONCE" >&2
+    FAIL=1
+fi
+
 line_of() {
     grep -n "$1" "$RENDERER" | head -n1 | cut -d: -f1
 }

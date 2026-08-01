@@ -30,6 +30,36 @@ static uint32_t s_panelIndices[BZ_QUEST_VK_WC3_HUD_MAX_PANEL_INDICES];
 static bzQuestVkWc3HudTextVertex_t s_textVerts[BZ_QUEST_VK_WC3_HUD_MAX_TEXT_VERTICES];
 static uint32_t s_textIndices[BZ_QUEST_VK_WC3_HUD_MAX_TEXT_INDICES];
 
+/* This file's own copy of capture.c's/bz_quest_vk_wc3.c's log-once idiom
+ * (see either file's own copy for the same rationale) - deliberately
+ * file-local rather than shared, matching this project's existing
+ * convention of one dedup table per translation unit (each file's own
+ * diagnostics are about that file's own decisions). Used below to turn
+ * bz_quest_wc3_hud_font.h's "unsupported byte" / "truncated run" pure
+ * return signals into the promised once-per-unique-condition visible logs,
+ * since bz_quest_wc3_hud_font.c/bz_quest_wc3_hud.c are pure and never log
+ * themselves (see those files' header comments) - this impure capture
+ * layer is where that responsibility actually lives. */
+enum { BZ_QUEST_VK_WC3_HUD_MAX_LOGGED_KEYS = 256 };
+static char s_vkWc3HudLoggedKeys[BZ_QUEST_VK_WC3_HUD_MAX_LOGGED_KEYS][BZ_QUEST_WC3_MAX_IDENTITY + 32];
+static uint32_t s_vkWc3HudLoggedKeyCount;
+
+static bool vk_hud_log_once(const char *identity, const char *detail) {
+    char key[BZ_QUEST_WC3_MAX_IDENTITY + 32];
+    snprintf(key, sizeof(key), "%s|%s", identity, detail);
+    for (uint32_t i = 0; i < s_vkWc3HudLoggedKeyCount; i++)
+        if (strcmp(s_vkWc3HudLoggedKeys[i], key) == 0) return false;
+    if (s_vkWc3HudLoggedKeyCount < BZ_QUEST_VK_WC3_HUD_MAX_LOGGED_KEYS) {
+        strncpy(s_vkWc3HudLoggedKeys[s_vkWc3HudLoggedKeyCount], key, sizeof(s_vkWc3HudLoggedKeys[0]) - 1);
+        s_vkWc3HudLoggedKeyCount++;
+    }
+    return true;
+}
+#define VK_WC3_HUD_LOG_ONCE(identity, detail, ...)                                                   \
+    do {                                                                                             \
+        if (vk_hud_log_once((identity), (detail))) fprintf(stderr, __VA_ARGS__);                     \
+    } while (0)
+
 static bool find_memory_type(VkPhysicalDevice physicalDevice, uint32_t typeBits, VkMemoryPropertyFlags required,
                              uint32_t *outIndex) {
     VkPhysicalDeviceMemoryProperties props;
@@ -200,6 +230,26 @@ static bool update_descriptor_image(bzQuestVkWc3Hud_t *vkHud) {
 }
 
 /*
+ * Tears down whatever of the font image/memory/view actually got created,
+ * resetting every handle to VK_NULL_HANDLE (and haveFont to false) even if
+ * called after only a PARTIAL create_font_atlas() (see that function's
+ * comment on why every one of its failure paths below calls this instead
+ * of just `return false`) - each `if` is independent because a failure
+ * partway through image creation can leave some handles live and others
+ * still VK_NULL_HANDLE. Also the ordinary full-teardown path from
+ * bz_quest_vk_wc3_hud_destroy().
+ */
+static void destroy_font_image(bzQuestVkWc3Hud_t *vkHud) {
+    if (vkHud->fontImageView != VK_NULL_HANDLE) vkDestroyImageView(vkHud->vk->device, vkHud->fontImageView, NULL);
+    if (vkHud->fontImage != VK_NULL_HANDLE) vkDestroyImage(vkHud->vk->device, vkHud->fontImage, NULL);
+    if (vkHud->fontImageMemory != VK_NULL_HANDLE) vkFreeMemory(vkHud->vk->device, vkHud->fontImageMemory, NULL);
+    vkHud->fontImageView = VK_NULL_HANDLE;
+    vkHud->fontImage = VK_NULL_HANDLE;
+    vkHud->fontImageMemory = VK_NULL_HANDLE;
+    vkHud->haveFont = false;
+}
+
+/*
  * Creates the font atlas image/view and uploads its one, fixed pixel
  * content (bz_quest_wc3_hud_font_build_atlas() - a pure, deterministic
  * build-time asset, never per-frame game state). Called once at
@@ -211,6 +261,18 @@ static bool update_descriptor_image(bzQuestVkWc3Hud_t *vkHud) {
  * log already dedups identical repeated lines at the OS level; this is the
  * one-time, not per-frame-successful, code path so it cannot spam either
  * way).
+ *
+ * Every step below writes DIRECTLY into vkHud->fontImage/fontImageMemory/
+ * fontImageView (one owner, never a shadow set of locals committed only on
+ * success) - so on ANY failure past vkCreateImage, this function calls
+ * destroy_font_image() before returning false, tearing down exactly
+ * whatever got created and resetting every handle to VK_NULL_HANDLE. Without
+ * this, a mid-sequence failure (e.g. vkAllocateMemory out of device
+ * memory) would leave `vkHud->fontImage` pointing at a real, still-alive
+ * VkImage while `haveFont` stays false - the NEXT frame's retry would then
+ * call vkCreateImage again and overwrite that handle, leaking the image
+ * (and its bound memory, if allocation had gotten that far) every single
+ * frame until the retry eventually succeeds or the process exits.
  */
 static bool create_font_atlas(bzQuestVkWc3Hud_t *vkHud) {
     if (vkHud->haveFont) return true;
@@ -244,24 +306,29 @@ static bool create_font_atlas(bzQuestVkWc3Hud_t *vkHud) {
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(vkHud->vk->device, &imageInfo, NULL, &vkHud->fontImage) != VK_SUCCESS) {
         BZ_QUEST_LOGE("bz_quest_vk_wc3_hud: vkCreateImage (font) failed");
+        destroy_font_image(vkHud);
         return false;
     }
     VkMemoryRequirements memReq;
     vkGetImageMemoryRequirements(vkHud->vk->device, vkHud->fontImage, &memReq);
     uint32_t memoryTypeIndex = 0;
     if (!find_memory_type(vkHud->vk->physicalDevice, memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                          &memoryTypeIndex))
+                          &memoryTypeIndex)) {
+        destroy_font_image(vkHud);
         return false;
+    }
     VkMemoryAllocateInfo allocInfo = {0};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memReq.size;
     allocInfo.memoryTypeIndex = memoryTypeIndex;
     if (vkAllocateMemory(vkHud->vk->device, &allocInfo, NULL, &vkHud->fontImageMemory) != VK_SUCCESS) {
         BZ_QUEST_LOGE("bz_quest_vk_wc3_hud: vkAllocateMemory (font image) failed");
+        destroy_font_image(vkHud);
         return false;
     }
     if (vkBindImageMemory(vkHud->vk->device, vkHud->fontImage, vkHud->fontImageMemory, 0) != VK_SUCCESS) {
         BZ_QUEST_LOGE("bz_quest_vk_wc3_hud: vkBindImageMemory (font) failed");
+        destroy_font_image(vkHud);
         return false;
     }
     VkImageViewCreateInfo viewInfo = {0};
@@ -274,12 +341,19 @@ static bool create_font_atlas(bzQuestVkWc3Hud_t *vkHud) {
     viewInfo.subresourceRange.layerCount = 1;
     if (vkCreateImageView(vkHud->vk->device, &viewInfo, NULL, &vkHud->fontImageView) != VK_SUCCESS) {
         BZ_QUEST_LOGE("bz_quest_vk_wc3_hud: vkCreateImageView (font) failed");
+        destroy_font_image(vkHud);
         return false;
     }
-    if (!update_descriptor_image(vkHud)) return false;
+    if (!update_descriptor_image(vkHud)) {
+        destroy_font_image(vkHud);
+        return false;
+    }
 
     FontUploadCtx_t ctx = {vkHud};
-    if (!run_one_time_upload(vkHud, record_font_upload, &ctx)) return false;
+    if (!run_one_time_upload(vkHud, record_font_upload, &ctx)) {
+        destroy_font_image(vkHud);
+        return false;
+    }
     vkHud->haveFont = true;
     return true;
 }
@@ -678,8 +752,37 @@ static uint32_t build_text_vertices(const bzQuestHudFrame_t *frame, bzQuestVkWc3
     for (uint32_t r = 0; r < frame->textCount; r++) {
         const bzQuestHudTextRun_t *run = &frame->texts[r];
         uint32_t glyphCount = 0;
-        bz_quest_wc3_hud_font_layout_text(run->text, run->x, run->y, run->scale, glyphs,
-                                          BZ_QUEST_VK_WC3_HUD_MAX_GLYPHS_PER_RUN, &glyphCount);
+        bool fitEntirely = bz_quest_wc3_hud_font_layout_text(run->text, run->x, run->y, run->scale, glyphs,
+                                                             BZ_QUEST_VK_WC3_HUD_MAX_GLYPHS_PER_RUN, &glyphCount);
+        if (!fitEntirely) {
+            /* Keyed by slot index r (not the text content, which changes
+             * every frame for e.g. the resource line) so a persistently-
+             * truncated run logs exactly once for its lifetime rather than
+             * spamming once per differing string - see this function's
+             * header comment and BZ_QUEST_HUD_MAX_STATUS_TEXT's comment
+             * for why this is expected to be unreachable today. */
+            char slot[16];
+            snprintf(slot, sizeof(slot), "%u", r);
+            VK_WC3_HUD_LOG_ONCE("hud-text-truncated", slot,
+                                 "bz_quest_vk_wc3_hud: text run %u truncated at %u glyphs (BZ_QUEST_VK_WC3_HUD_MAX_GLYPHS_PER_RUN)\n",
+                                 r, BZ_QUEST_VK_WC3_HUD_MAX_GLYPHS_PER_RUN);
+        }
+        /* Independently scan the run's raw bytes for unsupported (non-7-bit-
+         * ASCII) characters that bz_quest_wc3_hud_font_glyph_uv() already
+         * silently remaps to '?' for rendering (see that function's doc
+         * comment) - logged once per unique byte VALUE (not per run/slot,
+         * since the same unsupported byte recurring across many frames/runs
+         * is one diagnosable fact, not many). */
+        for (const char *p = run->text; *p; p++) {
+            unsigned char uc = (unsigned char)*p;
+            float u0, v0, u1, v1;
+            if (!bz_quest_wc3_hud_font_glyph_uv(uc, &u0, &v0, &u1, &v1)) {
+                char byteKey[8];
+                snprintf(byteKey, sizeof(byteKey), "%u", uc);
+                VK_WC3_HUD_LOG_ONCE("hud-text-unsupported-byte", byteKey,
+                                     "bz_quest_vk_wc3_hud: unsupported byte 0x%02x in HUD text, rendering as '?'\n", uc);
+            }
+        }
         for (uint32_t g = 0; g < glyphCount; g++) {
             if (vc + 4 > BZ_QUEST_VK_WC3_HUD_MAX_TEXT_VERTICES) break;
             const bzQuestHudGlyphQuad_t *gq = &glyphs[g];
@@ -718,6 +821,15 @@ void bz_quest_vk_wc3_hud_capture_and_upload(bzQuestVkWc3Hud_t *vkHud) {
     }
     bz_quest_wc3_hud_build(vkHud->input, vkHud->frame);
     vkHud->haveFrame = true;
+    if (vkHud->frame->statusTextTruncated) {
+        /* Fixed key: this is a single boolean condition (not per-value),
+         * so it logs at most once for this vkHud's lifetime, the first
+         * frame it is ever observed - see bzQuestHudFrame_t.
+         * statusTextTruncated's comment for why this should be
+         * unreachable given today's field sizes. */
+        VK_WC3_HUD_LOG_ONCE("hud-status-text-truncated", "",
+                             "bz_quest_vk_wc3_hud: status/resource text truncated - displayed values may be incomplete\n");
+    }
 
     uint32_t panelIndexCount = 0;
     uint32_t panelVertexCount = build_panel_vertices(vkHud->frame, s_panelVerts, s_panelIndices, &panelIndexCount);
@@ -786,16 +898,6 @@ void bz_quest_vk_wc3_hud_record(bzQuestVkWc3Hud_t *vkHud, VkCommandBuffer cmd, c
         vkCmdPushConstants(cmd, vkHud->textPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
         vkCmdDrawIndexed(cmd, vkHud->textIndexCount, 1, 0, 0, 0);
     }
-}
-
-static void destroy_font_image(bzQuestVkWc3Hud_t *vkHud) {
-    if (vkHud->fontImageView != VK_NULL_HANDLE) vkDestroyImageView(vkHud->vk->device, vkHud->fontImageView, NULL);
-    if (vkHud->fontImage != VK_NULL_HANDLE) vkDestroyImage(vkHud->vk->device, vkHud->fontImage, NULL);
-    if (vkHud->fontImageMemory != VK_NULL_HANDLE) vkFreeMemory(vkHud->vk->device, vkHud->fontImageMemory, NULL);
-    vkHud->fontImageView = VK_NULL_HANDLE;
-    vkHud->fontImage = VK_NULL_HANDLE;
-    vkHud->fontImageMemory = VK_NULL_HANDLE;
-    vkHud->haveFont = false;
 }
 
 static void destroy_mapped_buffer(bzQuestVkWc3Hud_t *vkHud, VkBuffer *buffer, VkDeviceMemory *memory,
