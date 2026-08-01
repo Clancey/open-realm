@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Meta Quest (Android/NDK + Khronos OpenXR) tabletop native shell — Layer 3.
+# Meta Quest (Android/NDK + Khronos OpenXR) tabletop native shell — Layer 4.
 #
 # Thin wrapper targets only: the real build is Gradle/CMake-driven (see
 # platform/android/quest/app/build.gradle and
@@ -32,17 +32,37 @@ test-quest-source-sync:
 # `make test`, unlike the Gradle/NDK-dependent targets below.
 .PHONY: test-quest-host-tests
 test-quest-host-tests:
-	@$(CC) -Wall -Wextra -std=c11 -I$(BZ_QUEST_CPP_DIR) -I$(BZ_QUEST_TESTS_DIR) -Itests \
+	@$(CC) -Wall -Wextra -std=c11 -I. -I$(BZ_QUEST_CPP_DIR) -I$(BZ_QUEST_TESTS_DIR) -Itests \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_pure_main.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_pure.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_scene.c \
+		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_data.c \
+		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_frame.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_pure.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_scene.c \
+		$(BZ_QUEST_CPP_DIR)/bz_quest_data.c \
+		$(BZ_QUEST_CPP_DIR)/bz_quest_frame.c \
 		-lm -o $(BZ_QUEST_HOST_TEST_BIN)
 	@$(BZ_QUEST_HOST_TEST_BIN)
 	@rm -f $(BZ_QUEST_HOST_TEST_BIN)
 
-test: test-quest-source-sync test-quest-host-tests
+# Host-native coverage for bz_quest_bridge.c, the Quest lifecycle adapter
+# (layer 4). Kept as its own test_schema target (rather than folded into
+# test-quest-host-tests above) because - unlike bz_quest_pure/scene/data/
+# frame's pure math/path helpers - this module links directly against the
+# REAL platform/tabletop/bridge/bz_tabletop_lifecycle.c plus the lightweight
+# common/bz_runtime.c stub set and the shared/sheet libs those pull in (file
+# system + config load), exactly mirroring games/warcraft-3/tests/
+# test_bz_tabletop_lifecycle.c's own technique (see that file's header
+# comment and bz_quest_bridge.h's). Depends on test-assets: its
+# "running"-path tests stage an ADB-style override file pointing at
+# build/tests' real tests.mpq fixture (see bz_quest_data.h's data-path
+# contract) so bz_quest_bridge_start() exercises the REAL
+# BZ_TabletopCreate()/Start() success path, not just its failure paths.
+.PHONY: test-quest-bridge
+$(eval $(call test_schema,test-quest-bridge,test-assets $(SHARED_LIB) $(SHEET_LIB),$(CFLAGS) -I$(BZ_QUEST_CPP_DIR) -Iplatform/tabletop/bridge -Iserver -Iclient -Igames/warcraft-3 -I$(BZ_QUEST_TESTS_DIR) -Itests,$(BIN_DIR)/test_bz_quest_bridge$(EXE_EXT),$(BZ_QUEST_TESTS_DIR)/test_bz_quest_bridge_main.c $(BZ_QUEST_TESTS_DIR)/test_bz_quest_bridge.c $(BZ_QUEST_CPP_DIR)/bz_quest_data.c $(BZ_QUEST_CPP_DIR)/bz_quest_bridge.c platform/tabletop/bridge/bz_tabletop_lifecycle.c common/bz_runtime.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz -lpthread,))
+
+test: test-quest-source-sync test-quest-host-tests test-quest-bridge
 
 # Assembles the unsigned arm64-v8a debug APK via the project's own Gradle
 # wrapper. Requires an installed Android SDK/NDK (see docs/quest-tabletop.md)

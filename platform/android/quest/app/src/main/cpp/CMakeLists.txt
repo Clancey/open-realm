@@ -231,9 +231,17 @@ add_library(bz_quest_native SHARED
     bz_quest_vk.c
     bz_quest_passthrough.c
     bz_quest_renderer.c
+    bz_quest_data.c
+    bz_quest_frame.c
+    bz_quest_snapshot.c
+    bz_quest_bridge.c
 )
 add_dependencies(bz_quest_native bz_quest_shaders)
-target_compile_definitions(bz_quest_native PRIVATE BZ_QUEST_ENABLE_VULKAN_RENDERER=1)
+target_compile_definitions(bz_quest_native PRIVATE
+    BZ_QUEST_ENABLE_VULKAN_RENDERER=1
+    BZ_QUEST_ENABLE_ENGINE_START=1
+    BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS=1
+)
 target_include_directories(bz_quest_native PRIVATE
     "${BZ_REPO_ROOT}"
     "${BZ_SHADER_OUT_DIR}"

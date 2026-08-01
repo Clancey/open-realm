@@ -15,6 +15,8 @@ int _tests_failed = 0;
 
 void run_bz_quest_pure_tests(void);
 void run_bz_quest_scene_tests(void);
+void run_bz_quest_data_tests(void);
+void run_bz_quest_frame_tests(void);
 
 int main(void) {
     printf("=== OpenRealm Quest Pure Helper Tests ===\n\n");
@@ -25,6 +27,14 @@ int main(void) {
 
     printf("[bz_quest_scene]\n");
     run_bz_quest_scene_tests();
+    printf("\n");
+
+    printf("[bz_quest_data]\n");
+    run_bz_quest_data_tests();
+    printf("\n");
+
+    printf("[bz_quest_frame]\n");
+    run_bz_quest_frame_tests();
     printf("\n");
 
     TEST_RESULTS();
