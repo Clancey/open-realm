@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E
 
-This document tracks layers 5A/5B/5C/5D of a stacked Meta Quest port:
+This document tracks layers 5A/5B/5C/5D/5E of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -45,25 +45,38 @@ This document tracks layers 5A/5B/5C/5D of a stacked Meta Quest port:
   doodad needs. See
   "[Layer 5C: Warcraft III model animation](#layer-5c-warcraft-iii-model-animation-bz_quest_wc3_anim-bz_quest_wc3_capturec-bz_quest_vk_wc3c)"
   below for full scope, ABI decision, ownership, and evidence.
-- **Layer 5D (this layer, `clancey-quest-fog-selection-overlay`)**: adds
+- **Layer 5D (`clancey-quest-fog-selection-overlay`)**: adds
   authoritative Warcraft III **fog-of-war visibility/exploration** compositing
   plus **selection marker overlays** on top of 5B/5C's terrain+model pass,
   reusing only snapshot state already present in `bz_tabletop_transport.h` and
   asset metadata already present in `bz_tabletop_assets.h`. See
   "[Layer 5D: Warcraft III fog-of-war + selection overlays](#layer-5d-warcraft-iii-fog-of-war--selection-overlays-bz_quest_wc3_fogh-bz_quest_vk_wc3_fogc)"
   below for full scope, ownership, and evidence.
+- **Layer 5E (this layer, `clancey-quest-hud-command-card-5e`)**: adds
+  authoritative Warcraft III **status/command-card HUD** presentation on top
+  of 5D's terrain+model+fog+selection pass: a pure, host-testable layout/
+  hit-region contract (`bz_quest_wc3_hud.h`/`.c`) built from the same
+  `bzTTActionLayout_t`/`bzTTPlayer_t` transport fields the command-card/
+  status UI has always exposed, a project-owned deterministic bitmap-font
+  atlas (`bz_quest_wc3_hud_font.h`/`.c`), and Quest-local Vulkan GPU ownership
+  for the two small pipelines that render it
+  (`bz_quest_vk_wc3_hud.h`/`.c`). Presentation only - see
+  "[Layer 5E: Warcraft III status/command-card HUD](#layer-5e-warcraft-iii-statuscommand-card-hud-bz_quest_wc3_hudh-bz_quest_vk_wc3_hudc)"
+  below for full scope, ownership, and evidence.
 
-**These layers now render fog of war and per-entity selection markers, but
-still do not render particles/effects or command-card/HUD surfaces, and still
-do not poll gameplay input, play audio, or stage WC3 data onto the device.**
+**These layers now render fog of war, per-entity selection markers, and a
+status/command-card HUD, but still do not render particles/effects, still do
+not poll gameplay input or post any tabletop command, and still do not play
+audio or stage WC3 data onto the device.**
 See
 [Current limitations](#current-limitations) and
 `bz_quest_host.c`'s compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by
 a `#error` until its real implementation lands) — `BZ_QUEST_ENABLE_ENGINE_START`
 and `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` were layer 4's two seams;
 `BZ_QUEST_ENABLE_WC3_RENDERER` is the one seam *layer 5A* replaces with a
-real implementation (`BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`, and
-`BZ_QUEST_ENABLE_DATA_STAGING` remain `#error`-gated for a later layer).
+real implementation (layer 5E's HUD renders under this same seam - it adds no
+new one); `BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`, and
+`BZ_QUEST_ENABLE_DATA_STAGING` remain `#error`-gated for a later layer.
 
 ## Architecture boundary
 
@@ -2130,6 +2143,243 @@ verified with a real loaded Warcraft III map in this environment:
   an on-device visual acceptance run, and **not** proof against retail ROC/TFT
   map data.
 
+## Layer 5E: Warcraft III status/command-card HUD (`bz_quest_wc3_hud.h`/`bz_quest_vk_wc3_hud.c`)
+
+Layer 5E adds one presentation feature on top of 5B/5C/5D's existing
+terrain+model+fog+selection renderer: an authoritative status/command-card
+HUD panel. It does **not** consume OpenXR controller/hand input, does **not**
+post any tabletop command, and does **not** add particles/effects, audio,
+data staging, or hand tracking - the exported hit-test contract exists for a
+later input layer to call, but this layer never calls it itself.
+
+### Authority: traced field-by-field against the ABI and visionOS, not assumed
+
+The task asked for "selected unit info, health/mana/portrait/icon, resources/
+status, target mode, enabled/disabled/hidden states, hotkeys/tooltips, and
+loading/error state." Every one of those was traced concretely against
+`platform/bridge/bz_tabletop_transport.h` and the reviewed visionOS reference
+(`RealityTabletopView.swift`/`TabletopControls.swift`) - see
+`bz_quest_wc3_hud.h`'s header comment for the full per-field trace. In short:
+
+- **Health/mana/portrait: NOT IMPLEMENTED.** `bzTTEntity_t` has no health/
+  mana field of any kind (every field checked), and there is no ABI portrait
+  accessor - portraits are a desktop-local 3D render with no transport
+  representation. This is not a gap this layer left; there is nothing in the
+  ABI to trace.
+- **Icon art: rendered as a flat, state-tinted placeholder, never a
+  fabricated texture.** `bzTTActionButton_t.image_index` is `frame->tex.index`
+  (`bz_tabletop_transport.c`'s `BuildActionButton()`, confirmed via
+  `git blame`) - a desktop-client-local UI texture-registry handle, not a
+  configstring/catalog index the asset ABI can resolve to pixel data. The
+  visionOS reference itself never renders this field as an image either
+  (only tooltip text/cooldown) - matching that precedent and layer 5D's
+  "target mode has no location, so nothing is drawn" treatment of an
+  equally unresolvable field.
+- **Resources/status: fully supported**, going slightly beyond visionOS's own
+  rendered surface (which decodes but never actually displays gold/lumber/
+  food) while staying strictly inside the ABI's real, authoritative
+  `bzTTPlayer_t` fields - not fabrication, just rendering data visionOS
+  itself leaves undisplayed.
+- **Selected unit info**: the ABI carries no per-entity name/type to show;
+  the status bar shows the selection **count** from
+  `BZ_TTSnapshot_SelectedEntityIds()`, nothing more.
+- **Target mode, enabled/disabled/hidden, hotkeys/tooltips**: fully present
+  on `bzTTActionLayout_t`/`bzTTActionButton_t` and fully implemented.
+- **Loading/error state**: no player snapshot this frame renders a distinct
+  "no player data" status line; a non-`NONE` `game_result` renders a distinct
+  end-of-game line - both real ABI-derived states, not placeholders.
+
+No transport ABI field or version changed for this layer - `bz_tabletop_transport.h`
+stays exactly as it was after layer 5D.
+
+### Authoritative HUD state flow
+
+1. `bz_quest_wc3_capture.c`'s new `bz_quest_wc3_capture_hud()` does its own
+   independent `BZ_TT_Latest()`/retain/copy/release cycle (matching every
+   other capture function in this file), copies `frameId` from
+   `BZ_TTSnapshot_Generation()`, the player resource/status fields, the
+   selected-entity count, and the action layout's buttons (clamped to
+   `BZ_QUEST_HUD_MAX_BUTTONS = 12`, matching `BZ_TT_MAX_COMMAND_BUTTONS`
+   exactly - cross-checked with four `_Static_assert`s against the real ABI
+   enums/constants). It logs once per unique `image_index` that icon pixel
+   data cannot be resolved (see above) - never silently drops or substitutes
+   a different action.
+2. `bz_quest_wc3_hud.c` is the pure, host-testable layout module (no
+   transport/Vulkan/Android/OpenXR type anywhere in it). `bz_quest_wc3_hud_build()`
+   builds a `bzQuestHudFrame_t` deterministically from a `bzQuestHudInput_t`
+   POD copy: a fixed panel transform, status/command-card background quads,
+   one flat state-tinted quad per visible button slot, text runs for every
+   label/cooldown/status line, and one hit region per non-hidden button plus
+   a synthetic Cancel region whenever `currentTarget != NONE` - mirroring
+   `RealityTabletopView.swift:837-878`'s exact rules (hidden buttons filtered
+   entirely, row-major `(gridY, gridX)` sort into a fixed
+   `BZ_QUEST_HUD_GRID_COLUMNS = 4` grid, an unconditional Cancel slot bound
+   to a stable `CANCEL` action identity, not tied to any `buttons[]` slot).
+3. `bz_quest_wc3_hud_hit_test(frame, currentFrameId, rayOrigin, rayDir, &outAction)`
+   projects a world-space ray onto the panel's plane, converts to panel-local
+   `(x,y)`, and returns the first hit region containing that point -
+   rejecting stale `frameId`s, parallel rays, and behind-origin
+   intersections. It reports a disabled hit's action identity too (hit-
+   testing and command validation are deliberately separate, matching
+   `TabletopControls.swift`'s own split) but is never called by this layer
+   itself - it exists purely as the contract a later input layer consumes.
+4. `bz_quest_vk_wc3_hud.c` is the impure Vulkan module: it calls
+   `bz_quest_wc3_capture_hud()` + `bz_quest_wc3_hud_build()` once per
+   renderable frame, expands the resulting quads/text runs into GPU vertex/
+   index arrays (text runs go through `bz_quest_wc3_hud_font_layout_text()`
+   at this step, not inside the pure layout module - see "Font atlas" below),
+   and re-uploads only the buffers whose bytes actually changed (a direct
+   `memcmp` against the persistently-mapped GPU buffer's own current
+   content, not a separate host shadow array).
+
+### Panel placement, scale, and readability
+
+`bz_quest_wc3_hud_panel_transform()` returns a **fixed, deterministic,
+map-size-independent** placement: anchored just outside the diorama's
+conservative maximum half-extent (`BZ_QUEST_WC3_WORLD_TARGET_SPAN_F / 2`,
+`bz_quest_wc3_render.h` - exposed from `bz_quest_wc3_render.c`'s private
+`#define` specifically so this module never duplicates the `1.08` literal),
+on the +X side, at a small height above the table, tilted back slightly for
+overhead readability - the same translate+rotate composition style
+`bz_quest_wc3_build_world_matrix()` uses for entities, but with a **fixed**
+scale (never map→diorama scaled), matching this task's "stable scale/
+readability" requirement. It never depends on a per-frame world transform
+succeeding, so the panel has a well-defined position even in a loading/error/
+no-map-loaded state.
+
+### Font atlas: reused, project-owned, deterministic (no opaque binary)
+
+`share/fonts/fixed_8x13.h` is an existing, source-committed, public-domain
+(X11 misc-fixed `8x13.bdf`) bitmap font already vendored for the desktop
+sysfont. `bz_quest_wc3_hud_font.c` packs that same font's 128 ASCII glyphs
+into one small `VK_FORMAT_R8_UNORM` atlas via a pure, host-testable function
+- reusing an existing project asset rather than shipping a second opaque
+generated binary or taking on a platform text-rendering library dependency
+(which would violate the UI module boundary - see AGENTS.md). The LSB-left
+bit convention was verified concretely against the asymmetric `'F'` glyph
+(not assumed) - see that file's header comment. Any byte outside 7-bit ASCII
+remaps to `'?'` (a visibly-present "unsupported character" glyph, never
+invisible blank space), and the capture layer logs once per unique
+unsupported byte.
+
+### GPU representation, ownership, and draw order
+
+- Two pipelines, matching layer 5D's fog/marker split: "panel" (flat-tint
+  quads: status/command backgrounds, per-button placeholder slots) and
+  "text" (glyph-textured quads sampling the one font atlas). Both use
+  `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` (indexed quads, not the fog overlay's
+  strip), `VK_CULL_MODE_NONE` (the panel's right/down/normal basis has no
+  guaranteed winding), and are depth-tested but depth-write-disabled -
+  readable over the board without ever occluding a later draw, the same
+  rationale as layer 5D's selection markers.
+- Both pipelines take a single vertex-stage push constant,
+  `bzQuestVkWc3HudPushConsts_t{mat4 mvp}` (`viewProj * panelWorldMatrix`,
+  built once per `bz_quest_vk_wc3_hud_record()` call and shared by both draw
+  calls) - vertex positions stay in simple panel-local `(x,y,0)`, with the
+  world transform applied entirely in the vertex shader, mirroring layer
+  5D's `MarkerPushConsts_t.mvp` precedent.
+- The font atlas texture is created once and, on failure, retried every
+  frame via an idempotent guard (`if (vkHud->haveFont) return true;`) rather
+  than being treated as fatal - satisfying "pending resources retry without
+  repeated ABI pixel copies or log spam" (the retry only re-runs the cheap,
+  deterministic atlas-pixel build, and failure is logged once via
+  `BZ_QUEST_LOGE`, not per-frame).
+- Both dynamic vertex/index buffers (panel and text) are
+  `HOST_VISIBLE|HOST_COHERENT` and mapped exactly once for the module's whole
+  lifetime - the same single-buffered-per-frame discipline
+  `bz_quest_vk_wc3.c`'s bone-palette UBO already relies on (this project's
+  existing single in-flight-frame model; `bz_quest_renderer_render_warcraft_target()`
+  waits on the previous frame's fence before this module's
+  `capture_and_upload()` runs again, so there is never a write into a buffer
+  the GPU may still be reading).
+- The shared eye render pass order is now: terrain opaque → model opaque →
+  terrain blended → model blended → fog overlay → selection markers → **HUD**.
+  The HUD renders **last of all** world/overlay draws so the bridge-
+  authored status/command-card panel is always legible on top of the fogged,
+  selection-marked board - matching visionOS's own overlay-panel placement.
+- The renderer's "is there anything to draw this frame" gate
+  (`bz_quest_renderer.c`'s per-eye branch) now also checks
+  `bz_quest_vk_wc3_hud_has_frame()`, so the HUD still renders on a frame with
+  a connected bridge snapshot but no selection/models yet (an empty-board,
+  no-selection state) instead of silently falling back to the procedural
+  diagnostic scene only because no other WC3 content exists yet.
+
+### Supported vs. unsupported HUD behavior
+
+| Behavior | Status |
+|---|---|
+| Status bar: player name, gold/lumber/food used/cap, hero tokens | Supported |
+| Selected-entity count | Supported (count only - no per-entity name/health/mana; see "Authority" above) |
+| Game-result (victory/defeat/draw) status line | Supported |
+| Loading/no-player-snapshot status line | Supported |
+| Command-card grid: row-major `(gridY, gridX)` sort, fixed 4-column layout, hidden slots filtered entirely | Supported |
+| Disabled buttons: shown (distinct tint), not enabled, hit-testable but not actionable | Supported |
+| Unsupported/`UNSUPPORTED` semantic buttons: treated as disabled, never fabricated as a real command | Supported |
+| Synthetic Cancel region when `currentTarget != NONE` | Supported |
+| Hotkey/tooltip/cooldown text | Supported |
+| Icon art (`image_index`) | **Not implemented.** No ABI path resolves this desktop-local UI texture handle to pixel data - rendered as a flat, state-tinted placeholder quad instead of a fabricated icon (see "Authority" above). |
+| Health/mana/portrait | **Not implemented.** No ABI field/accessor exists for either (see "Authority" above). |
+| Panel world placement, stable fixed scale independent of map size | Supported |
+| Ray/plane hit-test with stable action identity (`gridX,gridY,semantic,actionCode`) | Supported (exported contract only - never invoked by this layer) |
+| Posting a command / consuming OpenXR controller-hand input | **Out of scope for this layer** - a later input layer's job. |
+
+### Tests and build wiring
+
+- `platform/android/quest/tests/test_bz_quest_wc3_hud_font.c` covers the
+  verified glyph bit convention, atlas-build undersized-buffer rejection,
+  UV lookup for a known glyph, the `'?'` unsupported-byte fallback, and
+  text-layout truncation/space-advance/null-argument-rejection behavior.
+- `platform/android/quest/tests/test_bz_quest_wc3_hud.c` covers the panel
+  transform's determinism, no-player/loading status, resource/status-line
+  formatting, game-result lines, command-card presence/absence rules,
+  row-major sort, hidden-slot exclusion, disabled/unsupported-semantic
+  handling, overlapping-grid-slot distinctness, cancel-region presence/
+  absence, statelessness across successive different-input calls (map
+  reload), and hit-test coverage: stale frame ID rejection, center/edge/
+  outside hits, parallel-ray and behind-origin rejection, and disabled-slot
+  hits still being reported.
+- `platform/android/quest/scripts/test-wc3-hud-layout.sh` (wired into
+  `make test`/`make quest` as `test-quest-wc3-hud-layout`) structurally
+  guards the four new shaders' build-shaders.sh/CMakeLists.txt wiring, the
+  font atlas's `VK_FORMAT_R8_UNORM` image/view format, the text shader's
+  `set 0 binding 0` sampler, both pipelines' depth-test/depth-write/cull-
+  mode/topology flags, the single vertex-only `mvp` push constant on both
+  pipelines, and the fog overlay → selection markers → HUD render-pass
+  ordering in `bz_quest_renderer.c`.
+- `platform/android/quest/build.mk`'s `test-quest-host-tests` target now
+  builds `bz_quest_wc3_hud_font.c`/`bz_quest_wc3_hud.c` and their test files
+  alongside the earlier pure Quest modules - **4462/4462 assertions pass**.
+- The shader build pipeline (`build-shaders.sh`/`CMakeLists.txt`) now
+  regenerates the four new `warcraft_hud_panel_*`/`warcraft_hud_text_*`
+  SPIR-V headers automatically, and `CMakeLists.txt`'s `bz_quest_native`
+  source list includes the three new `.c` files.
+
+### Acceptance gates
+
+This layer was **not** verified on a physical Quest device and was **not**
+verified with a real loaded Warcraft III map in this environment:
+
+- `bz_quest_host.c` still calls `bz_quest_bridge_start(..., NULL)`, so no map
+  is selected at process start; the transport can therefore remain in the
+  "no player snapshot yet" state here even though the renderer path now
+  exists (this layer's own "no player data" loading status line is exactly
+  the codepath exercised in that state).
+- No physical Quest device was connected, so there was no human visual check
+  of real HUD placement/readability, text legibility, or hit-test alignment
+  against a real command-card layout.
+- A real arm64-v8a debug APK **was** assembled in this environment via the
+  project's Gradle/CMake build (`make quest-assemble-debug`) - confirmed via
+  `quest-verify-native-lib` (arm64-v8a-only, no SDL2/desktop-GL/Apple-ObjC/
+  VrApi dependency, no desktop `main()`, NativeActivity entry points intact)
+  and by inspecting the built `.so` for this layer's new exported symbols
+  (`bz_quest_vk_wc3_hud_create`/`capture_and_upload`/`record`/`destroy`,
+  present and linked). This proves the new Vulkan module and shaders compile
+  and link for the real target - it is **not** a substitute for an on-device
+  visual acceptance run, and **not** proof against retail ROC/TFT map data.
+- Verification for this slice therefore combines host tests, structural
+  source checks, and the real native APK build/dependency inspection above -
+  never claimed as an on-device visual success.
+
 ## Manifest requirements
 
 Unchanged from layer 2: `AndroidManifest.xml`'s NativeActivity metadata,
@@ -2171,12 +2421,12 @@ optional:
   fallback is explicit, not silent" above) — this was never observed
   rendering real Warcraft geometry on a live snapshot in this environment
   (see "Hardware/data-only acceptance procedure" below).
-- Terrain (layer 5B), model animation (layer 5C), fog of war, and per-entity
-  selection markers (layer 5D) are now all present; particles/effects,
-  command-card/HUD surfaces, and any renderable player target-point/entity
-  overlay are still out of scope — see the layer sections above for the exact,
-  deliberate boundaries and the evidence for the "target mode has no location"
-  no-op.
+- Terrain (layer 5B), model animation (layer 5C), fog of war, per-entity
+  selection markers (layer 5D), and the status/command-card HUD (layer 5E)
+  are now all present; particles/effects and any renderable player
+  target-point/entity overlay are still out of scope — see the layer
+  sections above for the exact, deliberate boundaries and the evidence for
+  the "target mode has no location" no-op.
 - No lighting model at all (fully unlit shader) — see "Shader/pipeline"
   above for why this was a deliberate scope decision, not a bug.
 - `replaceable_id 0` (direct/non-team), `1` (team color), and `2` (team
@@ -2508,6 +2758,18 @@ device.
   reference implementation this layer's coordinate/scale conversion in
   `bz_quest_wc3_render.c` matches; exact file+line citations are given in
   "Layer 5A: static Warcraft III model rendering" above.
+- `RealityTabletopView.swift`'s `TabletopActionPanel` and
+  `TabletopControls.swift`'s `TabletopActionButtonSnapshot` (under
+  `platform/apple/visionos/tabletop/app/`) — the reviewed visionOS reference
+  layer 5E's command-card grid rules (hidden-slot filtering, row-major sort,
+  fixed 4-column grid, unconditional Cancel slot, stable action identity
+  tuple) and icon/portrait/health/mana non-goals are traced against; see
+  "Layer 5E: Warcraft III status/command-card HUD" above for the exact
+  citations.
+- `share/fonts/fixed_8x13.h` — the existing, source-committed, public-domain
+  (X11 misc-fixed `8x13.bdf`) bitmap font layer 5E's `bz_quest_wc3_hud_font.c`
+  packs into a project-owned Vulkan texture atlas, reused rather than
+  fabricating a second opaque generated binary asset.
 - Khronos OpenXR Android loader:
   <https://github.com/KhronosGroup/OpenXR-SDK-Source> (`src/tests/hello_xr`
   for the reference loader-init/instance/session/Vulkan-interop sequence),

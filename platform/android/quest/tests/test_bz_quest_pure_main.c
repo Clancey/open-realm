@@ -23,6 +23,8 @@ void run_bz_quest_wc3_terrain_tests(void);
 void run_bz_quest_wc3_anim_tests(void);
 void run_bz_quest_wc3_fog_tests(void);
 void run_bz_quest_wc3_world_transform_tests(void);
+void run_bz_quest_wc3_hud_font_tests(void);
+void run_bz_quest_wc3_hud_tests(void);
 
 int main(void) {
     printf("=== OpenRealm Quest Pure Helper Tests ===\n\n");
@@ -65,6 +67,14 @@ int main(void) {
 
     printf("[bz_quest_wc3_world_transform]\n");
     run_bz_quest_wc3_world_transform_tests();
+    printf("\n");
+
+    printf("[bz_quest_wc3_hud_font]\n");
+    run_bz_quest_wc3_hud_font_tests();
+    printf("\n");
+
+    printf("[bz_quest_wc3_hud]\n");
+    run_bz_quest_wc3_hud_tests();
     printf("\n");
 
     TEST_RESULTS();

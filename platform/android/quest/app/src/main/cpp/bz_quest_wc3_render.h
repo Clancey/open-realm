@@ -126,6 +126,15 @@ typedef struct {
     float centerZ;
 } bzQuestWc3WorldTransform_t;
 
+/* 1.08 - the diorama-box target size bz_quest_wc3_terrain.c's
+ * bz_quest_wc3_terrain_measure() has always used (WarcraftAssetAdapter.swift:
+ * 560-719's terrain adapter target), and bz_quest_wc3_world_transform_measure()
+ * below derives `scale` from. Exposed here (not private to the .c) so the
+ * HUD panel placement math (bz_quest_wc3_hud.c) can anchor itself just
+ * outside the diorama's fixed maximum half-extent (this constant / 2)
+ * without duplicating the literal - see AGENTS.md's DRY rule. */
+#define BZ_QUEST_WC3_WORLD_TARGET_SPAN_F 1.08f
+
 /*
  * Derives the shared world->diorama transform from raw map bounds (engine X
  * span as X, engine "north" span as Z - the same two horizontal axes

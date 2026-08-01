@@ -39,6 +39,29 @@ _Static_assert(BZ_TTA_BLEND_OPAQUE == 0 && BZ_TTA_BLEND_TRANSPARENT == 1 &&
                "bz_quest_vk_wc3.c's mirrored BZ_QUEST_TTA_BLEND_* values have drifted from "
                "bz_tabletop_assets.h's bzTTBlendMode_t");
 
+/* bz_quest_wc3_hud.h mirrors bzTTActionTarget_t/bzTTActionSemantic_t/
+ * bzTTGameResult_t values by raw cast (see bz_quest_wc3_capture_hud() below)
+ * rather than #including the bridge ABI header from that pure module - this
+ * cross-check makes a future transport renumbering fail the build here
+ * instead of silently mis-mapping a HUD state on device, matching this
+ * file's BZ_TTA_BLEND_* precedent immediately above. */
+_Static_assert((int)BZ_QUEST_HUD_TARGET_NONE == (int)BZ_TT_ACTION_TARGET_NONE &&
+                   (int)BZ_QUEST_HUD_TARGET_POINT == (int)BZ_TT_ACTION_TARGET_POINT &&
+                   (int)BZ_QUEST_HUD_TARGET_ENTITY == (int)BZ_TT_ACTION_TARGET_ENTITY &&
+                   (int)BZ_QUEST_HUD_TARGET_ENTITY_OR_POINT == (int)BZ_TT_ACTION_TARGET_ENTITY_OR_POINT,
+               "bz_quest_wc3_hud.h's bzQuestHudActionTarget_t has drifted from bzTTActionTarget_t");
+_Static_assert((int)BZ_QUEST_HUD_SEMANTIC_UNSUPPORTED == (int)BZ_TT_ACTION_UNSUPPORTED &&
+                   (int)BZ_QUEST_HUD_SEMANTIC_BUTTON == (int)BZ_TT_ACTION_BUTTON &&
+                   (int)BZ_QUEST_HUD_SEMANTIC_CANCEL == (int)BZ_TT_ACTION_CANCEL,
+               "bz_quest_wc3_hud.h's bzQuestHudActionSemantic_t has drifted from bzTTActionSemantic_t");
+_Static_assert((int)BZ_QUEST_HUD_GAME_RESULT_NONE == (int)BZ_TT_GAME_RESULT_NONE &&
+                   (int)BZ_QUEST_HUD_GAME_RESULT_VICTORY == (int)BZ_TT_GAME_RESULT_VICTORY &&
+                   (int)BZ_QUEST_HUD_GAME_RESULT_DEFEAT == (int)BZ_TT_GAME_RESULT_DEFEAT &&
+                   (int)BZ_QUEST_HUD_GAME_RESULT_DRAW == (int)BZ_TT_GAME_RESULT_DRAW,
+               "bz_quest_wc3_hud.h's bzQuestHudGameResult_t has drifted from bzTTGameResult_t");
+_Static_assert(BZ_QUEST_HUD_MAX_BUTTONS == BZ_TT_MAX_COMMAND_BUTTONS,
+               "bz_quest_wc3_hud.h's BZ_QUEST_HUD_MAX_BUTTONS has drifted from BZ_TT_MAX_COMMAND_BUTTONS");
+
 /* -- bounded static scratch storage (never stack-allocated - see
  * bz_quest_wc3_render.h's bzQuestWc3Model_t doc comment) -- */
 
@@ -1049,6 +1072,79 @@ bool bz_quest_wc3_capture_fog(bzQuestWc3FogCapture_t *out) {
     }
 
     out->available = true;
+    BZ_TTSnapshot_Release(snap);
+    return true;
+}
+
+bool bz_quest_wc3_capture_hud(bzQuestHudInput_t *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+
+    const bzTTSnapshot_t *snap = BZ_TT_Latest();
+    if (!snap) return false;
+    if (BZ_TTSnapshot_AbiVersion(snap) != BZ_TABLETOP_ABI_VERSION) {
+        BZ_TTSnapshot_Release(snap);
+        return false;
+    }
+
+    out->frameId = BZ_TTSnapshot_Generation(snap);
+
+    const bzTTPlayer_t *player = BZ_TTSnapshot_Player(snap);
+    if (player) {
+        out->player.present = true;
+        strncpy(out->player.name, player->name, sizeof(out->player.name) - 1);
+        out->player.gold = player->resource_gold;
+        out->player.lumber = player->resource_lumber;
+        out->player.foodUsed = player->resource_food_used;
+        out->player.foodCap = player->resource_food_cap;
+        out->player.heroTokens = player->resource_hero_tokens;
+        out->player.gameResult = (bzQuestHudGameResult_t)player->game_result;
+    }
+
+    uint32_t selectedIds[BZ_TT_MAX_SELECTED_ENTITIES];
+    out->selectedCount = BZ_TTSnapshot_SelectedEntityIds(snap, selectedIds, BZ_TT_MAX_SELECTED_ENTITIES);
+
+    const bzTTActionLayout_t *layout = BZ_TTSnapshot_ActionLayout(snap);
+    if (layout) {
+        out->actionLayout.present = layout->present;
+        out->actionLayout.visible = layout->visible;
+        out->actionLayout.valid = layout->valid;
+        out->actionLayout.currentTarget = (bzQuestHudActionTarget_t)layout->current_target;
+        uint32_t numButtons = layout->num_buttons;
+        if (numButtons > BZ_QUEST_HUD_MAX_BUTTONS) {
+            LOG_ONCE("<process>", "hud-button-count-clamped",
+                     "bz_quest_wc3_capture: action layout reported %u buttons, clamping to %u\n", numButtons,
+                     (uint32_t)BZ_QUEST_HUD_MAX_BUTTONS);
+            numButtons = BZ_QUEST_HUD_MAX_BUTTONS;
+        }
+        out->actionLayout.numButtons = (uint8_t)numButtons;
+        for (uint32_t i = 0; i < numButtons; i++) {
+            const bzTTActionButton_t *src = &layout->buttons[i];
+            bzQuestHudButtonInput_t *dst = &out->actionLayout.buttons[i];
+            strncpy(dst->actionCode, src->action_code, sizeof(dst->actionCode) - 1);
+            strncpy(dst->tooltip, src->tooltip, sizeof(dst->tooltip) - 1);
+            dst->hotkey = src->hotkey;
+            dst->gridX = src->grid_x;
+            dst->gridY = src->grid_y;
+            dst->hidden = src->hidden;
+            dst->disabled = src->disabled;
+            dst->cooldown = src->cooldown;
+            dst->target = (bzQuestHudActionTarget_t)src->target;
+            dst->semantic = (bzQuestHudActionSemantic_t)src->semantic;
+            /* image_index is deliberately never copied/resolved - see this
+             * function's header comment and bz_quest_wc3_hud.h's full
+             * evidence trail for why no ABI path can turn it into pixels. */
+            if (src->image_index != 0) {
+                char detail[48];
+                snprintf(detail, sizeof(detail), "hud-icon-unresolvable-%u", src->image_index);
+                LOG_ONCE("<process>", detail,
+                         "bz_quest_wc3_capture: command-card button '%s' references image_index %u, which this "
+                         "ABI cannot resolve to pixel data - rendering a flat placeholder quad instead of an icon\n",
+                         src->action_code, src->image_index);
+            }
+        }
+    }
+
     BZ_TTSnapshot_Release(snap);
     return true;
 }

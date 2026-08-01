@@ -27,19 +27,13 @@ static float bz_quest_wc3_category_scale(uint32_t category) {
     }
 }
 
-/* 1.08 - the same diorama-box target size bz_quest_wc3_terrain.c's
- * bz_quest_wc3_terrain_measure() has always used (WarcraftAssetAdapter.swift:
- * 560-719's terrain adapter target). Shared here so the world-position
- * transform and terrain's own scale can never drift apart. */
-#define BZ_QUEST_WC3_WORLD_TARGET_SPAN 1.08f
-
 bool bz_quest_wc3_world_transform_measure(float minX, float minZ, float maxX, float maxZ,
                                           bzQuestWc3WorldTransform_t *out) {
     if (!isfinite(minX) || !isfinite(minZ) || !isfinite(maxX) || !isfinite(maxZ)) return false;
     const float spanX = maxX - minX;
     const float spanZ = maxZ - minZ;
     if (!(spanX > 0.0f) || !(spanZ > 0.0f)) return false; /* also rejects NaN via !(x>0) */
-    out->scale = BZ_QUEST_WC3_WORLD_TARGET_SPAN / fmaxf(spanX, spanZ);
+    out->scale = BZ_QUEST_WC3_WORLD_TARGET_SPAN_F / fmaxf(spanX, spanZ);
     out->centerX = (minX + maxX) * 0.5f;
     out->centerZ = (minZ + maxZ) * 0.5f;
     return true;

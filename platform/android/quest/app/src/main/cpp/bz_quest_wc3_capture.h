@@ -65,6 +65,7 @@
 #include <stdint.h>
 
 #include "bz_quest_wc3_fog.h"
+#include "bz_quest_wc3_hud.h"
 #include "bz_quest_wc3_render.h"
 
 #ifdef __cplusplus
@@ -188,6 +189,39 @@ void bz_quest_wc3_capture_frame(const bzQuestWc3CaptureCallbacks_t *callbacks,
  * so layer 5D does NOT render a target marker from it.
  */
 bool bz_quest_wc3_capture_fog(bzQuestWc3FogCapture_t *out);
+
+/*
+ * Layer 5E's independent HUD-snapshot retain/copy/release helper - same
+ * "each call site retains its own immutable snapshot" discipline as
+ * bz_quest_wc3_capture_fog() above (see that function's comment; the same
+ * one-generation-skew-is-immaterial reasoning applies here identically).
+ *
+ * On success, copies the player's resource/status fields
+ * (BZ_TTSnapshot_Player()), the authoritative command-card layout
+ * (BZ_TTSnapshot_ActionLayout(), including every button's hidden/disabled/
+ * cooldown/target/semantic/hotkey/grid position - truncating tooltip/
+ * action-code strings into bz_quest_wc3_hud.h's bounded buffers, never
+ * silently growing past the transport's own bounds), and the current
+ * selection count (BZ_TTSnapshot_SelectedEntityIds()) into `out`, stamps
+ * `out->frameId` with BZ_TTSnapshot_Generation() (the same generation the
+ * later hit-test staleness check compares against), and returns true.
+ *
+ * Returns false (leaving `out` zeroed) only when no snapshot has ever been
+ * published or its ABI version does not match this build - unlike
+ * bz_quest_wc3_capture_fog(), there is no "degenerate bounds" failure mode
+ * here: the HUD panel's placement is deliberately map-bounds-independent
+ * (bz_quest_wc3_hud_panel_transform()), so a missing/degenerate map does
+ * not prevent the HUD itself from being built (a distinct "no player data"
+ * status line is what layer 5E shows for that state - see
+ * bz_quest_wc3_hud.h's header comment).
+ *
+ * Deliberately does NOT attempt to resolve any button's `image_index` into
+ * pixel data - logged once per process via LOG_ONCE, matching layer 5D's
+ * "target mode has no location" precedent, since no ABI accessor exists
+ * that could resolve it (see bz_quest_wc3_hud.h's header comment for the
+ * full evidence trail; this is a scope decision, not a bug).
+ */
+bool bz_quest_wc3_capture_hud(bzQuestHudInput_t *out);
 
 uint32_t bz_quest_wc3_render_clock_msec(void);
 

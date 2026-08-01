@@ -79,6 +79,7 @@ bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer
     if (!bz_quest_vk_wc3_create(vk, &renderer->wc3)) goto fail;
     if (!bz_quest_vk_wc3_terrain_create(vk, &renderer->wc3Terrain)) goto fail;
     if (!bz_quest_vk_wc3_fog_create(vk, &renderer->wc3Fog)) goto fail;
+    if (!bz_quest_vk_wc3_hud_create(vk, &renderer->wc3Hud)) goto fail;
 
     BZ_QUEST_LOGI("renderer init complete");
     return true;
@@ -176,7 +177,11 @@ static bool bz_quest_renderer_render_warcraft_target(
      * immediately before selection markers - makes it a true final
      * visibility mask over the complete opaque+blended scene. Selection
      * markers run last so they stay readable atop fogged content but still
-     * depth-test against the opaque geometry already in the depth buffer. */
+     * depth-test against the opaque geometry already in the depth buffer.
+     * The layer 5E status/command-card HUD is recorded last of all - after
+     * fog and selection markers - so the bridge-authored HUD is always
+     * legible on top of the board, matching visionOS's own overlay-panel
+     * placement (see docs/quest-tabletop.md's Layer 5E section). */
     bz_quest_vk_wc3_terrain_record_opaque(&renderer->wc3Terrain, target->commandBuffer, viewProj, cameraWorldPos,
                                           terrainList);
     bz_quest_vk_wc3_record_opaque(&renderer->wc3, target->commandBuffer, viewProj, cameraWorldPos, wc3List);
@@ -184,6 +189,7 @@ static bool bz_quest_renderer_render_warcraft_target(
     bz_quest_vk_wc3_record_blended(&renderer->wc3, target->commandBuffer, viewProj, wc3List);
     bz_quest_vk_wc3_fog_record_overlay(&renderer->wc3Fog, target->commandBuffer, viewProj);
     bz_quest_vk_wc3_fog_record_selection(&renderer->wc3Fog, target->commandBuffer, viewProj, wc3List);
+    bz_quest_vk_wc3_hud_record(&renderer->wc3Hud, target->commandBuffer, viewProj);
 
     vkCmdEndRenderPass(target->commandBuffer);
     if (vkEndCommandBuffer(target->commandBuffer) != VK_SUCCESS) {
@@ -244,6 +250,7 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
         bz_quest_vk_wc3_capture_and_upload(&renderer->wc3, &wc3RenderList);
         bz_quest_vk_wc3_terrain_capture_and_upload(&renderer->wc3Terrain, &terrainRenderList);
         bz_quest_vk_wc3_fog_capture_and_upload(&renderer->wc3Fog);
+        bz_quest_vk_wc3_hud_capture_and_upload(&renderer->wc3Hud);
     }
 
     if (haveViews) {
@@ -264,13 +271,18 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
             if (!bz_quest_renderer_build_mvp(&views[i], mvp)) {
                 haveViews = false;
             } else if (wc3RenderList.count > 0 || terrainRenderList.count > 0 ||
-                       bz_quest_vk_wc3_fog_has_overlay(&renderer->wc3Fog)) {
+                       bz_quest_vk_wc3_fog_has_overlay(&renderer->wc3Fog) ||
+                       bz_quest_vk_wc3_hud_has_frame(&renderer->wc3Hud)) {
                 /* Warcraft III terrain and/or models exist this frame: record
                  * both into one shared eye render pass, interleaving terrain
                  * opaque -> model opaque -> terrain blended -> model blended.
                  * `mvp` is this eye's view*projection matrix; models apply
                  * their world matrix inside bz_quest_vk_wc3.c, terrain bakes
-                 * world position directly into its vertices. */
+                 * world position directly into its vertices. The layer 5E HUD
+                 * check is included here too so the status/command-card panel
+                 * still renders on a frame with a connected bridge snapshot
+                 * but no selection/models yet (e.g. observing an empty
+                 * board) - see bz_quest_wc3_hud.h's no-selection state. */
                 const float cameraWorldPos[3] = {
                     views[i].pose.position.x,
                     views[i].pose.position.y,
@@ -331,6 +343,7 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
 }
 
 void bz_quest_renderer_shutdown(bzQuestRenderer_t *renderer) {
+    bz_quest_vk_wc3_hud_destroy(&renderer->wc3Hud);
     bz_quest_vk_wc3_fog_destroy(&renderer->wc3Fog);
     bz_quest_vk_wc3_terrain_destroy(&renderer->wc3Terrain);
     bz_quest_vk_wc3_destroy(&renderer->wc3);
