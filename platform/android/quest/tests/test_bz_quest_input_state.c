@@ -562,6 +562,230 @@ static void test_update_board_manip_suppresses_tap(void) {
     ASSERT(!out.hasCommand); /* board manip owns input */
 }
 
+/* -------------------------------------------- left-grip board ownership -
+ * PR #25 review fix: left grip is the board-pan gesture's EXCLUSIVE input,
+ * from the very first (anchor) frame, in every phase/target mode - never a
+ * gameplay smart-command trigger. See bz_update_board()'s `active` fix and
+ * bz_hand_owns_smart_trigger() in bz_quest_input_state.c. */
+
+static void aim_left_at_entity(bzQuestInputFrame_t *f) {
+    bzQuestInputHandSample_t *L = &f->hands[BZ_QUEST_INPUT_HAND_LEFT];
+    L->active = true;
+    L->aimValid = true;
+    L->aimDir[2] = -1.0f; /* aims down -Z, same as base_frame's right hand */
+}
+
+static void aim_left_at_terrain(bzQuestInputFrame_t *f) {
+    bzQuestInputHandSample_t *L = &f->hands[BZ_QUEST_INPUT_HAND_LEFT];
+    L->active = true;
+    L->aimValid = true;
+    L->aimOrigin[1] = 0.5f;
+    L->aimDir[1] = -1.0f;
+}
+
+static void test_left_squeeze_over_entity_posts_no_command(void) {
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputEntity_t ent = {42, 0.0f, 0.0f, -2.0f, 0.5f, 0, 0};
+    bzQuestInputFrame_t f;
+    base_frame(&f);
+    aim_left_at_entity(&f);
+    make_world(&f.world, NULL, &ent, 1, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    bzQuestInputOutput_t out;
+    /* squeeze down from frame 1: this IS the anchor/rising-edge frame. */
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = true;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!out.hasCommand);
+    ASSERT(!out.wantHaptic); /* board ownership absorbs it silently, not a "rejected tap" */
+    ASSERT_EQ_INT(s.phase, BZ_QUEST_INPUT_PHASE_BOARD_MANIPULATE);
+}
+
+static void test_left_squeeze_over_terrain_posts_no_command(void) {
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputFrame_t f;
+    base_frame(&f);
+    aim_left_at_terrain(&f);
+    make_world(&f.world, NULL, NULL, 0, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    bzQuestInputOutput_t out;
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = true; /* anchor frame */
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!out.hasCommand);
+    ASSERT(!out.wantHaptic);
+}
+
+static void test_left_grip_anchors_board_manipulate_on_first_frame(void) {
+    /* The regression this fix targets: previously `active` stayed false on
+     * the anchor frame, so `phase` read IDLE_RAY for one frame - long enough
+     * for the same squeeze rising edge to fall through to the gameplay
+     * command loop. Now a single update() call with squeeze already down
+     * must report BOARD_MANIPULATE immediately, not one frame later. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputFrame_t f;
+    base_frame(&f);
+    aim_left_at_terrain(&f);
+    make_world(&f.world, NULL, NULL, 0, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = true;
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].gripPos[0] = 1.0f;
+    bzQuestInputOutput_t out;
+    bz_quest_input_state_update(&s, &f, &out); /* first-ever call, no prior baseline */
+    ASSERT_EQ_INT(s.phase, BZ_QUEST_INPUT_PHASE_BOARD_MANIPULATE);
+    ASSERT(s.panDragging);
+    ASSERT(!out.hasCommand);
+}
+
+static void test_left_grip_drag_updates_board_after_anchor(void) {
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputFrame_t f;
+    base_frame(&f);
+    aim_left_at_terrain(&f);
+    make_world(&f.world, NULL, NULL, 0, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    bzQuestInputOutput_t out;
+    /* anchor frame: no delta yet (grip hasn't moved from its first sample). */
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = true;
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].gripPos[0] = 1.0f;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT_EQ_FLOAT(s.board.tx, 0.0f, 0.0001f); /* anchor alone must not move the board */
+    /* drag frame: grip moves +0.5 on X, -0.3 on Z. */
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].gripPos[0] = 1.5f;
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].gripPos[2] = -0.3f;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT_EQ_FLOAT(s.board.tx, 0.5f, 0.0001f);
+    ASSERT_EQ_FLOAT(s.board.tz, -0.3f, 0.0001f);
+    ASSERT_EQ_INT(s.phase, BZ_QUEST_INPUT_PHASE_BOARD_MANIPULATE);
+    ASSERT(!out.hasCommand);
+}
+
+static void test_left_grip_release_ends_drag_without_command(void) {
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputFrame_t f;
+    base_frame(&f);
+    aim_left_at_terrain(&f);
+    make_world(&f.world, NULL, NULL, 0, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    bzQuestInputOutput_t out;
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = true;
+    bz_quest_input_state_update(&s, &f, &out); /* anchor */
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = false; /* release */
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!s.panDragging);
+    ASSERT_EQ_INT(s.phase, BZ_QUEST_INPUT_PHASE_IDLE_RAY);
+    ASSERT(!out.hasCommand);
+}
+
+static void test_right_squeeze_no_repeat_while_held(void) {
+    /* Companion to the left-grip tests above: the RIGHT hand's squeeze is
+     * still the sole valid smart-command trigger, edge-fires exactly once
+     * per press, and a second press/release cycle fires exactly once more. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputEntity_t ent = {77, 0.0f, 0.0f, -2.0f, 0.5f, 0, 0};
+    bzQuestInputFrame_t f;
+    base_frame(&f);
+    make_world(&f.world, NULL, &ent, 1, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    bzQuestInputOutput_t out;
+    bz_quest_input_state_update(&s, &f, &out); /* baseline, squeeze up */
+    f.hands[BZ_QUEST_INPUT_HAND_RIGHT].squeezeDown = true;
+    bz_quest_input_state_update(&s, &f, &out); /* rising -> one command */
+    ASSERT(out.hasCommand);
+    ASSERT_EQ_INT(out.command.type, BZ_QUEST_INPUT_CMD_SMART_ENTITY);
+    bz_quest_input_state_update(&s, &f, &out); /* held -> no repeat */
+    ASSERT(!out.hasCommand);
+    bz_quest_input_state_update(&s, &f, &out); /* still held -> no repeat */
+    ASSERT(!out.hasCommand);
+    f.hands[BZ_QUEST_INPUT_HAND_RIGHT].squeezeDown = false; /* release */
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!out.hasCommand);
+    f.hands[BZ_QUEST_INPUT_HAND_RIGHT].squeezeDown = true; /* second press */
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(out.hasCommand); /* second cycle fires exactly once more */
+    ASSERT_EQ_INT(out.command.type, BZ_QUEST_INPUT_CMD_SMART_ENTITY);
+}
+
+static void test_target_mode_does_not_change_left_grip_ownership(void) {
+    /* The critical regression case: bz_update_board() never runs while the
+     * server is in a target mode, so `phase` can never reach BOARD_MANIPULATE
+     * to suppress a left squeeze there via the phase check alone - the
+     * hand-scoped bz_hand_owns_smart_trigger() guard must still hold. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputEntity_t ent = {13, 0.0f, 0.0f, -2.0f, 0.5f, 640.0f, 480.0f};
+    bzQuestInputFrame_t f;
+    base_frame(&f);
+    aim_left_at_entity(&f);
+    make_world(&f.world, NULL, &ent, 1, BZ_QUEST_HUD_TARGET_ENTITY);
+    f.world.generation = 1;
+    bzQuestInputOutput_t out;
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = true; /* held from frame 1 */
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!out.hasCommand);
+    ASSERT_EQ_INT(s.phase, BZ_QUEST_INPUT_PHASE_TARGET_POINT_MODE); /* target mode still owns phase */
+    bz_quest_input_state_update(&s, &f, &out); /* held another frame */
+    ASSERT(!out.hasCommand);
+}
+
+static void test_focus_reconnect_map_reset_with_left_grip_held_never_posts(void) {
+    /* "left grip held across a lifecycle clear cannot re-anchor and post" -
+     * each clear drops panDragging/phase, and the very next frame (still
+     * physically squeezed) is a new rising edge on the left hand's squeeze
+     * latch - which must still be inert per bz_hand_owns_smart_trigger(). */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputEntity_t ent = {21, 0.0f, 0.0f, -2.0f, 0.5f, 0, 0};
+    bzQuestInputFrame_t f;
+    base_frame(&f);
+    aim_left_at_entity(&f);
+    make_world(&f.world, NULL, &ent, 1, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = true;
+    bzQuestInputOutput_t out;
+    bz_quest_input_state_update(&s, &f, &out); /* anchor */
+    ASSERT(!out.hasCommand);
+
+    /* focus loss then regain, left squeeze held throughout. */
+    f.focused = false;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(out.clearedThisFrame);
+    ASSERT(!out.hasCommand);
+    f.focused = true;
+    bz_quest_input_state_update(&s, &f, &out); /* re-anchors (new rising edge) */
+    ASSERT(!out.hasCommand);
+
+    /* left controller disconnect then reconnect, still squeezed. */
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].active = false;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(out.clearedThisFrame);
+    ASSERT(!out.hasCommand);
+    aim_left_at_entity(&f); /* reconnect: active/aimValid true again */
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = true;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!out.hasCommand);
+
+    /* map reload, still squeezed. */
+    f.mapEpoch = 2;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(out.clearedThisFrame);
+    ASSERT(!out.hasCommand);
+    bz_quest_input_state_update(&s, &f, &out); /* re-anchors again */
+    ASSERT(!out.hasCommand);
+}
+
 /* --------------------------------------------- idempotent lifecycle clear */
 
 static void test_focus_loss_clears_once_not_refire(void) {
@@ -684,6 +908,14 @@ void run_bz_quest_input_state_tests(void) {
     RUN_TEST(test_update_thumbstick_rotates_and_zooms);
     RUN_TEST(test_update_board_disabled_in_target_mode);
     RUN_TEST(test_update_board_manip_suppresses_tap);
+    RUN_TEST(test_left_squeeze_over_entity_posts_no_command);
+    RUN_TEST(test_left_squeeze_over_terrain_posts_no_command);
+    RUN_TEST(test_left_grip_anchors_board_manipulate_on_first_frame);
+    RUN_TEST(test_left_grip_drag_updates_board_after_anchor);
+    RUN_TEST(test_left_grip_release_ends_drag_without_command);
+    RUN_TEST(test_right_squeeze_no_repeat_while_held);
+    RUN_TEST(test_target_mode_does_not_change_left_grip_ownership);
+    RUN_TEST(test_focus_reconnect_map_reset_with_left_grip_held_never_posts);
     RUN_TEST(test_focus_loss_clears_once_not_refire);
     RUN_TEST(test_controller_loss_clears_once);
     RUN_TEST(test_map_reload_clears_and_resets_board);

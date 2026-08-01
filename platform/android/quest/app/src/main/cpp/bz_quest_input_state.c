@@ -318,6 +318,17 @@ static bool bz_map_command(const bzQuestInputFrame_t *frame, const bzQuestInputH
     }
 }
 
+/* Left grip is the board-pan gesture's exclusive owner (see bz_update_board):
+ * its squeeze rising edge must NEVER also map to a gameplay smart command,
+ * in ANY phase/target mode - not merely while `state->phase` happens to
+ * already read BOARD_MANIPULATE. Relying on phase timing alone left a gap
+ * (fixed above for the anchor frame, but target mode never calls
+ * bz_update_board at all, so phase can never become BOARD_MANIPULATE while
+ * targeting - left squeeze must still be inert there too, per the "target
+ * mode does not change this ownership" requirement). Only the right hand's
+ * squeeze is a valid smart-command trigger. */
+static bool bz_hand_owns_smart_trigger(uint8_t hand) { return hand == BZ_QUEST_INPUT_HAND_RIGHT; }
+
 /* --------------------------------------------------------------- board sim */
 
 static float bz_deadzone(float v) {
@@ -335,7 +346,16 @@ static bool bz_update_board(bzQuestInputState_t *state, const bzQuestInputFrame_
     const bzQuestInputHandSample_t *L = &frame->hands[BZ_QUEST_INPUT_HAND_LEFT];
     const bzQuestInputHandSample_t *R = &frame->hands[BZ_QUEST_INPUT_HAND_RIGHT];
 
-    /* Left grip-drag = translate (pan) in the tracking-space horizontal plane. */
+    /* Left grip-drag = translate (pan) in the tracking-space horizontal plane.
+     * The anchor frame (the rising edge of L->squeezeDown) must ALSO report
+     * `active` - not just the following frames once a delta exists. Before
+     * this fix, `active` stayed false on the anchor frame, so `state->phase`
+     * fell through to IDLE_RAY for that one frame and the SAME left-squeeze
+     * rising edge that just anchored the drag was still free to reach the
+     * gameplay command loop below and post a smart-entity/smart-point order
+     * a frame before BOARD_MANIPULATE ever took ownership (the bug this
+     * fix addresses - see the PR #25 review). Left grip ownership of board
+     * manipulation is unconditional the instant it is pressed. */
     if (L->active && L->squeezeDown) {
         if (!state->panDragging) {
             state->panDragging = true;
@@ -344,8 +364,8 @@ static bool bz_update_board(bzQuestInputState_t *state, const bzQuestInputFrame_
             state->board.tx += L->gripPos[0] - state->panAnchor[0];
             state->board.tz += L->gripPos[2] - state->panAnchor[2];
             memcpy(state->panAnchor, L->gripPos, sizeof(state->panAnchor));
-            active = true;
         }
+        active = true; /* anchor frame AND every drag frame both own input */
     } else {
         state->panDragging = false;
     }
@@ -482,12 +502,17 @@ void bz_quest_input_state_update(bzQuestInputState_t *state, const bzQuestInputF
             break;
         }
         if (state->phase == BZ_QUEST_INPUT_PHASE_BOARD_MANIPULATE) continue; /* board owns input */
-        if (!selRise[h] && !smtRise[h]) continue;
+        /* Left squeeze is never a gameplay trigger (bz_hand_owns_smart_trigger) -
+         * hand-scoped, not phase-scoped, so it stays inert in target mode too,
+         * where bz_update_board never runs and phase can't reach
+         * BOARD_MANIPULATE to suppress it via the check just above. */
+        const bool smart = smtRise[h] && bz_hand_owns_smart_trigger(h);
+        if (!selRise[h] && !smart) continue;
         if (!frame->hands[h].aimValid) continue;
 
         bzQuestInputCommand_t cmd;
         bool reject = false;
-        if (bz_map_command(frame, &hit[h], h, selRise[h], smtRise[h], &cmd, &reject)) {
+        if (bz_map_command(frame, &hit[h], h, selRise[h], smart, &cmd, &reject)) {
             out->hasCommand = true;
             out->command = cmd;
             break;

@@ -2526,7 +2526,20 @@ mutually exclusive owners of input each frame - mirroring
 `TabletopControls.swift`'s gesture-ownership exclusivity: a board grip-drag/
 thumbstick gesture cannot begin while the server is in a target mode, and a
 tap is suppressed on the same hand/frame a grip-drag or thumbstick gesture is
-active so a manipulation never doubles as a tap.
+active so a manipulation never doubles as a tap. Ownership of the left grip
+is additionally **hand-scoped, not just phase-scoped**: left squeeze is the
+board-pan gesture's exclusive input and never maps to `PostSmartEntity`/
+`PostSmartPoint`/`PostTargetPoint` regardless of `phase` or the server's
+target mode (`bz_hand_owns_smart_trigger()`) - only the right hand's squeeze
+rising edge is a valid smart-command trigger. This closes a fixed race where
+the anchor frame of a left-grip drag reported `active=false` for one frame
+(phase stayed `IDLE_RAY`), letting that same squeeze rising edge fall through
+to the gameplay command loop and post a smart order a frame before
+`BOARD_MANIPULATE` took ownership; `bz_update_board()` now reports `active`
+starting on the anchor frame itself, and the hand-scoped trigger check is a
+second, timing-independent guard for the target-mode case (where
+`bz_update_board()` never runs at all, so phase can never reach
+`BOARD_MANIPULATE` to suppress it that way).
 
 Edge semantics: every button command fires only on the false→true transition
 (`bz_quest_edge_update()` tracks previous-frame state per action) - never
