@@ -1421,10 +1421,25 @@ generation-lifetime differs: when the terrain identity changes, the module
 trying to reuse old chunk/image entries across maps. That is deliberate: model
 assets can repeat across frames and maps, but terrain chunk geometry cannot.
 
+### Coplanar depth compare for blended splats/water
+
+Ground splat layers beyond the base layer, and water, are drawn at the exact
+same quad positions as the already depth-written opaque base pass (they are
+the same cell quad re-drawn with different UVs, not offset geometry). The
+opaque terrain pipeline keeps `VK_COMPARE_OP_LESS` (normal occlusion against
+geometry drawn earlier), but the blended terrain pipeline uses
+`VK_COMPARE_OP_LESS_OR_EQUAL` so a coplanar blended fragment is not rejected
+against its own already-written depth value; `depthWriteEnable = VK_FALSE` is
+unchanged for blended draws, so this never corrupts the depth buffer used for
+water/model transparency occlusion. `test_terrain_pipeline_depth_compare_is_less_or_equal_for_blended_only`
+structurally asserts both compare ops from the checked-in source text (no
+host-testable Vulkan device is available to assert this dynamically).
+
 `test_bz_quest_wc3_terrain.c` host-covers the pure chunk builder's critical
 paths: scale rejection, 32x32 tail-chunk clamping, authoritative quad winding,
 ground splat atlas selection, water opacity, cliff detection/material fallback,
-and stable cache-key generation. The existing descriptor-pool headroom script
+and stable cache-key generation, plus the blended-pipeline depth-compare
+structural assertion above. The existing descriptor-pool headroom script
 now structurally checks the terrain texture descriptor pool's required
 `capacity + 1` spare slot too.
 

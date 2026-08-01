@@ -530,7 +530,15 @@ static bool create_pipeline(bzQuestVkWc3Terrain_t *vkTerrain, bool blended, VkPi
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
     depthStencil.depthWriteEnable = blended ? VK_FALSE : VK_TRUE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    /* Blended terrain (extra ground splat layers, water) shares the exact same quad
+     * positions as the opaque base layer already written to the depth buffer this
+     * pass (splats are the SAME cell quad re-drawn with different UVs, not offset
+     * geometry). A strict VK_COMPARE_OP_LESS rejects every coplanar fragment against
+     * itself, so splats/water would never render. Use LESS_OR_EQUAL for the blended
+     * pipeline so coplanar fragments pass, while depthWriteEnable stays FALSE so
+     * blended draws still never corrupt the depth buffer for correct water/model
+     * transparency occlusion against geometry drawn after them. */
+    depthStencil.depthCompareOp = blended ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS;
 
     VkPipelineColorBlendAttachmentState blendAttachment = {0};
     blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |

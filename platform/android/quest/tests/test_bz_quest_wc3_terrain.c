@@ -431,6 +431,34 @@ static void test_terrain_shaders_exist_and_are_listed_in_cmake(void) {
     if (frag) fclose(frag);
 }
 
+/* ------------------------------------------------------------------ */
+/* Regression: PR #21 review defect 1 - coplanar splat/water depth test */
+/* ------------------------------------------------------------------ */
+
+/* Structural regression for the coplanar-splat depth bug: blended terrain
+ * (splats/water) is drawn at the SAME quad positions already depth-written by
+ * the opaque base pass, so a strict LESS compare rejects every coplanar
+ * blended fragment and nothing ever renders on top of ground. The fix must
+ * keep the opaque pipeline strictly LESS (normal occlusion) while the
+ * blended pipeline uses LESS_OR_EQUAL (coplanar fragments pass) and must NOT
+ * regress depthWriteEnable=FALSE for blended (blended draws must still never
+ * corrupt the depth buffer). This can't run on host without a real VkDevice,
+ * so it asserts on the checked-in source text, mirroring the existing
+ * shader/CMake structural-test style below. */
+static void test_terrain_pipeline_depth_compare_is_less_or_equal_for_blended_only(void) {
+    const char *path = "platform/android/quest/app/src/main/cpp/bz_quest_vk_wc3_terrain.c";
+    FILE *f = fopen(path, "r");
+    ASSERT_NOT_NULL(f);
+    if (!f) return;
+    char text[65536];
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    text[n] = '\0';
+    fclose(f);
+    ASSERT(strstr(text, "depthStencil.depthCompareOp = blended ? VK_COMPARE_OP_LESS_OR_EQUAL : "
+                        "VK_COMPARE_OP_LESS;") != NULL);
+    ASSERT(strstr(text, "depthStencil.depthWriteEnable = blended ? VK_FALSE : VK_TRUE;") != NULL);
+}
+
 void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_measure_computes_scale_and_cell_size);
     RUN_TEST(test_measure_rejects_non_square_tiles);
@@ -450,4 +478,5 @@ void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_chunk_and_texture_keys_compare_stably);
     RUN_TEST(test_cache_usage_assumptions_cover_hit_miss_failure_eviction_and_shutdown);
     RUN_TEST(test_terrain_shaders_exist_and_are_listed_in_cmake);
+    RUN_TEST(test_terrain_pipeline_depth_compare_is_less_or_equal_for_blended_only);
 }
