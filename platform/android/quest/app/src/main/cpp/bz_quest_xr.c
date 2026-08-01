@@ -22,6 +22,16 @@ static const char *const BZ_QUEST_REQUIRED_INSTANCE_EXTENSIONS[] = {
 #define BZ_QUEST_REQUIRED_INSTANCE_EXTENSION_COUNT \
     (sizeof(BZ_QUEST_REQUIRED_INSTANCE_EXTENSIONS) / sizeof(BZ_QUEST_REQUIRED_INSTANCE_EXTENSIONS[0]))
 
+/* Defensive cap on XR_TIMEOUT_EXPIRED retries in bz_quest_xr_wait_swapchain_image()
+ * below. XR_TIMEOUT_EXPIRED should never actually occur there since it always
+ * passes XR_INFINITE_DURATION, but the OpenXR spec ("Rendering" chapter,
+ * xrWaitSwapchainImage) permits a runtime to return it regardless and
+ * requires the app to retry the wait on the same image rather than release
+ * or abandon it - this bounds that retry loop so a non-conformant runtime
+ * can't hang the frame loop forever, matching the same spec section's "must
+ * not block indefinitely" requirement on the runtime side. */
+#define BZ_QUEST_SWAPCHAIN_WAIT_MAX_RETRIES 64
+
 bool bz_quest_xr_init_loader(void *vm, void *context) {
     PFN_xrInitializeLoaderKHR xrInitializeLoaderKHR = NULL;
     XrResult result = xrGetInstanceProcAddr(
@@ -588,6 +598,13 @@ bool bz_quest_xr_end_frame(bzQuestXr_t *xr, XrTime displayTime,
     return true;
 }
 
+/* Acquiring an image does not wait for it to be writable - the caller must
+ * pair a successful acquire with bz_quest_xr_wait_swapchain_image() before
+ * rendering, per the OpenXR spec's xrAcquireSwapchainImage description. On
+ * failure, no image has been acquired, so the caller must not call
+ * bz_quest_xr_wait_swapchain_image()/bz_quest_xr_release_swapchain_image()
+ * for this attempt (bz_quest_renderer.c's frame loop already skips both on
+ * a false return here). */
 bool bz_quest_xr_acquire_swapchain_image(bzQuestXrSwapchain_t *swapchain, uint32_t *outIndex) {
     XrSwapchainImageAcquireInfo acquireInfo;
     memset(&acquireInfo, 0, sizeof(acquireInfo));
@@ -600,19 +617,46 @@ bool bz_quest_xr_acquire_swapchain_image(bzQuestXrSwapchain_t *swapchain, uint32
     return true;
 }
 
+/* XR_TIMEOUT_EXPIRED (value 1) is a *qualified success*, not a failure -
+ * XR_SUCCEEDED(XR_TIMEOUT_EXPIRED) is true (openxr.h's XR_SUCCEEDED macro is
+ * `(result) >= 0`). The OpenXR spec's "Rendering" chapter, xrWaitSwapchainImage
+ * description, is explicit that on XR_TIMEOUT_EXPIRED "the next call to
+ * xrWaitSwapchainImage will wait on the same image index again until the
+ * function succeeds with XR_SUCCESS": the acquired image's ownership is
+ * preserved, and the spec-correct response is to retry the wait, never to
+ * treat it as a fatal error or call release/abandon the image. This function
+ * always requests XR_INFINITE_DURATION, so a conformant runtime should not
+ * return XR_TIMEOUT_EXPIRED here at all (there is no requested timeout to
+ * expire against) - the retry loop below is a defensive fallback bounded by
+ * BZ_QUEST_SWAPCHAIN_WAIT_MAX_RETRIES, not something normal operation should
+ * ever exercise. A genuine failure (XR_FAILED(result), i.e. a negative
+ * XrResult) means the image was never successfully waited on, so per the
+ * spec's xrReleaseSwapchainImage precondition ("must have been successfully
+ * waited on without timeout before it is released") the caller must not call
+ * bz_quest_xr_release_swapchain_image() for this image - returning false here
+ * signals exactly that, and bz_quest_renderer.c's frame loop already breaks
+ * out of its per-eye loop without calling release when this returns false. */
 bool bz_quest_xr_wait_swapchain_image(bzQuestXrSwapchain_t *swapchain) {
-    XrSwapchainImageWaitInfo waitInfo;
-    memset(&waitInfo, 0, sizeof(waitInfo));
-    waitInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
-    waitInfo.timeout = XR_INFINITE_DURATION;
-    XrResult result = xrWaitSwapchainImage(swapchain->handle, &waitInfo);
-    if (result != XR_SUCCESS) {
+    for (int attempt = 0; attempt < BZ_QUEST_SWAPCHAIN_WAIT_MAX_RETRIES; attempt++) {
+        XrSwapchainImageWaitInfo waitInfo;
+        memset(&waitInfo, 0, sizeof(waitInfo));
+        waitInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
+        waitInfo.timeout = XR_INFINITE_DURATION;
+        XrResult result = xrWaitSwapchainImage(swapchain->handle, &waitInfo);
+        if (result == XR_SUCCESS) return true;
+        if (result == XR_TIMEOUT_EXPIRED) continue; /* spec-mandated retry, same image, ownership preserved */
         BZ_QUEST_LOGE("xrWaitSwapchainImage failed: %d", (int)result);
-        return false;
+        return false; /* terminal failure: caller must not release this image */
     }
-    return true;
+    BZ_QUEST_LOGE("xrWaitSwapchainImage: exceeded %d XR_TIMEOUT_EXPIRED retries",
+                   BZ_QUEST_SWAPCHAIN_WAIT_MAX_RETRIES);
+    return false;
 }
 
+/* Preconditioned on a preceding *successful* (XR_SUCCESS, not
+ * XR_TIMEOUT_EXPIRED) bz_quest_xr_wait_swapchain_image() call for this image -
+ * see that function's comment and bz_quest_renderer.c's frame loop, which
+ * only reaches this call after both acquire and wait returned true. */
 bool bz_quest_xr_release_swapchain_image(bzQuestXrSwapchain_t *swapchain) {
     XrSwapchainImageReleaseInfo releaseInfo;
     memset(&releaseInfo, 0, sizeof(releaseInfo));
