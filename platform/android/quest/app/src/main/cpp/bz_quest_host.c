@@ -23,8 +23,15 @@
  * of silently linking a no-op stub or reporting fake success. A later layer
  * removes the corresponding #error block and adds the real implementation.
  * BZ_QUEST_ENABLE_VULKAN_RENDERER, BZ_QUEST_ENABLE_ENGINE_START, and
- * BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS are the seams *this* layer replaces with
- * real implementations (CMakeLists.txt now defines all three to 1).
+ * BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS are the seams layer 4 replaced with real
+ * implementations; BZ_QUEST_ENABLE_WC3_RENDERER is the one seam *this*
+ * layer (5A) replaces with a real implementation (CMakeLists.txt now
+ * defines all four to 1). Layer 5A renders only static Warcraft III model
+ * geometry/materials at authoritative snapshot transforms - it still does
+ * NOT draw terrain, skeletal/sequence animation, fog of war, selection
+ * decals, particles/effects, or any command-card/HUD surface (see
+ * docs/quest-tabletop.md's "Renderer slice 5A" section for the exact
+ * supported/unsupported material and cache behavior).
  *
  * Layer 4 adds a small Quest-owned bridge/session adapter
  * (bz_quest_bridge.h) that creates, starts, suspends/resumes, stops, and
@@ -66,6 +73,9 @@
 #ifndef BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS
 #define BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS 0
 #endif
+#ifndef BZ_QUEST_ENABLE_WC3_RENDERER
+#define BZ_QUEST_ENABLE_WC3_RENDERER 0
+#endif
 #ifndef BZ_QUEST_ENABLE_INPUT
 #define BZ_QUEST_ENABLE_INPUT 0
 #endif
@@ -84,6 +94,9 @@
 #endif
 #if !BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS
 #error "BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS: layer 4 always builds the real bz_quest_snapshot.h reader - CMakeLists.txt must define this to 1"
+#endif
+#if !BZ_QUEST_ENABLE_WC3_RENDERER
+#error "BZ_QUEST_ENABLE_WC3_RENDERER: layer 5A always builds the real static-model Vulkan renderer - CMakeLists.txt must define this to 1"
 #endif
 #if BZ_QUEST_ENABLE_INPUT
 #error "BZ_QUEST_ENABLE_INPUT: OpenXR action/input polling is a later Quest layer - see docs/quest-tabletop.md"

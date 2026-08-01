@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layer 4
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layer 5A
 
-This is layer 4 of a stacked Meta Quest port:
+This is layer 5A of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -13,9 +13,9 @@ This is layer 4 of a stacked Meta Quest port:
 - Layer 3: replaces the layer-2 instance probe with a real OpenXR
   **session**, a Vulkan **stereo frame loop**, an `XR_FB_passthrough`
   **compositor layer**, and a minimal **head-tracked tabletop test scene**.
-- **Layer 4 (this layer, `clancey-quest-tabletop-lifecycle-bridge`)**:
-  connects that host to the real, shared authoritative tabletop engine —
-  a Quest-owned bridge/session adapter
+- Layer 4 (`clancey-quest-tabletop-lifecycle-bridge`): connects that host to
+  the real, shared authoritative tabletop engine — a Quest-owned
+  bridge/session adapter
   (`bz_quest_bridge.h`/[bz_quest_bridge.c](../platform/android/quest/app/src/main/cpp/bz_quest_bridge.c))
   creates/starts/suspends/resumes/stops/destroys the portable
   `platform/tabletop/bridge/bz_tabletop_lifecycle.h` engine-thread state
@@ -25,15 +25,24 @@ This is layer 4 of a stacked Meta Quest port:
   diagnostic frame descriptor (`bz_quest_frame.h`/`.c`,
   `bz_quest_snapshot.h`/`.c`) proves the immutable tabletop snapshot really
   advances via a throttled log line — without drawing any Warcraft content.
+- **Layer 5A (this layer, `clancey-quest-renderer-static-models`)**: the
+  first renderer slice. Consumes the layer-4 tabletop asset/snapshot ABIs on
+  the XR render thread to draw **static** Warcraft III model geometry and
+  materials at their authoritative snapshot transforms, with real Vulkan GPU
+  resource ownership/caching/upload. See
+  "[Layer 5A: static Warcraft III model rendering](#layer-5a-static-warcraft-iii-model-rendering-bz_quest_wc3_c-bz_quest_vk_wc3c)"
+  below for full scope, ownership, and evidence.
 
-**This layer still does not poll gameplay input, play audio, stage WC3
-data onto the device, or render any Warcraft III asset/terrain content.**
-See [Current limitations](#current-limitations) and `bz_quest_host.c`'s
-compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by a `#error` until its
-real implementation lands) — `BZ_QUEST_ENABLE_ENGINE_START` and
-`BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` are the two seams *this* layer replaces
-with real implementations (`BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`,
-and `BZ_QUEST_ENABLE_DATA_STAGING` remain `#error`-gated for a later layer).
+**This layer still does not render terrain, skeletal/sequence animation, fog
+of war, selection decals, particles/effects, command-card/HUD surfaces, and
+still does not poll gameplay input, play audio, or stage WC3 data onto the
+device.** See [Current limitations](#current-limitations) and
+`bz_quest_host.c`'s compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by
+a `#error` until its real implementation lands) — `BZ_QUEST_ENABLE_ENGINE_START`
+and `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` were layer 4's two seams;
+`BZ_QUEST_ENABLE_WC3_RENDERER` is the one seam *this* layer replaces with a
+real implementation (`BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`, and
+`BZ_QUEST_ENABLE_DATA_STAGING` remain `#error`-gated for a later layer).
 
 ## Architecture boundary
 
@@ -185,10 +194,12 @@ make test-quest-source-sync
 
 # Host-native (no NDK/Gradle/Quest hardware) unit tests for bz_quest_pure.c/
 # bz_quest_scene.c (projection/view-matrix math, format/extension/
-# passthrough-capability selection, procedural scene generator), PLUS
-# (layer 4) bz_quest_data.c/bz_quest_frame.c (data-dir/argv resolution,
-# diagnostic frame descriptor + throttled-log decision). Runs as part of
-# `make test`.
+# passthrough-capability selection, procedural scene generator), (layer 4)
+# bz_quest_data.c/bz_quest_frame.c (data-dir/argv resolution, diagnostic
+# frame descriptor + throttled-log decision), PLUS (layer 5A)
+# bz_quest_wc3_render.c/bz_quest_wc3_cache.c (coordinate/scale math,
+# render-list construction, GPU-cache hit/miss/eviction/shutdown
+# bookkeeping - see "Layer 5A" below). Runs as part of `make test`.
 make test-quest-host-tests
 
 # Layer 4: bz_quest_bridge.c tests linking the REAL
@@ -202,12 +213,14 @@ make test-quest-host-tests
 make test-quest-bridge
 
 # Regenerate the SPIR-V-embedded shader header standalone (also run
-# automatically by the CMake build below via a custom_command):
+# automatically by the CMake build below via a custom_command). Layer 5A
+# added warcraft_vert.vert/warcraft_frag.frag alongside the existing
+# tabletop_vert.vert/tabletop_frag.frag - see "Layer 5A" below.
 ANDROID_NDK_HOME=/path/to/ndk platform/android/quest/scripts/build-shaders.sh /tmp/shader-out
 
 # Full Gradle/CMake debug build (arm64-v8a only). Also compiles shaders,
-# builds the Vulkan/OpenXR/passthrough renderer, and links everything into
-# one .so.
+# builds the Vulkan/OpenXR/passthrough renderer plus (layer 5A) the
+# Warcraft III model renderer, and links everything into one .so.
 JAVA_HOME=/path/to/temurin-17 make quest-assemble-debug
 
 # The above, plus the forbidden-dependency/ABI/entry-point check (now also
@@ -946,18 +959,21 @@ document's own "No busy loop / no per-frame logging" policy above.
 
 ### Integration into the test tabletop
 
-This layer does **not** translate any snapshot field into a drawable
-Warcraft asset — `bz_quest_scene.c`'s procedural checkerboard-and-cubes
-test scene (see "Test scene" below) is drawn completely independently of
-the frame descriptor. Instead, `android_main()`'s throttled log line
-(`"tabletop frame: status=... generation=... lifecycleState=... ..."`,
-cited exactly at the log call site in `bz_quest_host.c`) is the sole,
-clearly-documented "diagnostic indicator" that snapshots really do advance
-once the engine thread is running — it proves the wiring end-to-end
-without pretending full rendering exists. A later layer (asset/terrain
-rendering, out of scope here — see "Known limitations of this frame descriptor") would replace this
-throttled-log proof with an actual translation from `bzQuestFrame_t`'s
-entity/terrain fields into drawable geometry.
+This diagnostic frame descriptor (`bzQuestFrame_t`) itself is still never
+translated into drawable geometry — `bz_quest_scene.c`'s procedural
+checkerboard-and-cubes test scene (see "Test scene" below) is drawn
+completely independently of it. Instead, `android_main()`'s throttled log
+line (`"tabletop frame: status=... generation=... lifecycleState=... ..."`,
+cited exactly at the log call site in `bz_quest_host.c`) remains the
+diagnostic proof that snapshots advance while the engine thread is running.
+Layer 5A (see
+"[Layer 5A: static Warcraft III model rendering](#layer-5a-static-warcraft-iii-model-rendering-bz_quest_wc3_c-bz_quest_vk_wc3c)"
+below) *does* now translate live snapshot entity data into drawable
+Warcraft III model geometry — but via its own independent
+`bz_quest_wc3_capture_frame()` call path (a separate `BZ_TT_Latest()`
+acquire/release, not a read of this `bzQuestFrame_t` descriptor), and only
+for static (non-animated) model geometry/materials, never terrain or any
+`bzQuestFrame_t` field itself.
 
 ### Known limitations of this frame descriptor
 
@@ -969,8 +985,9 @@ entity/terrain fields into drawable geometry.
   frame regardless of whether a map is loaded (see
   `platform/tabletop/client/cl_scrn_tabletop_null.c`'s
   `SCR_UpdateScreen()`), which is exactly what the throttled log proves.
-- No asset/terrain/entity geometry is ever drawn from this descriptor —
-  see "Integration into the test tabletop" above.
+- This descriptor's own fields are never drawn from directly — see
+  "Integration into the test tabletop" above for how layer 5A's Warcraft
+  rendering instead uses its own, separate capture path.
 
 ## Test scene (`bz_quest_scene.c`)
 
@@ -987,6 +1004,244 @@ per-eye stereo transforms, depth testing/occlusion, clipping, and real-world
 scale on physical hardware — it is explicitly **not** Warcraft III asset
 rendering (out of scope for this layer; see
 [Current limitations](#current-limitations)).
+
+## Layer 5A: static Warcraft III model rendering (`bz_quest_wc3_*.c`/`bz_quest_vk_wc3.c`)
+
+Layer 5A's job: render **static** (non-animated) Warcraft III MDX model
+geometry and materials at their authoritative snapshot transforms, on the
+Quest XR/render thread, with correctly-owned Vulkan GPU resources. Explicitly
+out of scope for this slice (each is a later layer's job, not an oversight):
+terrain, skeletal/sequence animation, fog of war, selection decals,
+particles/effects, command-card/HUD surfaces, gameplay input, audio, and
+data staging.
+
+### Module map and ownership
+
+| File | Kind | Owns |
+|------|------|------|
+| [`bz_quest_wc3_render.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_render.c) | pure, host-testable | Coordinate/scale math (engine space → target Y-up right-handed), render-item/render-list POD structs, render-list construction. Never touches an ABI handle or a Vulkan type. |
+| [`bz_quest_wc3_cache.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_cache.c) | pure, host-testable | Generic, fakeable identity-keyed cache bookkeeping (acquire/hit/miss/evict/shutdown) with injected create/destroy callbacks - no Vulkan/ABI dependency itself; instantiated twice by `bz_quest_vk_wc3.c` (models, textures). |
+| [`bz_quest_wc3_capture.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_capture.c) | impure, ABI-calling | The one translation unit that calls `BZ_TT_Latest()`/`BZ_TTSnapshot_EntityAt()`/`BZ_TTA_RegisterConfigString()`/`BZ_TTA_ResolveEntityMetadata()`/`BZ_TTA_RegisterModelTexture()`/`BZ_TTAsset_*()`. Retains/copies/releases every snapshot and asset handle on every branch - no bridge pointer survives past one `bz_quest_wc3_capture_frame()` call. Like `bz_quest_snapshot.c`, has no direct unit test (see "Testing" below); reviewed by inspection. |
+| [`bz_quest_vk_wc3.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_vk_wc3.c) | impure, Vulkan-calling | Owns its own descriptor set layout/pool/sampler/pipeline layout/shaders/staging buffer/upload command buffer/two GPU caches, entirely separate from `bz_quest_vk.h`'s procedural-scene pipeline/vertex buffer. Runs uploads and draws, both synchronously on the calling (Quest XR/render) thread. |
+| [`shaders/warcraft_vert.vert`/`warcraft_frag.frag`](../platform/android/quest/app/src/main/cpp/shaders/warcraft_vert.vert) | GLSL, compiled by `build-shaders.sh` | Unlit textured geoset draw - see "Shader/pipeline" below. |
+
+`bz_quest_renderer.c` wires it in: `bz_quest_vk_wc3_create()` runs once after
+`bz_quest_vk_create_render_resources()` in `bz_quest_renderer_init()`;
+`bz_quest_vk_wc3_capture_and_upload()` runs once per frame (not once per eye)
+before the per-eye loop; each eye then calls
+`bz_quest_vk_wc3_render_target()` when the captured render list is non-empty,
+or falls back to the existing `bz_quest_vk_render_target()` procedural
+diagnostic scene when it is empty (see "Diagnostic-scene fallback is
+explicit, not silent" below); `bz_quest_vk_wc3_destroy()` runs in
+`bz_quest_renderer_shutdown()` before `bz_quest_vk_destroy()`.
+
+### Retain/copy/release discipline
+
+`bz_quest_wc3_capture_frame()` mirrors `bz_quest_snapshot.c`'s discipline
+exactly: it performs its own independent `BZ_TT_Latest()`/release pair
+(not shared with `bz_quest_snapshot_capture()` - a one-generation skew
+between the two is immaterial, both still observe a self-consistent
+snapshot), walks entities, and for each one resolves category/footprint via
+`BZ_TTA_ResolveEntityMetadata()` and its model config string via
+`BZ_TTA_RegisterConfigString()`. Every retained model/texture asset handle
+returned by `BZ_TTA_RegisterModelTexture()` is released
+(`BZ_TTAsset_Release()`) on every branch — success, malformed data, or
+overflow — before the function returns; the snapshot itself is released
+last. Only plain-POD copies (the `bzQuestWc3EntityInput_t`/`bzQuestWc3Model_t`
+structs declared in `bz_quest_wc3_render.h`) ever leave this function; no
+bridge pointer/handle survives past one call, matching the task's
+"no borrowed bridge pointer may survive the documented retain scope"
+requirement.
+
+### Coordinate/transform evidence (do not change without re-deriving)
+
+Full citations live in `bz_quest_wc3_render.h`'s header comment; summarized
+here:
+
+- **Axis convention**: Warcraft III/MDX is Z-up (evidence:
+  `games/warcraft-3/renderer/mdx/r_mdx_render.c:43` uses `{0,0,1}` as the
+  billboard "up" vector). OpenXR/Vulkan (like the reviewed visionOS/
+  RealityKit target) is Y-up right-handed. This module replicates the
+  already-shipped, reviewed visionOS renderer's exact conversion rather than
+  re-deriving new axis/winding rules:
+  - Position: `(x, y, z)_engine -> (x, z, y)_target` -
+    `LiveTabletopTransport.swift:56`.
+  - Vertex/normal: `(x, y, z) -> (x, z, y)` -
+    `WarcraftAssetAdapter.swift:379-380`.
+  - Heading: negated, then applied as a rotation about the target Y axis -
+    `TabletopAdapter.swift:54`, `RealityTabletopView.swift:268`.
+  - Winding: indices reordered `[i0, i2, i1]` after the axis swap to restore
+    correct front-face winding (the swap alone flips handedness) -
+    `WarcraftAssetAdapter.swift:384-389`.
+- **Scale**: deliberately not a raw MDX-unit passthrough. Two stages, both
+  replicated exactly from the reviewed renderer's `.world` coordinate space:
+  a per-category multiplier applied to `max(footprint, 0.25)` for X/Z
+  (`WarcraftRenderDescriptors.swift:375-391`), then a further world-space
+  scale-down `(min(x,2)*0.06, y*0.08, min(z,2)*0.06)`
+  (`WarcraftRenderMath.swift:498-514`). `bzTTEntity_t.scale` (the runtime
+  unit-scale field, e.g. `SetUnitScale`) is never folded in — grepped, no
+  reference to `entity.metadata.scale` in either reviewed Swift file's
+  world-transform code, so this slice replicates that omission rather than
+  guessing a use for it.
+- `world = T(swapped origin) * R(-angle around Y) * S(category/footprint
+  scale)`, column-major, matching `bz_quest_pure.h`'s
+  `bz_quest_mat4_multiply()` layout.
+
+### Vulkan GPU caches: keys, lifetime, hit/miss, eviction
+
+Two `bzQuestWc3Cache_t` instances (from the shared, host-tested
+`bz_quest_wc3_cache.h`), owned by `bzQuestVkWc3_t`:
+
+- **Model cache** — key: model identity string (the MDX/config-string
+  identity `BZ_TTAsset_Identity()` returns, stable per task-space asset).
+  Value: `bzQuestVkWc3Model_t` (device-local vertex+index `VkBuffer`s plus
+  `bzQuestWc3ModelMeta_t`'s geoset/layer metadata).
+- **Texture cache** — key: texture identity string (same ABI identity
+  contract, replaceable_id-0/direct textures only this slice — see
+  "Supported vs. unsupported material behavior" below). Value:
+  `bzQuestVkWc3Texture_t` (`VkImage`/`VkImageView`/`VkDescriptorSet`).
+- Both caches are fixed-capacity (`BZ_QUEST_WC3_CACHE_CAPACITY` = 128, the
+  same constant for both), FIFO-evicting the oldest entry once full (not an
+  unbounded allocation) - see `bz_quest_wc3_cache.h`'s contract, host-tested
+  by `test_acquire_evicts_oldest_entry_at_capacity`.
+- **Hit path**: the render path (`bz_quest_vk_wc3_render_target()`) never
+  triggers an upload — it uses a read-only `cache_find()` linear scan over
+  the cache's public `slots[]` array; an item whose model/texture isn't yet
+  resident is simply skipped for that frame (transient, not an error, not
+  logged), matching this slice's "no placeholder-geometry" contract.
+- **Miss path**: only `bz_quest_vk_wc3_capture_and_upload()`'s two
+  callbacks (`model_ready_cb`/`texture_ready_cb`) may call
+  `bz_quest_wc3_cache_acquire()`, which runs the real Vulkan
+  create-callback (staged upload) on a miss.
+- **Shutdown**: `bz_quest_vk_wc3_destroy()` calls `vkDeviceWaitIdle()` then
+  shuts down both caches (destroying every still-cached model/texture via
+  their injected destroy callbacks - host-tested by
+  `test_shutdown_destroys_every_entry`), then destroys the staging
+  buffer/sampler/descriptor pool+layout/pipeline layout/shaders/pipeline
+  variants — safe on a partially-initialized `vk3` (every handle checked
+  against `VK_NULL_HANDLE`, matching `bz_quest_vk_destroy()`'s own
+  contract).
+
+### Bounded, thread-pinned uploads
+
+All Vulkan calls in this slice happen on the Quest XR/render thread only —
+`bz_quest_wc3_capture.c` never touches Vulkan, and `bz_quest_vk_wc3.c` never
+touches the tabletop asset ABI. Each model/texture upload uses one shared,
+fixed 16MB host-visible/coherent staging `VkBuffer` and one pre-allocated,
+reused `uploadCommandBuffer`: map staging memory, `memcpy`, submit a
+one-time-submit command buffer, `vkQueueWaitIdle()` before returning — no
+hidden worker thread, no async multi-frame-in-flight upload queue. Per-frame
+new-upload work is explicitly bounded
+(`BZ_QUEST_VK_WC3_MAX_NEW_MODEL_UPLOADS_PER_FRAME` = 4,
+`BZ_QUEST_VK_WC3_MAX_NEW_TEXTURE_UPLOADS_PER_FRAME` = 8): a frame that
+suddenly touches many never-before-seen assets (e.g. right after a map load)
+cannot stall the render thread for an unbounded number of staging
+round-trips — the remainder is simply captured and uploaded again on later
+frames (that entity is skipped that frame only, never drawn corrupted).
+Texture pixel uploads repack each row into a tightly-packed destination
+buffer (BLP row padding vs. `vkCmdCopyBufferToImage`'s
+`bufferRowLength=0` "tightly packed" default) rather than a single flat
+`memcpy`.
+
+### Shader/pipeline
+
+`warcraft_vert.vert`/`warcraft_frag.frag` are deliberately **unlit** —
+matching `tabletop_frag.frag`'s own established unlit-passthrough
+convention for this Quest renderer, not an oversight. An earlier draft
+computed a world-space normal via `mat3(mvp)` for lighting, which is
+incorrect (`mvp` = `viewProj * world` includes the projection matrix, not a
+valid normal transform space); rather than add a second world-only matrix
+push constant (which would exceed Vulkan's guaranteed-minimum 128-byte
+`maxPushConstantsSize` alongside the existing 64-byte `mvp` + 16-byte
+material params), lighting was dropped entirely for this slice rather than
+guessed. Push constants: `{VERTEX, offset 0, size 64}` = `mat4 mvp`;
+`{FRAGMENT, offset 64, size 16}` = `vec4 materialParams` (`x` = layer alpha,
+`y` = alpha-discard cutoff). `MODEL_GEO_UNSHADED` (0x1) is not distinguished
+— no lighting model exists at all this slice, so there is nothing to
+disable per-layer.
+
+Blend/cull/depth mapping is derived from the desktop OpenGL MDX renderer
+(`games/warcraft-3/renderer/mdx/r_mdx_geoset.c`'s `MDLX_SetBlendMode()`/
+`MDLX_ApplyLayerFlags()`/`MDLX_IsBlendedLayer()`), mirrored (not
+`#include`d — `bz_tabletop_assets.h`'s `bzTTBlendMode_t` values are
+locally-mirrored `BZ_QUEST_TTA_BLEND_*` constants, cross-checked by a
+`_Static_assert` in `bz_quest_wc3_capture.c`, the one file in this slice
+that legitimately includes that header):
+
+| `bzTTBlendMode_t` | Blend | Depth write default |
+|---|---|---|
+| `OPAQUE` (0) | none | on |
+| `TRANSPARENT` (1) | none, alpha-discard < 0.5 (`renderer/r_shader.c:308`'s `uAlphaCutoff`) | on |
+| `ALPHA` (2) | src=SRC_ALPHA, dst=ONE_MINUS_SRC_ALPHA | off |
+| `ADDITIVE` (3) | src=ONE, dst=ONE | off |
+| `ADD_ALPHA` (4) | src=SRC_ALPHA, dst=ONE | off |
+| `MODULATE` (5) | src=DST_COLOR, dst=ZERO | off |
+| `MODULATE_2X` (6) | src=DST_COLOR, dst=SRC_COLOR | off |
+
+`MODEL_GEO_TWOSIDED` (0x10, `r_mdx.h:31`) → cull none, else back-cull.
+`MODEL_GEO_NO_DEPTH_TEST` (0x40) → depth test off.
+`MODEL_GEO_NO_DEPTH_SET` (0x80) → forces depth write off (only ever an
+override toward *off*, never forces on over a blend mode's own off
+default). Pipeline variants are lazily created and cached (keyed by blend
+mode × two-sided × depth-test × depth-write), capped at
+`BZ_QUEST_VK_WC3_MAX_PIPELINE_VARIANTS` (56 = 7 blend modes × 2 × 2 × 2); a
+genuinely-exhausted cap logs once and reuses the opaque/back-cull/depth-on
+variant rather than failing to draw.
+
+### Supported vs. unsupported material behavior
+
+- **Supported**: `replaceable_id == 0` (direct/non-team texture) layers,
+  `BZ_TTA_PIXEL_RGBA8` format, `BZ_TTA_ORIGIN_TOP_LEFT` origin, up to
+  `BZ_QUEST_WC3_MAX_TEXTURE_DIM` (2048px) per axis / `BZ_QUEST_WC3_MAX_TEXTURE_BYTES`
+  (16MB) total.
+- **Explicitly unsupported this slice** (each logged once per unique
+  identity/detail via `bz_quest_wc3_capture.c`'s `LOG_ONCE`, the affected
+  layer/geoset skipped — never silently demoted to another mode or
+  substituted with a different texture):
+  - `replaceable_id` 1/2 (team color/team glow) and any per-entity texture
+    override — deferred to a later layer (`bz_quest_wc3_capture.h`'s "texture
+    decode policy" comment).
+  - Any texture in a pixel format other than RGBA8, or with an origin other
+    than top-left.
+  - A texture exceeding this slice's staging-buffer size/dimension caps.
+  - A geoset whose vertex/index count exceeds this slice's per-model scratch
+    capacity (`BZ_QUEST_WC3_MAX_VERTS_PER_MODEL`/`_INDICES_PER_MODEL`).
+  - Missing `MaterialInfo`/`MaterialLayerInfo`/`ModelTextureInfo` for a
+    geoset/layer.
+
+### Draw ordering / transparency
+
+Two-pass draw per eye: (1) all opaque/alpha-tested layers (`blendMode < 2`)
+across every render-list item, arbitrary order (depth test/write already
+guarantees correctness); (2) all blended layers (`blendMode >= 2` -
+`MDLX_IsBlendedLayer()`'s exact threshold) collected into a scratch array
+and sorted back-to-front by squared distance from the eye's tracked
+world-space position to each render item's world-matrix translation
+(`qsort`), then drawn in that order. **This sort is per-entity, not
+per-triangle** — a documented, honest granularity limit (not full
+per-triangle transparency sorting), consistent with this slice's
+"favor correct ownership and draw ordering over speculative optimization"
+priority. Batching/instancing: this slice does not batch at the
+render-list-construction level (`bz_quest_wc3_build_render_list()` always
+emits one `bzQuestWc3RenderItem_t` per entity); repeated models are instead
+naturally deduplicated at the GPU level by the model/texture cache key (a
+second entity referencing an already-uploaded model reuses the same
+`VkBuffer`/`VkImage`, only a new per-instance push-constant draw call is
+issued), which is the correctness-preserving form of reuse this slice
+implements.
+
+### Diagnostic-scene fallback is explicit, not silent
+
+When the captured render list is empty (no snapshot yet, still connecting,
+or no visible entity's model/texture has finished uploading), each eye
+renders the existing procedural checkerboard-and-cubes test scene (see
+"Test scene" above) — **not** a silent "asset unsupported" fallback, but the
+same explicit, pre-existing diagnostic scene layer 3/4 already used for
+"nothing valid to render yet". Procedural-scene and Warcraft-model Vulkan
+resources are entirely separately owned (`bz_quest_vk.h` vs.
+`bz_quest_vk_wc3.h`, two disjoint pipelines/vertex buffers/descriptor sets)
+so a missing/malformed Warcraft asset can never corrupt the diagnostic
+renderer, and vice versa.
 
 ## Documented quirks (with sources)
 
@@ -1135,30 +1390,46 @@ compile-time `#error`-guarded seam in `bz_quest_host.c`
 (`BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`,
 `BZ_QUEST_ENABLE_DATA_STAGING`) so a later layer flips exactly one on as its
 real implementation lands, instead of a silent stub reporting fake success.
-`BZ_QUEST_ENABLE_VULKAN_RENDERER`, `BZ_QUEST_ENABLE_ENGINE_START`, and
-`BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` are now all hard-required to `1` (a
-`#error` fires if a build tries to set any of them to `0`) since this
-layer's renderer and tabletop bridge are no longer optional:
+`BZ_QUEST_ENABLE_VULKAN_RENDERER`, `BZ_QUEST_ENABLE_ENGINE_START`,
+`BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS`, and (new this layer)
+`BZ_QUEST_ENABLE_WC3_RENDERER` are now all hard-required to `1` (a `#error`
+fires if a build tries to set any of them to `0`) since this layer's
+Warcraft renderer, procedural renderer, and tabletop bridge are no longer
+optional:
 
 - No OpenXR action/input polling, no audio output, no War3 MPQ data staging
   onto the device (no ADB data-copy script yet — a developer must stage
   data manually per "Data-path contract" above until that later layer
   lands).
 - No map is ever loaded (`bz_quest_bridge_start()` always passes a `NULL`
-  map name) — see "Known limitations of this frame descriptor" above.
-- No Warcraft III asset rendering — the test scene is still a procedurally
-  generated checkerboard + cubes, nothing loaded from `.mdx`/`.blp`/MPQ
-  data, and no snapshot field is translated into drawable geometry (see
-  "Integration into the test tabletop" above).
+  map name) — see "Known limitations of this frame descriptor" above. With
+  no map loaded, `BZ_TT_Latest()` returns an entity-less snapshot, so layer
+  5A's captured render list is always empty in this environment and every
+  eye renders the procedural diagnostic scene (see "Diagnostic-scene
+  fallback is explicit, not silent" above) — this was never observed
+  rendering real Warcraft geometry on a live snapshot in this environment
+  (see "Hardware/data-only acceptance procedure" below).
+- No terrain, no skeletal/sequence animation, no fog of war, no selection
+  decals, no particles/effects, no command-card/HUD surfaces — see "Layer
+  5A: static Warcraft III model rendering" above for the exact, deliberate
+  scope boundary.
+- No lighting model at all (fully unlit shader) — see "Shader/pipeline"
+  above for why this was a deliberate scope decision, not a bug.
+- Only `replaceable_id == 0` (direct/non-team) textures are supported —
+  team color/glow and per-entity texture overrides are logged once and
+  skipped, not substituted — see "Supported vs. unsupported material
+  behavior" above.
+- Transparency ordering is per-entity (by world-translation distance to the
+  eye), not per-triangle — see "Draw ordering / transparency" above.
 - No gameplay controller input reaches the engine (no `BZ_TabletopSubmit*`
   command is ever called by this layer).
 - No Vulkan multiview, MSAA, or fixed foveation (`XR_FB_foveation`) — see
   "Vulkan render pass/pipeline/targets" above for why this is an explicit,
   documented seam rather than an oversight.
-- The tabletop ABI was **not** widened — `bzTTSnapshot_t` v3 is consumed
-  as-is; no concrete evidence surfaced during this layer's implementation
-  that an essential datum for this layer's scope (diagnostics only) is
-  missing from it.
+- The tabletop ABI was **not** widened — `bzTTSnapshot_t`/asset ABI v3 is
+  consumed as-is; no concrete evidence surfaced during this layer's
+  implementation that an essential datum for this layer's scope (static
+  geometry/material rendering) is missing from it.
 
 ### Hardware-only acceptance gates
 
@@ -1209,6 +1480,31 @@ against a real device:
 - The Meta manifest guidance page and the OpenXR/Vulkan spec URLs cited
   throughout this document are versioned/updatable; re-fetch and diff
   before relying on them for a release build.
+- **New this layer** — none of the following was verified against real
+  retail Warcraft III data or a physical device; **do not report any of
+  these as confirmed** until checked on a real Quest with real staged
+  `War3.mpq`/`War3x.mpq` data:
+  - Whether real MDX model geometry/materials actually decode correctly end
+    to end through `bz_quest_wc3_capture.c` (only syntax/type-checked and
+    compiled against the real headers/NDK Vulkan headers this session — see
+    "What *was* verified this session" below — never run against a live
+    snapshot with real entities, since no map was ever loaded in this
+    environment).
+  - Whether the Vulkan buffer/image/descriptor creation, staged uploads,
+    and pipeline-variant selection in `bz_quest_vk_wc3.c` actually succeed
+    against the real Adreno GPU driver Quest ships (only compiled, never
+    executed against a runtime).
+  - Real visual correctness of any rendered model — position/scale/
+    orientation, texture appearance, blend mode appearance — is only
+    provable by a human wearing the headset with a real map loaded; the
+    coordinate/scale conversion math itself is host-tested (see "Testing"
+    below) against synthetic inputs, not against a real MDX model's actual
+    on-screen appearance.
+  - Whether the bounded per-frame upload budget
+    (`BZ_QUEST_VK_WC3_MAX_NEW_MODEL_UPLOADS_PER_FRAME`/
+    `_MAX_NEW_TEXTURE_UPLOADS_PER_FRAME`) is well-tuned for a real map's
+    worth of unique models/textures streaming in after a real map load —
+    untestable without real data and a device to profile against.
 
 ### Hardware/data-only acceptance procedure
 
@@ -1295,6 +1591,47 @@ device.
 - `git diff --check clancey-quest-vulkan-openxr-session...HEAD` reports no
   whitespace errors.
 
+### What *was* verified this session (layer 5A)
+
+- `bz_quest_wc3_render.c`/`bz_quest_wc3_cache.c` (pure, host-buildable) pass
+  `make test-quest-host-tests` with full coverage of coordinate/scale
+  conversion, render-list construction (skip-no-model, overflow reporting,
+  stale-state rewrite), and GPU-cache bookkeeping (first-call miss,
+  same-key hit, independent-key misses, create-failure-does-not-insert,
+  FIFO eviction at capacity, shutdown destroys every entry, shutdown of an
+  empty/zero-initialized cache is safe) — 3607/3607 assertions across the
+  whole `test-quest-host-tests` binary (up from 3349/3349 at the end of
+  layer 4; the delta is these two new modules' tests).
+- The full Gradle/CMake `assembleDebug` build succeeds end to end
+  (`JAVA_HOME` pointed at Temurin 17, NDK 27.2.12479018) with
+  `bz_quest_wc3_render.c`/`bz_quest_wc3_cache.c`/`bz_quest_wc3_capture.c`/
+  `bz_quest_vk_wc3.c` newly linked into `libbz_quest_native.so`, and both
+  new shaders (`warcraft_vert.vert`/`warcraft_frag.frag`) compiling to valid
+  embedded SPIR-V alongside the existing `tabletop_vert.vert`/
+  `tabletop_frag.frag` — this caught and fixed one real build error (the
+  Vulkan-side blend-mode dispatch initially referenced
+  `bz_tabletop_assets.h`'s `BZ_TTA_BLEND_*` names directly, but
+  `bz_quest_vk_wc3.c` deliberately does not include that header — fixed by
+  mirroring the enum locally with a `_Static_assert` cross-check in
+  `bz_quest_wc3_capture.c`, the one file that does include it).
+- `scripts/verify-native-lib.sh` passes against that APK with **no change**
+  to the allow-listed `DT_NEEDED` set (`libopenxr_loader.so libvulkan.so
+  libandroid.so liblog.so libz.so libm.so libdl.so libc.so`) — this layer
+  introduced zero new shared-library dependencies, confirming no SDL2/
+  desktop-GL/Apple-ObjC/VrApi dependency entered the APK from the new
+  Vulkan/model-rendering code.
+- `make test-quest-source-sync`, `make test-quest-host-tests` (3607/3607
+  assertions, see above), `make test-quest-bridge` (67/67 assertions,
+  unchanged from layer 4), and the full repo-root `make test` all pass with
+  no regressions.
+- `git diff --check clancey-quest-tabletop-lifecycle-bridge...HEAD` reports
+  no whitespace errors.
+- **Not verified this session** (no real MDX/BLP data or physical device
+  available) — see "Hardware-only acceptance gates" above for the exact
+  list: real model decode correctness, on-device Vulkan resource creation,
+  visual correctness of any rendered model, and per-frame upload-budget
+  tuning against a real map's data volume.
+
 ## Related documents
 
 - [visionos-tabletop.md](visionos-tabletop.md) — the shared
@@ -1310,6 +1647,17 @@ device.
   snapshot ABI (`bzTTSnapshot_t`, v3) `bz_quest_snapshot.c` reads via
   `BZ_TT_Latest()`/`BZ_TTSnapshot_*()`/`BZ_TTSnapshot_Release()`, consumed
   as-is with no ABI widening in this layer.
+- `platform/bridge/bz_tabletop_assets.h` — the ref-counted, POD-array
+  Warcraft III asset ABI (`bzTTAsset_t`, geosets/vertices/indices/textures/
+  materials) `bz_quest_wc3_capture.c` reads via `BZ_TTA_Acquire()`/
+  `BZ_TTA_Release()`, consumed as-is with no ABI widening in this layer —
+  see "Layer 5A: static Warcraft III model rendering" above.
+- `WarcraftAssetAdapter.swift`, `WarcraftRenderDescriptors.swift`, and
+  `WarcraftRenderMath.swift` (under
+  `platform/apple/visionos/tabletop/app/`) — the reviewed visionOS
+  reference implementation this layer's coordinate/scale conversion in
+  `bz_quest_wc3_render.c` matches; exact file+line citations are given in
+  "Layer 5A: static Warcraft III model rendering" above.
 - Khronos OpenXR Android loader:
   <https://github.com/KhronosGroup/OpenXR-SDK-Source> (`src/tests/hello_xr`
   for the reference loader-init/instance/session/Vulkan-interop sequence),

@@ -14,6 +14,8 @@
 
 #include "bz_quest_passthrough.h"
 #include "bz_quest_vk.h"
+#include "bz_quest_vk_wc3.h"
+#include "bz_quest_wc3_render.h"
 #include "bz_quest_xr.h"
 
 #ifdef __cplusplus
@@ -24,6 +26,10 @@ typedef struct bzQuestRenderer_s {
     bzQuestXr_t xr;
     bzQuestVk_t vk;
     bzQuestPassthrough_t passthrough;
+    /* Layer 5A: static Warcraft III model rendering. Owns its own Vulkan
+     * resources entirely separately from `vk` above - see bz_quest_vk_wc3.h's
+     * header comment for why. */
+    bzQuestVkWc3_t wc3;
 } bzQuestRenderer_t;
 
 /*
@@ -31,12 +37,12 @@ typedef struct bzQuestRenderer_s {
  * dependency order (loader -> instance -> system -> functions -> Vulkan
  * requirements -> Vulkan instance/device -> blend mode -> views -> session
  * -> space -> swapchains -> render resources/targets -> passthrough
- * create+start). `vm`/`context` are android_app->activity->{vm,clazz} (see
- * bz_quest_xr_init_loader()'s comment for why this header stays
- * android_native_app_glue-free). Returns false (with every partially
- * created resource already torn down via bz_quest_renderer_shutdown()) on
- * the first failed step - there is no partial-success state a caller could
- * observe.
+ * create+start -> layer 5A's bz_quest_vk_wc3_create()). `vm`/`context` are
+ * android_app->activity->{vm,clazz} (see bz_quest_xr_init_loader()'s
+ * comment for why this header stays android_native_app_glue-free). Returns
+ * false (with every partially created resource already torn down via
+ * bz_quest_renderer_shutdown()) on the first failed step - there is no
+ * partial-success state a caller could observe.
  */
 bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer);
 
@@ -48,17 +54,24 @@ bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer
  * requirement that xrWaitFrame/xrBeginFrame/xrEndFrame are always called
  * in lockstep once a session is running) when the session isn't yet
  * running, tracking isn't valid yet, or frameState.shouldRender is false.
- * Returns false once `renderer->xr.exitRequested` is set (loss pending,
- * exiting, or a fatal step failure) - the host's android_main loop must
- * stop calling this and proceed to bz_quest_renderer_shutdown().
+ * Once per frame (not per eye), captures the latest Warcraft III render
+ * list via bz_quest_vk_wc3_capture_and_upload(); each eye then renders
+ * either that render list (bz_quest_vk_wc3_render_target(), when it is
+ * non-empty) or bz_quest_vk_render_target()'s procedural diagnostic scene
+ * (when it is empty - an explicit "nothing valid to render yet" fallback,
+ * never a silent one, per this slice's task contract). Returns false once
+ * `renderer->xr.exitRequested` is set (loss pending, exiting, or a fatal
+ * step failure) - the host's android_main loop must stop calling this and
+ * proceed to bz_quest_renderer_shutdown().
  */
 bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer);
 
-/* Reverse-dependency-order teardown across all three modules: passthrough,
- * then Vulkan, then OpenXR (mirrors bz_quest_xr_destroy()'s note that an
- * active session must already be stopped - bz_quest_renderer_frame()'s
- * event polling drives that transition before this runs). Safe to call on
- * a partially-initialized renderer. */
+/* Reverse-dependency-order teardown across all four modules: layer 5A's
+ * bz_quest_vk_wc3_destroy(), then passthrough, then Vulkan, then OpenXR
+ * (mirrors bz_quest_xr_destroy()'s note that an active session must
+ * already be stopped - bz_quest_renderer_frame()'s event polling drives
+ * that transition before this runs). Safe to call on a
+ * partially-initialized renderer. */
 void bz_quest_renderer_shutdown(bzQuestRenderer_t *renderer);
 
 #ifdef __cplusplus

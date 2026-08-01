@@ -76,6 +76,8 @@ bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer
     if (!bz_quest_passthrough_create(xr, &renderer->passthrough)) goto fail;
     if (!bz_quest_passthrough_start(xr, &renderer->passthrough)) goto fail;
 
+    if (!bz_quest_vk_wc3_create(vk, &renderer->wc3)) goto fail;
+
     BZ_QUEST_LOGI("renderer init complete");
     return true;
 
@@ -131,6 +133,18 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
     XrView views[BZ_QUEST_VIEW_COUNT];
     bool haveViews = frameState.shouldRender &&
                      bz_quest_xr_locate_views(xr, frameState.predictedDisplayTime, views);
+
+    /* Captured once per frame (not once per eye) - see
+     * bz_quest_vk_wc3_capture_and_upload()'s doc comment. Only bothered with
+     * when the frame will actually render (haveViews): capturing here also
+     * performs this frame's bounded new-model/new-texture Vulkan uploads, so
+     * skipping it on a non-rendering frame is a correctness no-op, not a
+     * missed upload - the same models/textures are captured again (and
+     * uploaded then) the next frame that does render. */
+    bzQuestWc3RenderList_t wc3RenderList;
+    memset(&wc3RenderList, 0, sizeof(wc3RenderList));
+    if (haveViews) bz_quest_vk_wc3_capture_and_upload(&renderer->wc3, &wc3RenderList);
+
     if (haveViews) {
         for (uint32_t i = 0; i < BZ_QUEST_VIEW_COUNT; i++) {
             bzQuestXrSwapchain_t *swapchain = &xr->swapchains[i];
@@ -145,11 +159,35 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
             }
 
             float mvp[16];
+            bool rendered = false;
             if (!bz_quest_renderer_build_mvp(&views[i], mvp)) {
                 haveViews = false;
-            } else if (!bz_quest_vk_render_target(vk, i, imageIndex, swapchain->width,
-                                                  swapchain->height, mvp)) {
-                haveViews = false;
+            } else if (wc3RenderList.count > 0) {
+                /* Warcraft III render items exist this frame: render them,
+                 * not the procedural diagnostic scene (see this file's
+                 * header comment and bz_quest_vk_wc3.h's contract). `mvp`
+                 * here is already exactly this eye's view*projection matrix
+                 * with an implicit identity model - see
+                 * bz_quest_renderer_build_mvp()'s own comment - matching
+                 * bz_quest_vk_wc3_render_target()'s `viewProj` parameter. */
+                const float cameraWorldPos[3] = {
+                    views[i].pose.position.x,
+                    views[i].pose.position.y,
+                    views[i].pose.position.z,
+                };
+                rendered = bz_quest_vk_wc3_render_target(&renderer->wc3, i, imageIndex,
+                                                         swapchain->width, swapchain->height, mvp,
+                                                         cameraWorldPos, &wc3RenderList);
+                if (!rendered) haveViews = false;
+            } else {
+                /* No valid Warcraft render items yet (e.g. no snapshot,
+                 * still connecting, or every entity's model/texture is
+                 * still uploading) - render the existing procedural test
+                 * scene as an explicit diagnostic, never a silent
+                 * unsupported-asset fallback. */
+                rendered = bz_quest_vk_render_target(vk, i, imageIndex, swapchain->width,
+                                                     swapchain->height, mvp);
+                if (!rendered) haveViews = false;
             }
 
             if (!bz_quest_xr_release_swapchain_image(swapchain)) haveViews = false;
@@ -192,6 +230,7 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
 }
 
 void bz_quest_renderer_shutdown(bzQuestRenderer_t *renderer) {
+    bz_quest_vk_wc3_destroy(&renderer->wc3);
     bz_quest_passthrough_destroy(&renderer->xr, &renderer->passthrough);
     bz_quest_vk_destroy(&renderer->vk);
     bz_quest_xr_destroy(&renderer->xr);
