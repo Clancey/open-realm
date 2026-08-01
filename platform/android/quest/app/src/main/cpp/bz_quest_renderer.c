@@ -168,18 +168,21 @@ static bool bz_quest_renderer_render_warcraft_target(
     VkRect2D scissor = {{0, 0}, {width, height}};
     vkCmdSetScissor(target->commandBuffer, 0, 1, &scissor);
 
-    /* Fog overlay is intentionally recorded BETWEEN opaque and blended draws:
-     * it darkens already-rendered opaque terrain/models without needing a
-     * second scene-color target, while later blended terrain/model passes keep
-     * their existing subsystem-local sort/alpha behavior. Selection markers run
-     * last so they stay readable atop fogged content but still depth-test
-     * against the opaque geometry already in the depth buffer. */
+    /* Fog overlay is recorded AFTER both opaque and blended world draws (not
+     * between them, as an earlier revision mistakenly did): darkening the
+     * scene before blended terrain/model passes run left water and
+     * transparent doodads compositing back on TOP of the fog mask, fully
+     * visible through unseen/explored-not-visible fog. Recording fog last -
+     * immediately before selection markers - makes it a true final
+     * visibility mask over the complete opaque+blended scene. Selection
+     * markers run last so they stay readable atop fogged content but still
+     * depth-test against the opaque geometry already in the depth buffer. */
     bz_quest_vk_wc3_terrain_record_opaque(&renderer->wc3Terrain, target->commandBuffer, viewProj, cameraWorldPos,
                                           terrainList);
     bz_quest_vk_wc3_record_opaque(&renderer->wc3, target->commandBuffer, viewProj, cameraWorldPos, wc3List);
-    bz_quest_vk_wc3_fog_record_overlay(&renderer->wc3Fog, target->commandBuffer, viewProj);
     bz_quest_vk_wc3_terrain_record_blended(&renderer->wc3Terrain, target->commandBuffer, viewProj, terrainList);
     bz_quest_vk_wc3_record_blended(&renderer->wc3, target->commandBuffer, viewProj, wc3List);
+    bz_quest_vk_wc3_fog_record_overlay(&renderer->wc3Fog, target->commandBuffer, viewProj);
     bz_quest_vk_wc3_fog_record_selection(&renderer->wc3Fog, target->commandBuffer, viewProj, wc3List);
 
     vkCmdEndRenderPass(target->commandBuffer);

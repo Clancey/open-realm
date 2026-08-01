@@ -9,10 +9,17 @@
 #      image view matching that format;
 #   3. the fog shader interface must stay set 0 / binding 0 and the upload path
 #      must preserve explicit row-length handling for padded rows;
-#   4. the shared eye-pass order must stay terrain opaque -> model opaque -> fog
-#      overlay -> terrain blended -> model blended -> selection markers;
+#   4. the shared eye-pass order must stay terrain opaque -> model opaque ->
+#      terrain blended -> model blended -> fog overlay -> selection markers
+#      (fog LAST among world/overlay draws, so it composites over blended
+#      geometry like water/transparent doodads instead of being drawn under it);
 #   5. selection markers must stay depth-tested but depth-write-disabled so they
-#      do not show through opaque geometry and do not corrupt later depth use.
+#      do not show through opaque geometry and do not corrupt later depth use;
+#   6. the fog overlay's vertex shader and its C push-constant struct must both
+#      carry the shared world/tabletop transform (centerX/centerZ/scale) and
+#      apply it to gl_Position - the fix for layer 5D's inherited
+#      terrain/entity/fog coordinate-space mismatch (see
+#      bz_quest_wc3_render.h's header comment).
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -78,25 +85,41 @@ if ! grep -q 'depthStencil.depthTestEnable = VK_TRUE;' "$VK_FOG_C" || ! grep -q 
     echo "test-wc3-fog-selection-layout: $VK_FOG_C no longer keeps selection markers depth-tested and depth-write-disabled" >&2
     FAIL=1
 fi
+if ! grep -q 'float transform\[4\];' "$VK_FOG_C"; then
+    echo "test-wc3-fog-selection-layout: $VK_FOG_C's FogPushConsts_t no longer carries the shared world/tabletop transform" >&2
+    FAIL=1
+fi
+if ! grep -q 'pc.transform\[0\] = vkFog->transform.centerX;' "$VK_FOG_C"; then
+    echo "test-wc3-fog-selection-layout: $VK_FOG_C no longer populates the fog transform push constant from vkFog->transform" >&2
+    FAIL=1
+fi
+if ! grep -q 'vec4 transform;' "$FOG_VERT"; then
+    echo "test-wc3-fog-selection-layout: $FOG_VERT no longer declares the shared world/tabletop transform push constant" >&2
+    FAIL=1
+fi
+if ! grep -q 'renderX = (worldX - pc.transform.x) \* pc.transform.z;' "$FOG_VERT"; then
+    echo "test-wc3-fog-selection-layout: $FOG_VERT no longer applies the shared transform to the fog quad's on-screen position" >&2
+    FAIL=1
+fi
 
 line_of() {
     grep -n "$1" "$RENDERER" | head -n1 | cut -d: -f1
 }
 TERRAIN_OPAQUE=$(line_of 'bz_quest_vk_wc3_terrain_record_opaque')
 MODEL_OPAQUE=$(line_of 'bz_quest_vk_wc3_record_opaque')
-FOG_OVERLAY=$(line_of 'bz_quest_vk_wc3_fog_record_overlay')
 TERRAIN_BLEND=$(line_of 'bz_quest_vk_wc3_terrain_record_blended')
 MODEL_BLEND=$(line_of 'bz_quest_vk_wc3_record_blended')
+FOG_OVERLAY=$(line_of 'bz_quest_vk_wc3_fog_record_overlay')
 SELECTION=$(line_of 'bz_quest_vk_wc3_fog_record_selection')
-for pair in "$TERRAIN_OPAQUE" "$MODEL_OPAQUE" "$FOG_OVERLAY" "$TERRAIN_BLEND" "$MODEL_BLEND" "$SELECTION"; do
+for pair in "$TERRAIN_OPAQUE" "$MODEL_OPAQUE" "$TERRAIN_BLEND" "$MODEL_BLEND" "$FOG_OVERLAY" "$SELECTION"; do
     if [ -z "$pair" ]; then
         echo "test-wc3-fog-selection-layout: could not locate one of the shared render-pass call sites in $RENDERER" >&2
         FAIL=1
         break
     fi
 done
-if [ "$FAIL" -eq 0 ] && ! [ "$TERRAIN_OPAQUE" -lt "$MODEL_OPAQUE" ] || ! [ "$MODEL_OPAQUE" -lt "$FOG_OVERLAY" ] || ! [ "$FOG_OVERLAY" -lt "$TERRAIN_BLEND" ] || ! [ "$TERRAIN_BLEND" -lt "$MODEL_BLEND" ] || ! [ "$MODEL_BLEND" -lt "$SELECTION" ]; then
-    echo "test-wc3-fog-selection-layout: $RENDERER no longer records terrain opaque -> model opaque -> fog overlay -> terrain blended -> model blended -> selection markers in that order" >&2
+if [ "$FAIL" -eq 0 ] && ! [ "$TERRAIN_OPAQUE" -lt "$MODEL_OPAQUE" ] || ! [ "$MODEL_OPAQUE" -lt "$TERRAIN_BLEND" ] || ! [ "$TERRAIN_BLEND" -lt "$MODEL_BLEND" ] || ! [ "$MODEL_BLEND" -lt "$FOG_OVERLAY" ] || ! [ "$FOG_OVERLAY" -lt "$SELECTION" ]; then
+    echo "test-wc3-fog-selection-layout: $RENDERER no longer records terrain opaque -> model opaque -> terrain blended -> model blended -> fog overlay -> selection markers in that order" >&2
     FAIL=1
 fi
 

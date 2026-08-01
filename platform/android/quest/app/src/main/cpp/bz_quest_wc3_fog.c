@@ -93,12 +93,14 @@ bool bz_quest_wc3_fog_bytes_differ(const uint8_t *a, uint32_t aLen, const uint8_
     return memcmp(a, b, aLen) != 0;
 }
 
-bool bz_quest_wc3_selection_marker_from_translation(float tx, float ty, float tz, float radius, float tintR,
-                                                    float tintG, float tintB, float tintA,
-                                                    bzQuestWc3SelectionMarker_t *out) {
-    if (!out || radius <= 0.0f) return false;
+bool bz_quest_wc3_selection_marker_from_translation(float tx, float ty, float tz, float scaleX, float scaleY,
+                                                    float scaleZ, float tintR, float tintG, float tintB,
+                                                    float tintA, bzQuestWc3SelectionMarker_t *out) {
+    if (!out || scaleX <= 0.0f || scaleY <= 0.0f || scaleZ <= 0.0f) return false;
     memset(out, 0, sizeof(*out));
-    out->world[0] = out->world[5] = out->world[10] = radius;
+    out->world[0] = scaleX;
+    out->world[5] = scaleY;
+    out->world[10] = scaleZ;
     out->world[15] = 1.0f;
     out->world[12] = tx;
     out->world[13] = ty;
@@ -110,11 +112,15 @@ bool bz_quest_wc3_selection_marker_from_translation(float tx, float ty, float tz
     return true;
 }
 
-bool bz_quest_wc3_selection_marker_from_entity(float originX, float originY, float originZ, float radius,
-                                               float tintR, float tintG, float tintB, float tintA,
-                                               bzQuestWc3SelectionMarker_t *out) {
+bool bz_quest_wc3_selection_marker_from_entity(float originX, float originY, float originZ,
+                                               const bzQuestWc3WorldTransform_t *transform, float scaleX,
+                                               float scaleY, float scaleZ, float tintR, float tintG,
+                                               float tintB, float tintA, bzQuestWc3SelectionMarker_t *out) {
     /* Mirrors bz_quest_wc3_build_world_matrix()'s translation exactly:
-     * target X = engine X, target Y = engine Z, target Z = engine Y. */
-    return bz_quest_wc3_selection_marker_from_translation(originX, originZ, originY, radius,
+     * target X = engine X, target Y = engine Z, target Z = engine Y, then
+     * the shared world/tabletop transform. */
+    float txyz[3];
+    bz_quest_wc3_world_transform_point(transform, originX, originZ, originY, txyz);
+    return bz_quest_wc3_selection_marker_from_translation(txyz[0], txyz[1], txyz[2], scaleX, scaleY, scaleZ,
                                                           tintR, tintG, tintB, tintA, out);
 }

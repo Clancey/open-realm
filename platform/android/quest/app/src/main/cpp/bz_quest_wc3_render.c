@@ -27,13 +27,39 @@ static float bz_quest_wc3_category_scale(uint32_t category) {
     }
 }
 
-void bz_quest_wc3_build_world_matrix(const bzQuestWc3EntityInput_t *entity, float outWorld[16]) {
-    /* --- Position: engine Z-up -> target Y-up (Y/Z swap) --------------- */
-    /* LiveTabletopTransport.swift:56 - see this file's header comment. */
-    const float tx = entity->originX;
-    const float ty = entity->originZ;
-    const float tz = entity->originY;
+/* 1.08 - the same diorama-box target size bz_quest_wc3_terrain.c's
+ * bz_quest_wc3_terrain_measure() has always used (WarcraftAssetAdapter.swift:
+ * 560-719's terrain adapter target). Shared here so the world-position
+ * transform and terrain's own scale can never drift apart. */
+#define BZ_QUEST_WC3_WORLD_TARGET_SPAN 1.08f
 
+bool bz_quest_wc3_world_transform_measure(float minX, float minZ, float maxX, float maxZ,
+                                          bzQuestWc3WorldTransform_t *out) {
+    if (!isfinite(minX) || !isfinite(minZ) || !isfinite(maxX) || !isfinite(maxZ)) return false;
+    const float spanX = maxX - minX;
+    const float spanZ = maxZ - minZ;
+    if (!(spanX > 0.0f) || !(spanZ > 0.0f)) return false; /* also rejects NaN via !(x>0) */
+    out->scale = BZ_QUEST_WC3_WORLD_TARGET_SPAN / fmaxf(spanX, spanZ);
+    out->centerX = (minX + maxX) * 0.5f;
+    out->centerZ = (minZ + maxZ) * 0.5f;
+    return true;
+}
+
+void bz_quest_wc3_world_transform_point(const bzQuestWc3WorldTransform_t *transform, float x, float y,
+                                        float z, float outXYZ[3]) {
+    if (!transform) {
+        outXYZ[0] = x;
+        outXYZ[1] = y;
+        outXYZ[2] = z;
+        return;
+    }
+    outXYZ[0] = (x - transform->centerX) * transform->scale;
+    outXYZ[1] = y * transform->scale;
+    outXYZ[2] = (z - transform->centerZ) * transform->scale;
+}
+
+void bz_quest_wc3_entity_footprint_scale(uint32_t category, float footprintX, float footprintY,
+                                         float *outScaleX, float *outScaleY, float *outScaleZ) {
     /* --- Scale: category multiplier * max(footprint, 0.25) INDEPENDENTLY
      * per axis (X uses footprintX/width, Z uses footprintY/depth - a
      * rectangular footprint must stay rectangular, never forced square by
@@ -41,15 +67,28 @@ void bz_quest_wc3_build_world_matrix(const bzQuestWc3EntityInput_t *entity, floa
      * ".world" space scale-down (min(x,2)*0.06, y*0.08, min(z,2)*0.06) -
      * WarcraftRenderDescriptors.swift:375-391 and WarcraftRenderMath.swift:
      * 498-514. See this file's header comment for full citations. */
-    const float categoryScale = bz_quest_wc3_category_scale(entity->category);
-    const float footprintX = fmaxf(entity->footprintX, 0.25f);
-    const float footprintZ = fmaxf(entity->footprintY, 0.25f);
-    const float dioramaX = categoryScale * footprintX;
+    const float categoryScale = bz_quest_wc3_category_scale(category);
+    const float footprintXClamped = fmaxf(footprintX, 0.25f);
+    const float footprintZClamped = fmaxf(footprintY, 0.25f);
+    const float dioramaX = categoryScale * footprintXClamped;
     const float dioramaY = categoryScale;
-    const float dioramaZ = categoryScale * footprintZ;
-    const float sx = fminf(dioramaX, 2.0f) * 0.06f;
-    const float sy = dioramaY * 0.08f;
-    const float sz = fminf(dioramaZ, 2.0f) * 0.06f;
+    const float dioramaZ = categoryScale * footprintZClamped;
+    *outScaleX = fminf(dioramaX, 2.0f) * 0.06f;
+    *outScaleY = dioramaY * 0.08f;
+    *outScaleZ = fminf(dioramaZ, 2.0f) * 0.06f;
+}
+
+void bz_quest_wc3_build_world_matrix(const bzQuestWc3EntityInput_t *entity,
+                                     const bzQuestWc3WorldTransform_t *transform, float outWorld[16]) {
+    /* --- Position: engine Z-up -> target Y-up (Y/Z swap), then the shared
+     * world/tabletop transform (raw passthrough if transform is NULL) ----- */
+    /* LiveTabletopTransport.swift:56 (axis swap) - see this file's header
+     * comment for both the swap and the shared-transform citation. */
+    float txyz[3];
+    bz_quest_wc3_world_transform_point(transform, entity->originX, entity->originZ, entity->originY, txyz);
+
+    float sx, sy, sz;
+    bz_quest_wc3_entity_footprint_scale(entity->category, entity->footprintX, entity->footprintY, &sx, &sy, &sz);
 
     /* --- Heading: negate engine yaw, rotate about the target Y axis ---- */
     /* TabletopAdapter.swift:54 (negation) + RealityTabletopView.swift:268
@@ -68,9 +107,9 @@ void bz_quest_wc3_build_world_matrix(const bzQuestWc3EntityInput_t *entity, floa
      * R's column 0 (c, 0, -s) scaled by sx, column 1 is R's column 1 (0,1,0)
      * scaled by sy, column 2 is R's column 2 (s, 0, c) scaled by sz. */
     memcpy(outWorld, rotScale, sizeof(rotScale));
-    outWorld[12] = tx;
-    outWorld[13] = ty;
-    outWorld[14] = tz;
+    outWorld[12] = txyz[0];
+    outWorld[13] = txyz[1];
+    outWorld[14] = txyz[2];
 }
 
 void bz_quest_wc3_convert_matrix_zup_to_yup(const float inZup[16], float outYup[16]) {
@@ -90,6 +129,7 @@ void bz_quest_wc3_convert_matrix_zup_to_yup(const float inZup[16], float outYup[
 }
 
 void bz_quest_wc3_build_render_list(const bzQuestWc3EntityInput_t *entities, uint32_t entityCount,
+                                    const bzQuestWc3WorldTransform_t *transform,
                                     bzQuestWc3RenderList_t *outList) {
     memset(outList, 0, sizeof(*outList));
     for (uint32_t i = 0; i < entityCount; i++) {
@@ -101,8 +141,9 @@ void bz_quest_wc3_build_render_list(const bzQuestWc3EntityInput_t *entities, uin
         }
         bzQuestWc3RenderItem_t *item = &outList->items[outList->count++];
         memcpy(item->modelIdentity, entity->modelIdentity, sizeof(item->modelIdentity));
-        bz_quest_wc3_build_world_matrix(entity, item->world);
-        item->radius = entity->radius;
+        bz_quest_wc3_build_world_matrix(entity, transform, item->world);
+        bz_quest_wc3_entity_footprint_scale(entity->category, entity->footprintX, entity->footprintY,
+                                            &item->footprintScaleX, &item->footprintScaleY, &item->footprintScaleZ);
         item->tintR = entity->tintR;
         item->tintG = entity->tintG;
         item->tintB = entity->tintB;

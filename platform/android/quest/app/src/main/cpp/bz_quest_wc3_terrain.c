@@ -135,7 +135,17 @@ bzQuestWc3TerrainStatus_t bz_quest_wc3_terrain_measure(const bzQuestWc3TerrainBo
     float tileSizeX = spanX / (float)tileWidth, tileSizeZ = spanZ / (float)tileHeight;
     if (fabsf(tileSizeX - tileSizeZ) > fmaxf(tileSizeX, tileSizeZ) * 0.001f)
         return BZ_QUEST_WC3_TERRAIN_ERR_NON_SQUARE_TILES;
-    out->scale = 1.08f / fmaxf(spanX, spanZ);
+    /* Same shared world/tabletop scale bz_quest_wc3_render.h's entity/fog
+     * transform now uses (bz_quest_wc3_world_transform_measure()) - reused
+     * here, not duplicated, so terrain and every other position consumer
+     * can never drift onto two different scales for the same map bounds.
+     * The bounds validity check above already guarantees this call
+     * succeeds (spanX/spanZ > 0 and finite is that function's own only
+     * failure condition), so its bool return is intentionally not
+     * re-checked here. */
+    bzQuestWc3WorldTransform_t transform;
+    bz_quest_wc3_world_transform_measure(bounds->minX, bounds->minZ, bounds->maxX, bounds->maxZ, &transform);
+    out->scale = transform.scale;
     out->cellSize = tileSizeX * out->scale;
     return BZ_QUEST_WC3_TERRAIN_OK;
 }

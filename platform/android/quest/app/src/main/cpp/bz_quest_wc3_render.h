@@ -74,6 +74,39 @@
  * or WarcraftRenderDescriptors.swift's world-transform code), so this
  * module deliberately does not apply it either - replicating the reviewed
  * behavior exactly rather than guessing a use for an unused field.
+ *
+ * -- Shared world/tabletop position transform (fixes layer 5D's inherited
+ * terrain/entity coordinate mismatch - do not change without re-deriving) --
+ *
+ * The scale/center evidence above only covers each entity's OWN mesh size.
+ * Positions are a separate concern: layer 5B's terrain
+ * (bz_quest_wc3_terrain.c) already places every vertex inside a bounded
+ * "diorama" box via scale = 1.08 / max(spanX, spanZ) centered on the map
+ * bounds' midpoint (bz_quest_wc3_terrain_measure(), mirroring
+ * WarcraftAssetAdapter.swift:560-719's terrain adapter). The SAME
+ * WarcraftWorldTransform(centerX, centerZ, scale) is independently applied
+ * to entity positions by the actual production render provider -
+ * `ProductionWarcraftRenderProvider.scene()` in
+ * FixtureWarcraftRenderProvider.swift:161-224 (this is the provider
+ * OpenRealmTabletopApp.swift:84 actually wires up for real snapshots; the
+ * "Fixture" in that file's name refers to an unrelated preview-only sibling
+ * provider in the same file, not this one) - via
+ * `transform.point(entity.position)`, where `point()` is defined at
+ * WarcraftAssetAdapter.swift:147-154 as:
+ *   point(x, y, z) = ((x - centerX) * scale, y * scale, (z - centerZ) * scale)
+ * i.e. height (target Y) is scaled but never re-centered, exactly matching
+ * terrain's own per-corner `height * scale` with no separate height offset.
+ *
+ * Before this fix, layer 5D placed entities/fog/selection markers in RAW
+ * unscaled engine coordinates while terrain already lived inside that
+ * bounded box - a real spatial mismatch (not a cosmetic one) that this
+ * struct/function pair resolves by giving every position consumer
+ * (bz_quest_wc3_build_world_matrix() below, bz_quest_wc3_terrain_measure(),
+ * and bz_quest_wc3_fog.c's fog-quad/selection-marker placement) ONE shared
+ * implementation, applied exactly once per position - never compounded, and
+ * never folded into the model-local footprint/category scale above (that
+ * scale intentionally stays map-bounds-independent, matching the reviewed
+ * 5A/5C behavior; only WORLD POSITION is bounds-relative).
  */
 #ifndef BZ_QUEST_WC3_RENDER_H
 #define BZ_QUEST_WC3_RENDER_H
@@ -86,6 +119,42 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct {
+    float scale;
+    float centerX;
+    float centerZ;
+} bzQuestWc3WorldTransform_t;
+
+/*
+ * Derives the shared world->diorama transform from raw map bounds (engine X
+ * span as X, engine "north" span as Z - the same two horizontal axes
+ * bz_quest_wc3_terrain.h's bzQuestWc3TerrainBounds_t already names
+ * minX/maxX/minZ/maxZ, and platform/bridge/bz_tabletop_transport.h's
+ * bzTTBox2_t names min_x/max_x/min_y/max_y). Returns false (leaving *out
+ * untouched) for degenerate bounds (non-finite, or zero/negative span on
+ * either axis) - callers must fall back to a raw/unscaled passthrough
+ * rather than divide by zero or propagate NaN, matching
+ * bz_quest_wc3_terrain_measure()'s own bounds validation (which now calls
+ * this function instead of repeating the `1.08f` literal - see this file's
+ * header comment).
+ */
+bool bz_quest_wc3_world_transform_measure(float minX, float minZ, float maxX, float maxZ,
+                                          bzQuestWc3WorldTransform_t *out);
+
+/*
+ * Applies `transform` to one already Y-up-swapped point (x = engine X,
+ * y = engine up/height, z = engine "north"): ((x-centerX)*scale, y*scale,
+ * (z-centerZ)*scale) - WarcraftAssetAdapter.swift:152-154's `point()`
+ * verbatim (see this file's header comment). `transform` NULL means "no
+ * valid map bounds this frame" and passes `x,y,z` through unscaled/
+ * uncentered (raw passthrough) rather than crash or fabricate a scale -
+ * matching this file's pre-fix behavior for a defensive no-map-bounds edge
+ * case (docs/quest-tabletop.md's "no map is ever loaded in this dev
+ * environment" note).
+ */
+void bz_quest_wc3_world_transform_point(const bzQuestWc3WorldTransform_t *transform, float x, float y,
+                                        float z, float outXYZ[3]);
 
 enum {
     /* MDX texture records/model config-string identities carry a fixed
@@ -357,7 +426,6 @@ typedef struct {
     float originX, originY, originZ; /* engine space: X, Y (north), Z (up) */
     float angle;                     /* engine-space yaw, radians */
     float footprintX, footprintY;    /* bzTTAssetMetadata_t.footprint_x/y */
-    float radius;                    /* bzTTEntity_t.radius - authoritative selection/UI circle radius */
     float tintR, tintG, tintB, tintA; /* bzTTAssetMetadata_t.tint_* - authoritative team-color RGBA */
     uint32_t category;               /* bzTTAssetCategory_t */
     uint32_t frame;                  /* bzTTEntity_t.frame (msec) - authoritative animation time, see bz_quest_wc3_anim.h */
@@ -380,18 +448,28 @@ typedef struct {
 /* Final per-instance draw descriptor: a resolved model identity (looked up
  * in the Vulkan GPU model cache by the renderer - see bz_quest_vk_wc3.h) and
  * a fully-built column-major world matrix (engine space -> target Y-up
- * right-handed space), matching bz_quest_pure.h's bz_quest_mat4_multiply()
- * layout so bz_quest_vk_wc3.c can multiply it against the eye's
- * view*projection matrix with the same helper. `frame`, `selected`,
- * `radius`, `tint*`, and team-texture identities are carried through
- * unconverted from bzQuestWc3EntityInput_t for bz_quest_vk_wc3.c's per-frame
- * pose/bone-palette build, fog/selection overlay, and team-texture binding -
- * this file never touches animation/material state itself, only passes the
- * entity's own already-resolved values through untouched. */
+ * right-handed space, already through the shared world/tabletop transform -
+ * see this file's header comment), matching bz_quest_pure.h's
+ * bz_quest_mat4_multiply() layout so bz_quest_vk_wc3.c can multiply it
+ * against the eye's view*projection matrix with the same helper. `frame`,
+ * `selected`, `footprintScale*`, `tint*`, and team-texture identities are
+ * carried through unconverted from bzQuestWc3EntityInput_t for
+ * bz_quest_vk_wc3.c's per-frame pose/bone-palette build, fog/selection
+ * overlay, and team-texture binding - this file never touches
+ * animation/material state itself, only passes the entity's own already-
+ * resolved values through untouched. */
 typedef struct {
     char modelIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
     float world[16];
-    float radius;
+    /* Per-axis selection-marker scale - the SAME footprint/category formula
+     * bz_quest_wc3_build_world_matrix() uses for this entity's own mesh
+     * scale (bz_quest_wc3_entity_footprint_scale() below), NOT the raw
+     * bzTTEntity_t.radius transport field. Fixes a real-world scale bug:
+     * radius is tens of raw WC3 units while the model itself is placed
+     * with the compressed diorama footprint scale, so a marker sized
+     * directly from radius would never match the selected model's own
+     * footprint. See this file's header comment. */
+    float footprintScaleX, footprintScaleY, footprintScaleZ;
     float tintR, tintG, tintB, tintA;
     uint32_t frame;
     bool selected;
@@ -410,15 +488,33 @@ typedef struct {
 } bzQuestWc3RenderList_t;
 
 /*
+ * Derives the per-axis footprint/category mesh scale
+ * (bz_quest_wc3_build_world_matrix()'s sx/sy/sz) from `category` and
+ * `footprintX`/`footprintY` alone - factored out of that function so
+ * bz_quest_wc3_build_render_list() can independently populate each render
+ * item's footprintScale* fields with the EXACT SAME numbers used for the
+ * entity's own mesh, and bz_quest_wc3_fog.c's selection markers can size
+ * themselves identically without duplicating this formula (DRY - see this
+ * file's header comment on why radius must not be used instead). Always
+ * succeeds (well-defined for any finite input).
+ */
+void bz_quest_wc3_entity_footprint_scale(uint32_t category, float footprintX, float footprintY,
+                                         float *outScaleX, float *outScaleY, float *outScaleZ);
+
+/*
  * Converts one entity's engine-space origin/angle plus its resolved
  * category/footprint into a column-major world matrix in target (Y-up
- * right-handed) space: world = T(swapped origin) * R(-angle around Y) *
- * S(category/footprint scale) - see this file's header comment for the
- * exact evidence each step replicates. Always succeeds (no degenerate input
- * exists: angle is unconstrained, footprint/category feed a scale formula
- * that is well-defined for any finite input).
+ * right-handed) space: world = T(transform.point(swapped origin)) *
+ * R(-angle around Y) * S(category/footprint scale) - see this file's header
+ * comment for the exact evidence each step replicates. `transform` applies
+ * the shared world/tabletop position scale+center (NULL means "no valid map
+ * bounds this frame", raw passthrough - see bz_quest_wc3_world_transform_point()).
+ * Always succeeds (no degenerate input exists: angle is unconstrained,
+ * footprint/category feed a scale formula that is well-defined for any
+ * finite input).
  */
-void bz_quest_wc3_build_world_matrix(const bzQuestWc3EntityInput_t *entity, float outWorld[16]);
+void bz_quest_wc3_build_world_matrix(const bzQuestWc3EntityInput_t *entity,
+                                     const bzQuestWc3WorldTransform_t *transform, float outWorld[16]);
 
 /*
  * Converts one MDX-space (Z-up) bone/node pose matrix - a
@@ -460,9 +556,14 @@ void bz_quest_wc3_convert_matrix_zup_to_yup(const float inZup[16], float outYup[
  * once BZ_QUEST_WC3_MAX_RENDER_ITEMS is reached and increments
  * outList->overflowCount for the remainder instead of silently dropping
  * them without a count. `outList` is fully rewritten (not appended to) -
- * callers must not reuse stale state across frames.
+ * callers must not reuse stale state across frames. `transform` (NULL
+ * meaning "no valid map bounds this frame") is forwarded verbatim to
+ * bz_quest_wc3_build_world_matrix() for every entity - the same transform
+ * for every item in one call, since it is derived once per snapshot from
+ * that snapshot's own map bounds (see bz_quest_wc3_capture.c).
  */
 void bz_quest_wc3_build_render_list(const bzQuestWc3EntityInput_t *entities, uint32_t entityCount,
+                                    const bzQuestWc3WorldTransform_t *transform,
                                     bzQuestWc3RenderList_t *outList);
 
 /*

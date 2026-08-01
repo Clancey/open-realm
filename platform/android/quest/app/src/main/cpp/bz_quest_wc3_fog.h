@@ -16,12 +16,18 @@
  * cell->world returns the CELL CENTER (min + (cell + 0.5) * 64), the inverse
  * convention that round-trips through that floor() mapping.
  *
- * IMPORTANT: layer 5B's terrain renderer and layer 5A/5C's entity renderer
- * already use DIFFERENT coordinate spaces (terrain compressed/centered into a
- * ~1.08-unit box; entities/models/fog remain raw world units with the Y<->Z
- * axis swap). This module intentionally inherits the ENTITY convention
- * unchanged; fixing the pre-existing terrain/entity mismatch is out of scope
- * for layer 5D and would otherwise introduce a third convention.
+ * IMPORTANT: fog cell math (bz_quest_wc3_fog_world_to_cell/cell_center/
+ * classify_cell) stays in RAW engine world units end to end - it never
+ * needs the shared world/tabletop transform, because
+ * bzQuestWc3FogBounds_t is itself expressed in the same raw units as the
+ * `worldX`/`worldY` arguments passed to it (both ultimately come from the
+ * same authoritative map-bounds snapshot - see bz_quest_wc3_capture.c). The
+ * shared bzQuestWc3WorldTransform_t (bz_quest_wc3_render.h) is only needed
+ * where a position is placed on screen: the fog overlay quad's vertex
+ * shader (see bz_quest_vk_wc3_fog.c's FogPushConsts_t - the quad's raw
+ * world-space fragment varying is unaffected, only its on-screen gl_Position
+ * is transformed, which is valid because the transform is affine) and the
+ * selection-marker functions below.
  */
 #ifndef BZ_QUEST_WC3_FOG_H
 #define BZ_QUEST_WC3_FOG_H
@@ -72,12 +78,44 @@ bool bz_quest_wc3_fog_pack_texture(const uint8_t *visible, const uint8_t *explor
                                    uint32_t height, uint32_t dstRowBytes, uint8_t *dst,
                                    uint32_t dstCapacity);
 bool bz_quest_wc3_fog_bytes_differ(const uint8_t *a, uint32_t aLen, const uint8_t *b, uint32_t bLen);
-bool bz_quest_wc3_selection_marker_from_translation(float tx, float ty, float tz, float radius, float tintR,
-                                                    float tintG, float tintB, float tintA,
-                                                    bzQuestWc3SelectionMarker_t *out);
-bool bz_quest_wc3_selection_marker_from_entity(float originX, float originY, float originZ, float radius,
-                                               float tintR, float tintG, float tintB, float tintA,
-                                               bzQuestWc3SelectionMarker_t *out);
+
+/*
+ * Builds a marker's world matrix from an ALREADY fully-positioned (swapped
+ * and, if applicable, world-transformed) translation - used by
+ * bz_quest_vk_wc3_fog.c's production path, which already has the render
+ * item's finished `world[12/13/14]` (see bz_quest_wc3_build_world_matrix()).
+ * `scaleX/scaleY/scaleZ` must be the SAME per-axis footprint/category scale
+ * the selected entity's own model uses
+ * (bz_quest_wc3_entity_footprint_scale(), bzQuestWc3RenderItem_t's
+ * footprintScale* fields) - NOT the raw bzTTEntity_t.radius transport
+ * field, which is tens of raw WC3 units and has no other proven role (see
+ * bz_quest_wc3_render.h's header comment). Rejects any non-positive axis
+ * scale (a marker cannot be drawn negative/zero size).
+ */
+bool bz_quest_wc3_selection_marker_from_translation(float tx, float ty, float tz, float scaleX, float scaleY,
+                                                    float scaleZ, float tintR, float tintG, float tintB,
+                                                    float tintA, bzQuestWc3SelectionMarker_t *out);
+
+/*
+ * Builds a marker directly from one entity's RAW engine-space origin plus
+ * the shared world/tabletop transform (NULL meaning "no valid map bounds
+ * this frame", raw passthrough) - mirrors
+ * bz_quest_wc3_build_world_matrix()'s translation exactly: engine Y/Z swap
+ * followed by bz_quest_wc3_world_transform_point(), so a marker built this
+ * way always lands on the exact same point as the selected entity's own
+ * model, never a stale pre-transform position. `scaleX/scaleY/scaleZ` -
+ * same contract as bz_quest_wc3_selection_marker_from_translation() above.
+ * (This entry point is currently exercised only by this file's host tests;
+ * bz_quest_vk_wc3_fog.c's production path calls
+ * bz_quest_wc3_selection_marker_from_translation() directly with an
+ * already-built render-item translation instead of duplicating the
+ * swap+transform here - both must therefore agree on the exact same
+ * formula, which is why this function is implemented in terms of that one.)
+ */
+bool bz_quest_wc3_selection_marker_from_entity(float originX, float originY, float originZ,
+                                               const bzQuestWc3WorldTransform_t *transform, float scaleX,
+                                               float scaleY, float scaleZ, float tintR, float tintG,
+                                               float tintB, float tintA, bzQuestWc3SelectionMarker_t *out);
 
 #ifdef __cplusplus
 }

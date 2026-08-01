@@ -128,13 +128,17 @@ static void test_dirty_check_true_for_different_lengths(void) {
     ASSERT(bz_quest_wc3_fog_bytes_differ(a, sizeof(a), b, sizeof(b)));
 }
 
-static void test_selection_marker_from_entity_builds_swapped_translation_and_radius_scale(void) {
+static void test_selection_marker_from_entity_builds_swapped_translation_and_per_axis_scale(void) {
+    /* NULL transform = raw passthrough (no valid map bounds this frame) -
+     * translation and per-axis scale flow straight through the Y/Z swap. */
     bzQuestWc3SelectionMarker_t marker;
-    ASSERT(bz_quest_wc3_selection_marker_from_entity(100.0f, 200.0f, 12.0f, 50.0f,
-                                                     0.1f, 0.2f, 0.3f, 0.4f, &marker));
+    ASSERT(bz_quest_wc3_selection_marker_from_entity(100.0f, 200.0f, 12.0f, NULL, 50.0f, 60.0f, 70.0f, 0.1f, 0.2f,
+                                                     0.3f, 0.4f, &marker));
+    /* Per-axis scale must NOT be forced uniform (fix #1: a rectangular
+     * footprint's marker must stay rectangular, never a single radius). */
     ASSERT_EQ_FLOAT(marker.world[0], 50.0f, 0.0001f);
-    ASSERT_EQ_FLOAT(marker.world[5], 50.0f, 0.0001f);
-    ASSERT_EQ_FLOAT(marker.world[10], 50.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(marker.world[5], 60.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(marker.world[10], 70.0f, 0.0001f);
     ASSERT_EQ_FLOAT(marker.world[12], 100.0f, 0.0001f);
     ASSERT_EQ_FLOAT(marker.world[13], 12.0f, 0.0001f);
     ASSERT_EQ_FLOAT(marker.world[14], 200.0f, 0.0001f);
@@ -142,22 +146,60 @@ static void test_selection_marker_from_entity_builds_swapped_translation_and_rad
     ASSERT_EQ_FLOAT(marker.tint[3], 0.4f, 0.0001f);
 }
 
+static void test_selection_marker_from_entity_applies_shared_transform(void) {
+    /* Fix #3: a non-null transform must be applied to the marker's
+     * translation the exact same way bz_quest_wc3_build_world_matrix()
+     * applies it to the selected entity's own model - proven here by
+     * composing the same bz_quest_wc3_world_transform_point() call this
+     * function's own doc comment says it mirrors, rather than
+     * hand-deriving an expected number. */
+    bzQuestWc3WorldTransform_t transform = {0.01f, 500.0f, 500.0f};
+    bzQuestWc3SelectionMarker_t marker;
+    ASSERT(bz_quest_wc3_selection_marker_from_entity(600.0f, 700.0f, 5.0f, &transform, 50.0f, 60.0f, 70.0f, 1.0f,
+                                                     1.0f, 1.0f, 1.0f, &marker));
+
+    float expected[3];
+    /* Same engine Y/Z swap bz_quest_wc3_build_world_matrix() uses: target X
+     * = engine X, target Y = engine Z (up), target Z = engine Y (north). */
+    bz_quest_wc3_world_transform_point(&transform, 600.0f, 5.0f, 700.0f, expected);
+    ASSERT_EQ_FLOAT(marker.world[12], expected[0], 0.0001f);
+    ASSERT_EQ_FLOAT(marker.world[13], expected[1], 0.0001f);
+    ASSERT_EQ_FLOAT(marker.world[14], expected[2], 0.0001f);
+    /* Scale is untouched by the position transform - stays exactly the
+     * caller-supplied per-axis footprint scale. */
+    ASSERT_EQ_FLOAT(marker.world[0], 50.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(marker.world[5], 60.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(marker.world[10], 70.0f, 0.0001f);
+}
+
 static void test_selection_marker_from_translation_preserves_target_axes(void) {
     bzQuestWc3SelectionMarker_t marker;
-    ASSERT(bz_quest_wc3_selection_marker_from_translation(-10.0f, 4.0f, 77.0f, 12.5f,
-                                                          1.0f, 0.5f, 0.25f, 1.0f, &marker));
+    ASSERT(bz_quest_wc3_selection_marker_from_translation(-10.0f, 4.0f, 77.0f, 12.5f, 1.5f, 0.5f,
+                                                          0.5f, 0.25f, 1.0f, 1.0f, &marker));
     ASSERT_EQ_FLOAT(marker.world[0], 12.5f, 0.0001f);
+    ASSERT_EQ_FLOAT(marker.world[5], 1.5f, 0.0001f);
+    ASSERT_EQ_FLOAT(marker.world[10], 0.5f, 0.0001f);
     ASSERT_EQ_FLOAT(marker.world[12], -10.0f, 0.0001f);
     ASSERT_EQ_FLOAT(marker.world[13], 4.0f, 0.0001f);
     ASSERT_EQ_FLOAT(marker.world[14], 77.0f, 0.0001f);
-    ASSERT_EQ_FLOAT(marker.tint[1], 0.5f, 0.0001f);
-    ASSERT_EQ_FLOAT(marker.tint[2], 0.25f, 0.0001f);
+    ASSERT_EQ_FLOAT(marker.tint[1], 0.25f, 0.0001f);
+    ASSERT_EQ_FLOAT(marker.tint[2], 1.0f, 0.0001f);
 }
 
-static void test_selection_marker_rejects_nonpositive_radius(void) {
+static void test_selection_marker_rejects_nonpositive_scale_on_any_axis(void) {
+    /* Each axis must be independently validated - a rectangular marker with
+     * only ONE degenerate axis is still invalid, not silently clamped. */
     bzQuestWc3SelectionMarker_t marker;
-    ASSERT(!bz_quest_wc3_selection_marker_from_entity(0.0f, 0.0f, 0.0f, 0.0f,
-                                                      1.0f, 1.0f, 1.0f, 1.0f, &marker));
+    ASSERT(!bz_quest_wc3_selection_marker_from_translation(0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                                                           &marker));
+    ASSERT(!bz_quest_wc3_selection_marker_from_translation(0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                                                           &marker));
+    ASSERT(!bz_quest_wc3_selection_marker_from_translation(0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                                                           &marker));
+    ASSERT(!bz_quest_wc3_selection_marker_from_translation(0.0f, 0.0f, 0.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f,
+                                                           1.0f, &marker));
+    ASSERT(!bz_quest_wc3_selection_marker_from_entity(0.0f, 0.0f, 0.0f, NULL, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                                                      1.0f, &marker));
 }
 
 static void test_zero_dimensions_are_reported_safe_and_empty(void) {
@@ -187,8 +229,9 @@ void run_bz_quest_wc3_fog_tests(void) {
     RUN_TEST(test_dirty_check_false_for_identical_buffers);
     RUN_TEST(test_dirty_check_true_for_different_byte);
     RUN_TEST(test_dirty_check_true_for_different_lengths);
-    RUN_TEST(test_selection_marker_from_entity_builds_swapped_translation_and_radius_scale);
+    RUN_TEST(test_selection_marker_from_entity_builds_swapped_translation_and_per_axis_scale);
+    RUN_TEST(test_selection_marker_from_entity_applies_shared_transform);
     RUN_TEST(test_selection_marker_from_translation_preserves_target_axes);
-    RUN_TEST(test_selection_marker_rejects_nonpositive_radius);
+    RUN_TEST(test_selection_marker_rejects_nonpositive_scale_on_any_axis);
     RUN_TEST(test_zero_dimensions_are_reported_safe_and_empty);
 }

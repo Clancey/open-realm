@@ -348,7 +348,8 @@ test`, none of which need Gradle/NDK/Quest hardware:
 | `bz_quest_scene.c` | `tests/test_bz_quest_scene.c` | Procedural test-scene generator (unchanged from layer 3). |
 | `bz_quest_data.c` | `tests/test_bz_quest_data.c` | Default-dir construction, override read/validate (normal + every documented rejection: relative path, disallowed characters, oversized, empty), full resolve fallback order, and argv construction (normal + undersized-buffer/NULL-arg error paths) — 22 tests, pure, real temp dirs via `mkdtemp()`. |
 | `bz_quest_frame.c` | `tests/test_bz_quest_frame.c` | Reset value, `bz_quest_frame_from_values()` field copy/truncation/ABI-mismatch detection, and every `bz_quest_frame_should_log()` cache-hit/cache-miss branch (identical frame never logs; status/lifecycle-state/lifecycle-error changes each log; a bare `generation` advance — in *any* status, including `OK` — never logs, including across ~190 simulated consecutive engine frames, guarding against the per-frame-log regression fixed in PR #19's review pass) — 15 tests, pure, no I/O. |
-| `bz_quest_wc3_fog.c` | `tests/test_bz_quest_wc3_fog.c` | Three-state fog classification, row-major cell indexing, world<->cell conversion (including rectangular/non-chunk-multiple grids), 0/128/255 texture packing with and without row padding, content-based dirty-check hit/miss, selection-marker matrix/tint generation, and zero-dimension rejection paths. |
+| `bz_quest_wc3_fog.c` | `tests/test_bz_quest_wc3_fog.c` | Three-state fog classification, row-major cell indexing, world<->cell conversion (including rectangular/non-chunk-multiple grids), 0/128/255 texture packing with and without row padding, content-based dirty-check hit/miss, per-axis selection-marker matrix/tint generation (with and without the shared world transform), independent per-axis nonpositive-scale rejection, and zero-dimension rejection paths. |
+| `bz_quest_wc3_render.c` (world transform) | `tests/test_bz_quest_wc3_world_transform.c` | Cross-subsystem integration for the shared world/tabletop transform: entity-at-terrain-corner/center coordinate match against `bz_quest_wc3_terrain_build_chunk()`'s real vertex output, fog-cell/entity raw-space agreement, selection-marker/entity translation+scale sharing, rectangular bounds + nonzero origin, map-reload producing an independent transform, and a guard against double-applying the transform. |
 | `bz_quest_bridge.c` | `tests/test_bz_quest_bridge.c` | Valid-override start reaches `RUNNING`; missing-data start reaches `FAILED` with the engine's own error surfaced; invalid-override start reaches `FAILED` *before* any `bzTabletopLifecycle_t` exists; a second `start()` on an already-attempted instance is rejected; suspend/resume forward correctly (and are safe no-ops before a start or after a stop); `stop()` is idempotent and safe pre-start; `destroy()` then a fresh `start()` on the same storage succeeds; `is_terminal()` is correct for every bridge state — 10 tests, **linking the real** `bz_tabletop_lifecycle.c`/`common/bz_runtime.c` (not a stub), 67 assertions. |
 
 `bz_quest_bridge.c`'s tests are the one suite in this table that needs
@@ -1928,11 +1929,13 @@ audio, data staging, hand tracking, billboarding, TXAN, or KMTF.
    `BZ_TTSnapshot_Player(0)`'s `target` mode. No transport ABI field or version
    changed for this layer.
 3. Per-entity selection/tint data stays in the existing frame-capture path:
-   `bzTTEntity_t.selected` and `bzTTEntity_t.radius` are copied into the
-   Quest-local `bzQuestWc3EntityInput_t` / `bzQuestWc3RenderItem_t`, alongside
+   `bzTTEntity_t.selected` is copied into the Quest-local
+   `bzQuestWc3EntityInput_t` / `bzQuestWc3RenderItem_t`, alongside
    `bzTTAssetMetadata_t.tint_r/g/b/a` from
-   `BZ_TTA_ResolveEntityMetadata()`. No hardcoded team-color table exists on the
-   Quest side; the asset ABI's resolved tint stays authoritative.
+   `BZ_TTA_ResolveEntityMetadata()`. `bzTTEntity_t.radius` is **not** copied or
+   used anywhere in this layer (see "Selection overlay design" below for why
+   and what replaces it). No hardcoded team-color table exists on the Quest
+   side; the asset ABI's resolved tint stays authoritative.
 4. `bz_quest_wc3_fog.c` is the pure, host-testable layer. It classifies each
    cell into exactly the desktop client's existing three-state model:
    VISIBLE (`visible!=0`), EXPLORED_NOT_VISIBLE (`visible==0 && explored!=0`),
@@ -1953,17 +1956,67 @@ audio, data staging, hand tracking, billboarding, TXAN, or KMTF.
    as the upload gate because the transport increments it every client frame,
    even when fog bytes are identical.
 
-### Coordinate-space note (inherited, not fixed here)
+### Shared world/tabletop position transform (fixes the inherited coordinate mismatch)
 
-Fog cells and selection markers intentionally follow the **existing entity**
-world convention from `bz_quest_wc3_build_world_matrix()`: translation is the
-raw engine position with the established `(x,z,y)` swap, and no terrain-style
-map-centering or compression is applied. This means layer 5D inherits the
-already-reviewed 5B/5C mismatch where entities/fog live in raw world units but
-terrain lives in a compressed centered box. This layer does **not** try to
-"fix" that mismatch; doing so here would create a third convention instead of
-faithfully following the authoritative entity/fog coordinates the snapshot and
-server-side fog grid already use.
+An earlier version of this layer left fog/entity/marker positions in raw
+engine world units while terrain used a separately-scaled, centered "diorama"
+box, and documented the resulting mismatch as an accepted limitation. That was
+rejected in review: **the renderer cannot spatially align terrain, entities,
+fog, and selection markers unless they share one transform**, and
+documentation is not a substitute for actually applying it. This is now fixed
+with one shared, Quest-owned transform applied exactly once to every
+world-space position:
+
+- `bzQuestWc3WorldTransform_t` (`bz_quest_wc3_render.h`) holds `{scale,
+  centerX, centerZ}`. `bz_quest_wc3_world_transform_measure(minX, minZ, maxX,
+  maxZ, &out)` derives it from the authoritative map bounds using the exact
+  same formula `bz_quest_wc3_terrain_measure()` has always used for terrain
+  (`scale = 1.08 / max(spanX, spanZ)`, `center = bounds midpoint` per axis) -
+  `bz_quest_wc3_terrain_measure()` now calls this shared function internally
+  instead of duplicating the `1.08` literal, so terrain and every other
+  consumer are provably driven by the same formula, not two copies of it.
+  `bz_quest_wc3_world_transform_point(transform, x, y, z, out)` applies it:
+  `out = ((x-centerX)*scale, y*scale, (z-centerZ)*scale)` - height is scaled
+  but never re-centered, matching the reviewed visionOS reference
+  (`WarcraftWorldTransform` in `WarcraftAssetAdapter.swift`). A `NULL`
+  transform is raw passthrough (no valid map bounds this frame), never a
+  fabricated identity scale.
+- `bz_quest_wc3_capture.c` computes this transform **once per frame** from
+  `BZ_TTSnapshot_MapBounds()` and threads it into both
+  `bz_quest_wc3_build_render_list()` (entity translation) and
+  `bz_quest_wc3_capture_fog()`'s stored `bzQuestWc3FogCapture_t.transform`
+  (fog GPU placement). Missing/degenerate bounds log once
+  (`entity-transform-bounds-missing` / `fog-bounds-degenerate`) and fall back
+  to `NULL`/failed capture respectively - never a silent guess.
+- `bz_quest_wc3_build_world_matrix()` applies the transform to the entity's
+  translation **only** (`outWorld[12/13/14]`); the model-local rotation/scale
+  block (`outWorld[0..10]`, built from
+  `bz_quest_wc3_entity_footprint_scale()`) is completely unaffected - model
+  geometry scale and world-position scaling are two separate concerns and
+  must never be mixed into one number.
+- The Vulkan fog vertex shader (`warcraft_fog_vert.vert`) receives the same
+  `{centerX, centerZ, scale}` via a push-constant `vec4 transform` and applies
+  it only to the position fed into `gl_Position`; the fragment shader's fog
+  cell-index math (`fragWorld`) intentionally stays in raw world space
+  end-to-end, matching `bzQuestWc3FogBounds_t`'s own raw-unit convention - the
+  transform only needs to touch on-screen placement, not fog-cell math.
+- Selection markers get the same treatment: `bz_quest_vk_wc3_fog.c`'s
+  production path reuses the render item's already-transformed
+  `item->world[12/13/14]` directly (no second application), and the pure
+  `bz_quest_wc3_selection_marker_from_entity()` test helper mirrors
+  `bz_quest_wc3_build_world_matrix()`'s swap+transform exactly for host
+  testing.
+- Cross-subsystem integration tests in
+  `platform/android/quest/tests/test_bz_quest_wc3_world_transform.c` prove an
+  entity placed at a known terrain corner/center lands on the exact same
+  on-screen position `bz_quest_wc3_terrain_build_chunk()` produces for that
+  corner, that a fog cell and an entity agree on the same raw-space meaning
+  of a world coordinate, that a selection marker shares the model's own
+  translation and per-axis scale, that rectangular bounds and nonzero map
+  origins work, that reloading the map with new bounds produces an
+  independent transform (no stale/global state), and that applying the
+  transform twice would produce a visibly different (wrong) result - guarding
+  against a future double-conversion regression.
 
 ### GPU representation and draw order
 
@@ -1974,11 +2027,17 @@ server-side fog grid already use.
   `VkBufferImageCopy.bufferRowLength`, so padded-row uploads stay correct when
   the image width is not already naturally aligned.
 - The shared eye render pass order is now: terrain opaque -> model opaque ->
-  fog overlay -> terrain blended -> model blended -> selection markers.
-  The fog pass darkens already-rendered opaque Warcraft content without needing
-  a second scene-color target; selection markers draw last so they remain
+  terrain blended -> model blended -> fog overlay -> selection markers.
+  Fog is recorded **after** both blended passes so water and transparent
+  doodads are composited before fog darkens the final opaque+blended result -
+  recording it earlier (as an initial version of this layer did) let
+  transparent content draw fully visible on top of the fog mask afterward,
+  silently un-fogging it. Selection markers draw last so they remain
   readable, but their pipeline still depth-tests against the existing opaque
-  depth buffer and uses a tiny world-space lift epsilon to avoid floor z-fight.
+  depth buffer and uses a tiny world-space lift epsilon (scaled by the shared
+  transform's `scale`, so it stays a consistent fraction of world size instead
+  of becoming oversized once positions are diorama-scaled) to avoid floor
+  z-fight.
 - When `BZ_TTSnapshot_FogDimensions()` reports false, the fog image is torn
   down and no overlay draws that frame; the renderer never leaves a stale
   "last map's fog" texture bound after unload/reset.
@@ -1987,11 +2046,20 @@ server-side fog grid already use.
 
 Markers are Quest-owned procedural annulus geometry (32 segments, fixed inner
 radius ratio) built once at renderer init, then transformed per selected
-entity. The pure helper builds a trivial uniform-scale world matrix where local
-radius `1.0` becomes authoritative world radius `bzTTEntity_t.radius`; there is
-no extra diorama/category fudge factor because `g_monster.c` / `g_spawn.c`
-already treat that transport radius as the real UI/selection circle radius.
-The marker shader is flat-tinted from the per-entity `tint_r/g/b/a` metadata.
+entity. The pure helper builds the marker's world matrix from the render
+item's already-computed per-axis `footprintScaleX/Y/Z`
+(`bz_quest_wc3_entity_footprint_scale()`) - the **same** category/footprint
+formula `bz_quest_wc3_build_world_matrix()` uses for the selected entity's own
+mesh scale - and its already-transformed `world[12/13/14]` translation, not
+`bzTTEntity_t.radius`. An earlier version of this layer sized markers directly
+from `radius`, but that field is tens of raw WC3 world units while the model
+itself is placed with the compressed diorama footprint scale, so a
+radius-sized ring never matched the selected model's own footprint; `radius`
+has no other proven role and has been removed from the Quest-local entity/
+render-item structs entirely. Because the scale is per-axis (not a single
+uniform radius), a rectangular building's marker stays rectangular and
+correctly oriented, matching its footprint. The marker shader is flat-tinted
+from the per-entity `tint_r/g/b/a` metadata.
 
 ### Supported vs. unsupported fog/selection behavior
 
@@ -2001,10 +2069,12 @@ The marker shader is flat-tinted from the per-entity `tint_r/g/b/a` metadata.
 | Desktop-parity three-state bytes (`255` visible, `128` explored-not-visible, `0` unseen) | Supported |
 | Rectangular/non-square fog grids and padded-row GPU uploads | Supported |
 | Content-based dirty check (identical fog bytes do not re-upload) | Supported |
-| Per-entity selection rings from `bzTTEntity_t.selected` + `bzTTEntity_t.radius` | Supported |
+| Fog recorded after opaque+blended terrain/model passes so transparent content is correctly darkened | Supported |
+| Per-entity selection rings from `bzTTEntity_t.selected`, sized from the same footprint/category scale the model uses (not raw `radius`) | Supported |
+| Rectangular building footprints produce correctly oriented, non-square selection markers | Supported |
 | Per-entity tint from `bzTTAssetMetadata_t.tint_*` | Supported |
-| Player `target` mode rendering | **Not implemented.** `bzTTPlayer_t.target` is only a mode enum; the transport ABI exposes no authoritative point or entity payload to draw, so this layer logs once and deliberately renders nothing rather than fabricating a target location. |
-| Terrain/entity coordinate-space reconciliation | **Not implemented.** The pre-existing raw-entity-vs-compressed-terrain mismatch is inherited unchanged from 5B/5C; fixing it is a separate rendering-space task, not part of this overlay slice. |
+| Shared world/tabletop position transform applied once to terrain, entity translations, fog bounds/cells, and selection markers | Supported |
+| Player `target` mode rendering | **Not implemented.** `bzTTPlayer_t.target` is only a mode enum; the transport ABI exposes no authoritative point or entity payload to draw, so this layer logs once and deliberately renders nothing rather than fabricating a target location. Live controller/hand targeting is an input-layer concern and out of scope for this renderer-only slice. |
 
 ### Tests and build wiring
 
@@ -2012,17 +2082,35 @@ The marker shader is flat-tinted from the per-entity `tint_r/g/b/a` metadata.
   all new pure branches: the three cell states, row-major indexing, first/last
   edge-cell round trips, rectangular grids, non-chunk-multiple grids, padded
   and non-padded packing, dirty-check hit/miss and length mismatch, marker
-  transform/tint generation for multiple inputs, and zero-dimension rejection.
-- `platform/android/quest/tests/test_bz_quest_wc3_render.c` adds passthrough
-  coverage that the render-list builder preserves `selected`, `radius`, and the
-  resolved tint fields on each `bzQuestWc3RenderItem_t`.
+  transform/tint generation for multiple per-axis scale inputs (with and
+  without a shared transform), independent per-axis nonpositive-scale
+  rejection, and zero-dimension rejection.
+- `platform/android/quest/tests/test_bz_quest_wc3_render.c` adds coverage for
+  the shared `bz_quest_wc3_world_transform_measure/point` functions
+  (valid/degenerate bounds, `NULL` passthrough), a test proving
+  `bz_quest_wc3_build_world_matrix()`'s transform changes only the
+  translation and never the rotation/scale block, and render-list coverage
+  that each item's `footprintScaleX/Y/Z` (not `radius`, which no longer
+  exists on either struct) exactly matches the mesh scale
+  `bz_quest_wc3_build_world_matrix()` computes for the same entity, including
+  a rectangular (non-square) footprint.
+- `platform/android/quest/tests/test_bz_quest_wc3_world_transform.c` (new)
+  holds the cross-subsystem integration tests described above - it
+  deliberately calls the same production entry points terrain
+  (`bz_quest_wc3_terrain_build_chunk`), entities
+  (`bz_quest_wc3_build_world_matrix`/`build_render_list`), fog
+  (`bz_quest_wc3_fog_world_to_cell`), and selection markers
+  (`bz_quest_wc3_selection_marker_from_translation`) already use in
+  production, never a hand-duplicated copy of the transform formula.
 - `platform/android/quest/scripts/test-wc3-fog-selection-layout.sh` (wired into
   `make test` and `make quest` as `test-quest-wc3-fog-selection-layout`) guards
   the layer-5D shader/source registration, `VK_FORMAT_R8_UNORM`, explicit
-  `bufferRowLength` upload path, and the shared render-pass ordering.
+  `bufferRowLength` upload path, the corrected fog-after-blended-passes render
+  order, and the transform push-constant field on both the C and shader sides.
 - `platform/android/quest/build.mk`'s `test-quest-host-tests` target now builds
-  `bz_quest_wc3_fog.c` / `test_bz_quest_wc3_fog.c` alongside the earlier pure
-  Quest modules, and the shader build pipeline now regenerates the four new
+  `bz_quest_wc3_fog.c` / `test_bz_quest_wc3_fog.c` and the new
+  `test_bz_quest_wc3_world_transform.c` alongside the earlier pure Quest
+  modules, and the shader build pipeline now regenerates the four new
   `warcraft_fog_*` / `warcraft_marker_*` SPIR-V headers automatically.
 
 ### Acceptance gates

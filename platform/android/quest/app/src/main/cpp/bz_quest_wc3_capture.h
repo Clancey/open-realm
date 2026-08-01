@@ -101,6 +101,13 @@ typedef struct {
     uint32_t width, height;
     uint32_t targetMode; /* raw bzTTActionTarget_t value; mode only, no transported point/entity payload exists */
     bzQuestWc3FogBounds_t bounds;
+    /* Shared world/tabletop transform derived from the SAME map bounds
+     * above (bz_quest_wc3_world_transform_measure()) - carried alongside
+     * `bounds` so bz_quest_vk_wc3_fog.c's fog-quad vertex shader can place
+     * the overlay on screen at exactly the same position as terrain and
+     * entities, without a second bounds fetch or a second transform
+     * derivation. See bz_quest_wc3_render.h's header comment. */
+    bzQuestWc3WorldTransform_t transform;
     uint8_t visible[BZ_QUEST_WC3_FOG_MAX_CELLS];
     uint8_t explored[BZ_QUEST_WC3_FOG_MAX_CELLS];
 } bzQuestWc3FogCapture_t;

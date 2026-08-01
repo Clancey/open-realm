@@ -26,6 +26,7 @@ typedef struct {
     float viewProj[16];
     float bounds[4];
     float fogParams[4];
+    float transform[4]; /* centerX, centerZ, scale, unused - see bz_quest_wc3_render.h */
 } FogPushConsts_t;
 
 typedef struct {
@@ -672,6 +673,7 @@ void bz_quest_vk_wc3_fog_capture_and_upload(bzQuestVkWc3Fog_t *vkFog) {
     }
     vkFog->bounds = vkFog->capture->bounds;
     vkFog->targetMode = vkFog->capture->targetMode;
+    vkFog->transform = vkFog->capture->transform;
 
     uint32_t cells = bz_quest_wc3_fog_cell_count(vkFog->capture->width, vkFog->capture->height);
     if (!bz_quest_wc3_fog_pack_texture(vkFog->capture->visible, vkFog->capture->explored,
@@ -728,6 +730,10 @@ void bz_quest_vk_wc3_fog_record_overlay(bzQuestVkWc3Fog_t *vkFog, VkCommandBuffe
     pc.fogParams[1] = (float)vkFog->height;
     pc.fogParams[2] = BZ_QUEST_WC3_FOG_CELL_SIZE;
     pc.fogParams[3] = 0.0f;
+    pc.transform[0] = vkFog->transform.centerX;
+    pc.transform[1] = vkFog->transform.centerZ;
+    pc.transform[2] = vkFog->transform.scale;
+    pc.transform[3] = 0.0f;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkFog->fogPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkFog->fogPipelineLayout, 0, 1,
@@ -749,10 +755,18 @@ void bz_quest_vk_wc3_fog_record_selection(bzQuestVkWc3Fog_t *vkFog, VkCommandBuf
         if (!item->selected) continue;
         bzQuestWc3SelectionMarker_t marker;
         if (!bz_quest_wc3_selection_marker_from_translation(item->world[12], item->world[13], item->world[14],
-                                                            item->radius, item->tintR, item->tintG, item->tintB,
-                                                            item->tintA, &marker))
+                                                            item->footprintScaleX, item->footprintScaleY,
+                                                            item->footprintScaleZ, item->tintR, item->tintG,
+                                                            item->tintB, item->tintA, &marker))
             continue;
-        marker.world[13] += BZ_QUEST_VK_WC3_FOG_MARKER_LIFT_EPSILON;
+        /* BZ_QUEST_VK_WC3_FOG_MARKER_LIFT_EPSILON is a raw-world-unit
+         * z-fighting nudge ("0.5 world units above the entity's own
+         * origin"); item->world[13] is now in shared-transform (diorama)
+         * space, so the epsilon must go through the SAME transform.scale
+         * before being added, or a fixed "0.5" would dwarf the ~1.08-unit
+         * diorama box entirely. See bz_quest_wc3_render.h's header
+         * comment. */
+        marker.world[13] += BZ_QUEST_VK_WC3_FOG_MARKER_LIFT_EPSILON * vkFog->transform.scale;
         MarkerPushConsts_t pc;
         bz_quest_mat4_multiply(viewProj, marker.world, pc.mvp);
         memcpy(pc.tint, marker.tint, sizeof(pc.tint));

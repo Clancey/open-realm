@@ -52,6 +52,13 @@ typedef struct bzQuestVkWc3Fog_s {
     uint32_t width, height, rowBytes, lastPackedBytes;
     uint32_t targetMode;
     bzQuestWc3FogBounds_t bounds;
+    /* Copied from capture->transform each frame (see
+     * bz_quest_vk_wc3_fog_capture_and_upload()) - the shared world/tabletop
+     * transform for THIS bounds, so record_overlay() can place the fog
+     * quad's on-screen position (not its raw fragWorld cell-index varying)
+     * in the same diorama space as terrain/entities. See
+     * bz_quest_wc3_render.h's header comment. */
+    bzQuestWc3WorldTransform_t transform;
     bool haveFog;
 } bzQuestVkWc3Fog_t;
 

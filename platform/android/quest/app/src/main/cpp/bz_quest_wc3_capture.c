@@ -839,6 +839,29 @@ void bz_quest_wc3_capture_frame(const bzQuestWc3CaptureCallbacks_t *callbacks,
     }
 
     uint32_t entityCount = BZ_TTSnapshot_EntityCount(snap);
+
+    /* Shared world/tabletop transform (bz_quest_wc3_render.h) derived from
+     * this snapshot's own map bounds - the SAME transform terrain uses
+     * (bz_quest_wc3_terrain_measure()) and fog uses
+     * (bz_quest_wc3_capture_fog() below), applied exactly once per entity
+     * inside bz_quest_wc3_build_render_list()/build_world_matrix(). `haveTransform
+     * = false` (bounds missing/degenerate) means entity translations pass
+     * through RAW/unscaled this frame - a defensive fallback, logged once,
+     * not a silent misplacement: if bounds are genuinely absent there is no
+     * terrain/fog to align with either, so raw passthrough is no worse than
+     * the pre-fix behavior it replaces. */
+    bzTTBox2_t mapBounds;
+    bzQuestWc3WorldTransform_t transform;
+    bool haveTransform = BZ_TTSnapshot_MapBounds(snap, &mapBounds) &&
+                         bz_quest_wc3_world_transform_measure(mapBounds.min_x, mapBounds.min_y, mapBounds.max_x,
+                                                              mapBounds.max_y, &transform);
+    if (!haveTransform && entityCount > 0) {
+        LOG_ONCE("<process>", "entity-transform-bounds-missing",
+                 "bz_quest_wc3_capture: %u entities arrived with no valid map bounds - entity "
+                 "positions render in raw/unscaled space this frame (will not align with terrain)\n",
+                 entityCount);
+    }
+
     for (uint32_t i = 0; i < entityCount; i++) {
         bzTTEntity_t entity;
         if (!BZ_TTSnapshot_EntityAt(snap, i, &entity)) continue;
@@ -883,7 +906,6 @@ void bz_quest_wc3_capture_frame(const bzQuestWc3CaptureCallbacks_t *callbacks,
                 in->angle = entity.angle;
                 in->footprintX = metadata.footprint_x;
                 in->footprintY = metadata.footprint_y;
-                in->radius = entity.radius;
                 in->tintR = metadata.tint_r;
                 in->tintG = metadata.tint_g;
                 in->tintB = metadata.tint_b;
@@ -941,7 +963,8 @@ void bz_quest_wc3_capture_frame(const bzQuestWc3CaptureCallbacks_t *callbacks,
         BZ_TTAsset_Release(modelAsset);
     }
 
-    bz_quest_wc3_build_render_list(entityInputs, entityInputCount, outRenderList);
+    bz_quest_wc3_build_render_list(entityInputs, entityInputCount, haveTransform ? &transform : NULL,
+                                   outRenderList);
     BZ_TTSnapshot_Release(snap);
 }
 
@@ -992,6 +1015,26 @@ bool bz_quest_wc3_capture_fog(bzQuestWc3FogCapture_t *out) {
     out->bounds.minY = bounds.min_y;
     out->bounds.maxX = bounds.max_x;
     out->bounds.maxY = bounds.max_y;
+
+    /* Same shared world/tabletop transform bz_quest_wc3_capture_frame()
+     * derives for entities, from the SAME map bounds - see
+     * bz_quest_wc3_render.h's header comment. A fog grid cannot be placed
+     * on screen without a valid transform (there would be nothing correct
+     * to align it to either), so - unlike entities' defensive raw-
+     * passthrough fallback above - degenerate bounds here fail the whole
+     * capture, matching bz_quest_wc3_terrain_measure()'s own
+     * BZ_QUEST_WC3_TERRAIN_ERR_INVALID_BOUNDS treatment of the same bounds
+     * value for terrain. */
+    if (!bz_quest_wc3_world_transform_measure(out->bounds.minX, out->bounds.minY, out->bounds.maxX,
+                                              out->bounds.maxY, &out->transform)) {
+        LOG_ONCE("<process>", "fog-bounds-degenerate",
+                 "bz_quest_wc3_capture: fog grid %ux%u arrived with degenerate map bounds "
+                 "(min_x=%f min_y=%f max_x=%f max_y=%f) - fog unavailable this frame\n",
+                 out->width, out->height, bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y);
+        memset(out, 0, sizeof(*out));
+        BZ_TTSnapshot_Release(snap);
+        return false;
+    }
 
     uint32_t cells = bz_quest_wc3_fog_cell_count(out->width, out->height);
     uint32_t visibleBytes = BZ_TTSnapshot_FogVisible(snap, out->visible, cells);

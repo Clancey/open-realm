@@ -4,6 +4,7 @@
  * covers a normal path and its inverse/overflow path, per AGENTS.md's test
  * discipline.
  */
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,7 +26,7 @@ static void test_position_swaps_y_and_z(void) {
     entity.footprintX = entity.footprintY = 1.0f;
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
 
     /* Column-major translation lives at indices 12/13/14. Target X stays
      * engine X; target Y becomes engine Z (up); target Z becomes engine Y -
@@ -33,6 +34,71 @@ static void test_position_swaps_y_and_z(void) {
     ASSERT_EQ_FLOAT(world[12], 1.0f, 0.0001f);
     ASSERT_EQ_FLOAT(world[13], 3.0f, 0.0001f);
     ASSERT_EQ_FLOAT(world[14], 2.0f, 0.0001f);
+}
+
+/* ------------------------------------------------------------------ */
+/* bz_quest_wc3_world_transform_measure / _point - shared world/tabletop */
+/* position transform (fix for the terrain/entity/fog coordinate         */
+/* mismatch - see this file's header comment).                          */
+/* ------------------------------------------------------------------ */
+
+static void test_world_transform_measure_computes_scale_and_center(void) {
+    bzQuestWc3WorldTransform_t transform;
+    ASSERT(bz_quest_wc3_world_transform_measure(0.0f, 0.0f, 5120.0f, 2560.0f, &transform));
+    ASSERT_EQ_FLOAT(transform.scale, 1.08f / 5120.0f, 0.000001f); /* governed by the larger span (X) */
+    ASSERT_EQ_FLOAT(transform.centerX, 2560.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(transform.centerZ, 1280.0f, 0.0001f);
+}
+
+static void test_world_transform_measure_rejects_degenerate_bounds(void) {
+    bzQuestWc3WorldTransform_t transform;
+    ASSERT(!bz_quest_wc3_world_transform_measure(0.0f, 0.0f, 0.0f, 128.0f, &transform));       /* zero span */
+    ASSERT(!bz_quest_wc3_world_transform_measure(0.0f, 0.0f, INFINITY, 128.0f, &transform));   /* non-finite */
+    ASSERT(!bz_quest_wc3_world_transform_measure(128.0f, 0.0f, 0.0f, 128.0f, &transform));     /* inverted span */
+}
+
+static void test_world_transform_point_applies_scale_then_center(void) {
+    bzQuestWc3WorldTransform_t transform = {0.01f, 100.0f, 200.0f};
+    float out[3];
+    bz_quest_wc3_world_transform_point(&transform, 150.0f, 5.0f, 250.0f, out);
+    ASSERT_EQ_FLOAT(out[0], (150.0f - 100.0f) * 0.01f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[1], 5.0f * 0.01f, 0.0001f); /* height scaled but never re-centered */
+    ASSERT_EQ_FLOAT(out[2], (250.0f - 200.0f) * 0.01f, 0.0001f);
+}
+
+static void test_world_transform_point_null_is_raw_passthrough(void) {
+    float out[3];
+    bz_quest_wc3_world_transform_point(NULL, 7.0f, 8.0f, 9.0f, out);
+    ASSERT_EQ_FLOAT(out[0], 7.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[1], 8.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[2], 9.0f, 0.0001f);
+}
+
+static void test_build_world_matrix_transform_only_affects_translation(void) {
+    /* The reviewer's explicit requirement for fix #3: model-local
+     * scale/rotation must stay completely separate from world-position
+     * scaling - a non-null transform must change ONLY world[12/13/14],
+     * never the rotScale block (world[0..10]). */
+    bzQuestWc3EntityInput_t entity;
+    memset(&entity, 0, sizeof(entity));
+    entity.originX = 600.0f;
+    entity.originY = 700.0f;
+    entity.category = 2;
+    entity.footprintX = entity.footprintY = 1.0f;
+    entity.angle = 0.7f;
+
+    float worldRaw[16], worldTransformed[16];
+    bz_quest_wc3_build_world_matrix(&entity, NULL, worldRaw);
+    bzQuestWc3WorldTransform_t transform = {0.01f, 500.0f, 500.0f};
+    bz_quest_wc3_build_world_matrix(&entity, &transform, worldTransformed);
+
+    for (int i = 0; i < 11; i++) {
+        if (i == 3 || i == 7) continue; /* unused homogeneous row components */
+        ASSERT_EQ_FLOAT(worldTransformed[i], worldRaw[i], 0.00001f);
+    }
+    /* Translation, however, must differ - the transform was actually applied. */
+    ASSERT(fabsf(worldTransformed[12] - worldRaw[12]) > 0.0001f);
+    ASSERT(fabsf(worldTransformed[14] - worldRaw[14]) > 0.0001f);
 }
 
 /* ------------------------------------------------------------------ */
@@ -47,7 +113,7 @@ static void test_zero_heading_yields_identity_rotation(void) {
     entity.angle = 0.0f;
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
 
     /* With angle==0, cos(-0)=1, sin(-0)=0: the rotation part of the
      * rotation*scale block is a pure diagonal (no off-diagonal terms). */
@@ -63,7 +129,7 @@ static void test_nonzero_heading_negated_and_about_y(void) {
     entity.angle = 1.0f; /* radians, engine yaw */
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
 
     /* theta = -1.0 (negated - TabletopAdapter.swift:54). rotScale column 0
      * is (c*sx, 0, -s*sx) where c=cos(-1), s=sin(-1). Column 1 (Y) must stay
@@ -87,7 +153,7 @@ static void test_building_scale_uses_full_category_multiplier(void) {
     entity.angle = 0.0f;
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
 
     /* dioramaX = 1.0 * max(2,2) = 2; sx = min(2,2)*0.06 = 0.12.
      * dioramaY (Y, unaffected by footprint) = 1.0; sy = 1.0*0.08 = 0.08. */
@@ -104,7 +170,7 @@ static void test_footprint_below_minimum_is_clamped(void) {
     entity.angle = 0.0f;
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
 
     /* dioramaX = 1.0 * max(0.25) = 0.25; sx = min(0.25,2)*0.06 = 0.015. */
     ASSERT_EQ_FLOAT(world[0], 0.015f, 0.0005f);
@@ -118,7 +184,7 @@ static void test_footprint_above_cap_is_clamped(void) {
     entity.angle = 0.0f;
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
 
     /* dioramaX = 1.0 * 100 = 100, but min(100,2)*0.06 = 0.12 - the cap
      * bounds the final scale regardless of how large footprint*category is. */
@@ -141,7 +207,7 @@ static void test_rectangular_footprint_scales_x_and_z_independently(void) {
     entity.angle = 0.0f;
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
 
     /* sx = min(1.0*2.0, 2)*0.06 = 0.12; sz = min(1.0*0.5, 2)*0.06 = 0.03 -
      * two distinct values, not both forced to whichever axis is larger. */
@@ -163,7 +229,7 @@ static void test_rectangular_footprint_orientation_is_not_swapped(void) {
     entity.angle = 0.0f;
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
 
     /* sx = min(1.0*0.5, 2)*0.06 = 0.03; sz = min(1.0*2.0, 2)*0.06 = 0.12 -
      * the mirror image of test_rectangular_footprint_scales_x_and_z_independently. */
@@ -184,7 +250,7 @@ static void test_rectangular_footprint_clamp_boundaries_are_independent_per_axis
     entity.angle = 0.0f;
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
 
     /* sx = min(1.0*max(0.1,0.25), 2)*0.06 = min(0.25,2)*0.06 = 0.015.
      * sz = min(1.0*100, 2)*0.06 = min(100,2)*0.06 = 0.12. */
@@ -201,8 +267,8 @@ static void test_mobile_and_item_share_category_multiplier(void) {
     mobile.footprintX = mobile.footprintY = item.footprintX = item.footprintY = 1.0f;
 
     float worldMobile[16], worldItem[16];
-    bz_quest_wc3_build_world_matrix(&mobile, worldMobile);
-    bz_quest_wc3_build_world_matrix(&item, worldItem);
+    bz_quest_wc3_build_world_matrix(&mobile, NULL, worldMobile);
+    bz_quest_wc3_build_world_matrix(&item, NULL, worldItem);
 
     ASSERT_EQ_FLOAT(worldMobile[5], worldItem[5], 0.0001f);
     ASSERT_EQ_FLOAT(worldMobile[5], 0.72f * 0.08f, 0.0005f);
@@ -215,7 +281,7 @@ static void test_unknown_category_falls_back_to_unit_multiplier(void) {
     entity.footprintX = entity.footprintY = 1.0f;
 
     float world[16];
-    bz_quest_wc3_build_world_matrix(&entity, world);
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
     ASSERT_EQ_FLOAT(world[5], 0.72f * 0.08f, 0.0005f);
 }
 
@@ -227,7 +293,6 @@ static void make_entity(bzQuestWc3EntityInput_t *e, const char *identity) {
     memset(e, 0, sizeof(*e));
     e->category = 2;
     e->footprintX = e->footprintY = 1.0f;
-    e->radius = 50.0f;
     e->tintR = 1.0f;
     e->tintA = 1.0f;
     if (identity) strncpy(e->modelIdentity, identity, sizeof(e->modelIdentity) - 1);
@@ -239,7 +304,7 @@ static void test_render_list_skips_entities_without_a_model(void) {
     make_entity(&entities[1], NULL); /* no model resolved */
 
     bzQuestWc3RenderList_t list;
-    bz_quest_wc3_build_render_list(entities, 2, &list);
+    bz_quest_wc3_build_render_list(entities, 2, NULL, &list);
 
     ASSERT_EQ_INT(list.count, 1);
     ASSERT_STR_EQ(list.items[0].modelIdentity, "units/human/footman/footman.mdx");
@@ -253,7 +318,7 @@ static void test_render_list_one_item_per_entity_even_for_shared_models(void) {
     make_entity(&entities[2], "units/human/footman/footman.mdx");
 
     bzQuestWc3RenderList_t list;
-    bz_quest_wc3_build_render_list(entities, 3, &list);
+    bz_quest_wc3_build_render_list(entities, 3, NULL, &list);
 
     /* This slice's list construction does not de-duplicate/instance -
      * that's the GPU cache's job by identity key (see bz_quest_wc3_render.h's
@@ -268,7 +333,7 @@ static void test_render_list_reports_overflow_without_dropping_count(void) {
     }
 
     bzQuestWc3RenderList_t list;
-    bz_quest_wc3_build_render_list(entities, BZ_QUEST_WC3_MAX_RENDER_ITEMS + 5, &list);
+    bz_quest_wc3_build_render_list(entities, BZ_QUEST_WC3_MAX_RENDER_ITEMS + 5, NULL, &list);
 
     ASSERT_EQ_INT(list.count, BZ_QUEST_WC3_MAX_RENDER_ITEMS);
     ASSERT_EQ_INT(list.overflowCount, 5);
@@ -280,32 +345,72 @@ static void test_render_list_rewrites_stale_state(void) {
 
     bzQuestWc3RenderList_t list;
     memset(&list, 0xAA, sizeof(list)); /* poison first */
-    bz_quest_wc3_build_render_list(entities, 1, &list);
+    bz_quest_wc3_build_render_list(entities, 1, NULL, &list);
 
     ASSERT_EQ_INT(list.count, 1);
     ASSERT_EQ_INT(list.overflowCount, 0);
 }
 
-static void test_render_list_carries_selection_radius_and_tint(void) {
+static void test_render_list_carries_selection_footprint_scale_and_tint(void) {
+    /* Fix for finding #1: the render item's marker-sizing fields must be
+     * the SAME per-axis footprint/category scale the entity's own mesh
+     * uses (bz_quest_wc3_entity_footprint_scale()), never the raw
+     * transport radius field (removed entirely - see
+     * bz_quest_wc3_render.h's header comment). */
     bzQuestWc3EntityInput_t entities[1];
     make_entity(&entities[0], "units/human/footman/footman.mdx");
     entities[0].selected = true;
-    entities[0].radius = 72.0f;
     entities[0].tintR = 0.25f;
     entities[0].tintG = 0.5f;
     entities[0].tintB = 0.75f;
     entities[0].tintA = 0.9f;
 
     bzQuestWc3RenderList_t list;
-    bz_quest_wc3_build_render_list(entities, 1, &list);
+    bz_quest_wc3_build_render_list(entities, 1, NULL, &list);
+
+    float expectedScaleX, expectedScaleY, expectedScaleZ;
+    bz_quest_wc3_entity_footprint_scale(entities[0].category, entities[0].footprintX, entities[0].footprintY,
+                                        &expectedScaleX, &expectedScaleY, &expectedScaleZ);
 
     ASSERT_EQ_INT(list.count, 1);
     ASSERT(list.items[0].selected);
-    ASSERT_EQ_FLOAT(list.items[0].radius, 72.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(list.items[0].footprintScaleX, expectedScaleX, 0.0001f);
+    ASSERT_EQ_FLOAT(list.items[0].footprintScaleY, expectedScaleY, 0.0001f);
+    ASSERT_EQ_FLOAT(list.items[0].footprintScaleZ, expectedScaleZ, 0.0001f);
     ASSERT_EQ_FLOAT(list.items[0].tintR, 0.25f, 0.0001f);
     ASSERT_EQ_FLOAT(list.items[0].tintG, 0.5f, 0.0001f);
     ASSERT_EQ_FLOAT(list.items[0].tintB, 0.75f, 0.0001f);
     ASSERT_EQ_FLOAT(list.items[0].tintA, 0.9f, 0.0001f);
+}
+
+static void test_render_list_footprint_scale_matches_own_mesh_scale(void) {
+    /* Direct proof for fix #1: the render item's footprintScale* must be
+     * EXACTLY the mesh scale bz_quest_wc3_build_world_matrix() applied to
+     * this same entity - a marker built from footprintScale* therefore
+     * always matches the model's own bounds, for any category/footprint,
+     * not just the default fixture values. */
+    bzQuestWc3EntityInput_t entity;
+    make_entity(&entity, "buildings/human/townhall/townhall.mdx");
+    entity.category = 3;      /* resource */
+    entity.footprintX = 3.0f; /* rectangular, well above the 0.25 clamp */
+    entity.footprintY = 0.5f;
+
+    float world[16];
+    bz_quest_wc3_build_world_matrix(&entity, NULL, world);
+    /* rotScale's column-0/1/2 magnitudes encode sx/sy/sz (angle == 0 here,
+     * so no rotation mixes the columns - see build_world_matrix's own
+     * rotScale layout comment). */
+    float meshScaleX = world[0], meshScaleY = world[5], meshScaleZ = world[10];
+
+    bzQuestWc3RenderList_t list;
+    bz_quest_wc3_build_render_list(&entity, 1, NULL, &list);
+
+    ASSERT_EQ_INT(list.count, 1);
+    ASSERT_EQ_FLOAT(list.items[0].footprintScaleX, meshScaleX, 0.0001f);
+    ASSERT_EQ_FLOAT(list.items[0].footprintScaleY, meshScaleY, 0.0001f);
+    ASSERT_EQ_FLOAT(list.items[0].footprintScaleZ, meshScaleZ, 0.0001f);
+    /* Rectangular footprint stays rectangular - never forced square. */
+    ASSERT(list.items[0].footprintScaleX != list.items[0].footprintScaleZ);
 }
 
 /* ------------------------------------------------------------------ */
@@ -499,6 +604,11 @@ static void test_convert_zup_to_yup_preserves_hierarchy_composition(void) {
 
 void run_bz_quest_wc3_render_tests(void) {
     RUN_TEST(test_position_swaps_y_and_z);
+    RUN_TEST(test_world_transform_measure_computes_scale_and_center);
+    RUN_TEST(test_world_transform_measure_rejects_degenerate_bounds);
+    RUN_TEST(test_world_transform_point_applies_scale_then_center);
+    RUN_TEST(test_world_transform_point_null_is_raw_passthrough);
+    RUN_TEST(test_build_world_matrix_transform_only_affects_translation);
     RUN_TEST(test_zero_heading_yields_identity_rotation);
     RUN_TEST(test_nonzero_heading_negated_and_about_y);
     RUN_TEST(test_building_scale_uses_full_category_multiplier);
@@ -513,7 +623,8 @@ void run_bz_quest_wc3_render_tests(void) {
     RUN_TEST(test_render_list_one_item_per_entity_even_for_shared_models);
     RUN_TEST(test_render_list_reports_overflow_without_dropping_count);
     RUN_TEST(test_render_list_rewrites_stale_state);
-    RUN_TEST(test_render_list_carries_selection_radius_and_tint);
+    RUN_TEST(test_render_list_carries_selection_footprint_scale_and_tint);
+    RUN_TEST(test_render_list_footprint_scale_matches_own_mesh_scale);
     RUN_TEST(test_identity_equal_matches_identical_strings);
     RUN_TEST(test_identity_equal_rejects_different_strings);
     RUN_TEST(test_model_anim_free_null_is_a_no_op);
