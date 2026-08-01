@@ -4,7 +4,10 @@
  * no logging - a plain host C compiler builds this (see that header's
  * "Frame-critical / real-time discipline" note and
  * platform/android/quest/scripts/test-quest-hand-tracking-layout.sh, which
- * greps bz_quest_hand_sample_build()'s body for exactly those).
+ * greps bz_quest_hand_sample_build()'s body AND the two static helpers it
+ * calls every frame, bz_hand_build_fb_aim()/bz_hand_build_ext_only(), for
+ * exactly those - all three run on the XR render thread every frame a hand
+ * sample is built).
  */
 #include "bz_quest_hand_input.h"
 

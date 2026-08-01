@@ -3437,13 +3437,16 @@ negotiated capability (never re-decided per frame):
 - **`BZ_QUEST_HAND_CAPABILITY_NONE`**: `out` is fully zeroed/inactive —
   no hand tracking this session at all.
 
-`bz_quest_hand_sample_build()` is **frame-critical**: it allocates nothing,
-locks nothing, does no file I/O, calls no bridge/transport API, and calls no
-logging function, since it runs once per hand every frame on the XR render
-thread — structurally guarded by
+`bz_quest_hand_sample_build()` is **frame-critical**: it — and the two
+static per-tier helpers it dispatches into, `bz_hand_build_fb_aim()`/
+`bz_hand_build_ext_only()`, where the actual joint/aim math runs — each
+allocate nothing, lock nothing, do no file I/O, call no bridge/transport
+API, and call no logging function, since all three run once per hand every
+frame on the XR render thread — structurally guarded by
 `test-quest-hand-tracking-layout.sh` (mirroring
 `test-quest-audio-rt-callback-safety.sh`'s technique for the AAudio
-callback).
+callback), which extracts and scans all three function bodies
+independently.
 
 `bz_quest_quat_forward()` (the shared −Z-forward quaternion rotation) was
 extracted from `bz_quest_xr_actions.c`'s previously-private
@@ -3690,17 +3693,27 @@ no-hit) is unchanged and applies identically regardless of source.
   `xrCreateHandTrackerEXT`/`xrDestroyHandTrackerEXT` are present, paired,
   and `XR_NULL_HANDLE`-guarded; that `xrLocateHandJointsEXT` is called
   exactly once, gated on the same focus/session-running check the action
-  module uses; that `bz_quest_hand_sample_build()`'s body contains no
-  allocation/lock/log/file/bridge call (mirroring
-  `test-quest-audio-rt-callback-safety.sh`'s technique for the real-time
-  audio callback); that the renderer wires create/sync/destroy and destroys
-  hand trackers strictly before the OpenXR session/instance; that no
-  hand-mesh extension/type is referenced anywhere; and that the manifest
-  declares the permission/feature with the feature marked optional. Two
-  violations were deliberately injected and confirmed caught by this
-  script during development, then reverted (a forbidden `malloc()` inside
-  the frame-critical gesture builder, and a reversed hand-tracker/session
-  teardown order) — see this repository's PR description for the exact
+  module uses; that `bz_quest_hand_sample_build()`'s body **and the two
+  static helpers it calls every frame** (`bz_hand_build_fb_aim()`/
+  `bz_hand_build_ext_only()` — where the real per-tier joint/aim math
+  actually lives) each contain no allocation/lock/log/file/bridge call
+  (mirroring `test-quest-audio-rt-callback-safety.sh`'s technique for the
+  real-time audio callback); that the renderer wires create/sync/destroy
+  and destroys hand trackers strictly before the OpenXR session/instance;
+  that no hand-mesh extension/type is referenced anywhere; and that the
+  manifest declares the permission/feature with the feature marked
+  optional. Two violations were deliberately injected and confirmed caught
+  by this script during original development, then reverted (a forbidden
+  `malloc()` inside the frame-critical gesture builder, and a reversed
+  hand-tracker/session teardown order) — see this repository's PR
+  description for the exact evidence. A follow-up review pass found the
+  RT-safety check (item 6) only ever scanned `bz_quest_hand_sample_build()`
+  itself, silently missing the two helper functions it dispatches
+  into — the script now extracts and scans all three independently, each
+  re-proven to catch an injected violation (`malloc()` in
+  `bz_hand_build_fb_aim()`, a log call in `bz_hand_build_ext_only()`, and a
+  re-check of `calloc()` in `bz_quest_hand_sample_build()` itself), then
+  reverted — see this repository's follow-up PR commit for the exact
   evidence.
 - `CMakeLists.txt`'s `bz_quest_native` source list includes the two new
   `.c` files (`bz_quest_hand_input.c`, `bz_quest_xr_hands.c`). No new
@@ -4532,6 +4545,60 @@ three, in new commits on the same branch (no history rewritten):
   documented throughout this file), confirmed unrelated to this layer by
   `git status` showing zero files touched outside `docs/` and
   `platform/android/quest/`.
+
+### What *was* verified this session (layer 8 follow-up: RT-safety guard coverage fix)
+
+A reviewer flagged a **Low**-severity finding on the layer 8 PR: item 6 of
+`test-quest-hand-tracking-layout.sh`'s RT-safety check only ever extracted
+and scanned `bz_quest_hand_sample_build()`'s own body — which is just a
+capability/active dispatch, four lines — never the two `static` per-tier
+helpers it calls every frame (`bz_hand_build_fb_aim()`/
+`bz_hand_build_ext_only()`), where all the real per-frame joint/aim math
+actually lives. A forbidden call hidden inside either helper would have
+gone completely undetected.
+
+- Fixed by looping the SAME anchored `extract_fn()`/`check_forbidden()`
+  helpers (unchanged logic, per this repo's own "anchor on the start of the
+  real declaration line" convention/memory from the original layer 8 PR)
+  over all three function names
+  (`bz_quest_hand_sample_build`/`bz_hand_build_fb_aim`/
+  `bz_hand_build_ext_only`) instead of just the first. The forbidden-call
+  set itself (`malloc`/`calloc`/`realloc`/`free`/`pthread_mutex_`/
+  `BZ_QUEST_LOG*`/`fprintf`/`printf`/`fopen`/`fread`/`BZ_TT_`) was left
+  unchanged — it was already the correct, appropriate set for frame-critical
+  code, only the set of *functions scanned* was incomplete.
+- Proved the fix catches a real violation in **each** previously-unscanned
+  helper, then reverted, then re-proved the original function is still
+  covered (a regression check on the fix itself), each as its own isolated
+  injection/revert cycle: (1) a `malloc()` injected into
+  `bz_hand_build_fb_aim()` was caught (`bz_hand_build_fb_aim calls forbidden
+  'malloc('`), then reverted; (2) a `BZ_QUEST_LOGI()` call injected into
+  `bz_hand_build_ext_only()` was caught (`bz_hand_build_ext_only calls
+  forbidden 'BZ_QUEST_LOGI'`), then reverted; (3) a `calloc()` injected into
+  `bz_quest_hand_sample_build()` itself was still caught (`bz_quest_hand_sample_build
+  calls forbidden 'calloc('`), then reverted — `git diff --stat` against the
+  file immediately after each revert confirmed zero residual diff.
+- Updated `bz_quest_hand_input.c`/`.h`'s own header comments (which
+  previously made the same too-narrow "greps this exact function body"
+  claim) and the two related `docs/quest-tabletop.md` bullets above to
+  accurately describe all three scanned functions — comment/documentation
+  changes only, no production semantics touched.
+- `make test-quest-hand-tracking-layout` — **OK**. `make test-quest-host-tests`
+  — **5243/5243** (unchanged from the pre-fix count, since this fix touches
+  only a shell script plus comments, never `bz_quest_hand_input.c`'s real
+  code). `make test-quest-bridge` — **95/95** (unchanged). The other Quest
+  structural guards (`test-quest-source-sync`,
+  `test-quest-wc3-descriptor-pool-headroom`,
+  `test-quest-wc3-bone-palette-layout`, `test-quest-wc3-fog-selection-layout`,
+  `test-quest-wc3-hud-layout`, `test-quest-wc3-pointer-layout`,
+  `test-quest-audio-rt-callback-safety`) all still pass. The full repo-root
+  `make test` passes end-to-end (`EXIT_CODE=0`, confirmed via a full log
+  file grep, not a truncated scrollback), including this exact
+  `test-quest-hand-tracking-layout: OK` line. `git diff --cached --check`
+  against the prior commit reports zero whitespace errors.
+- **Not verified this session**: unchanged from the layer 8 hardware-only
+  gates above — this is a test-infrastructure-only fix, so it carries no
+  new hardware-only surface of its own.
 
 ## Related documents
 

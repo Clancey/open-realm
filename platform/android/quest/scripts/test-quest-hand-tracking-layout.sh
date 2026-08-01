@@ -21,8 +21,10 @@
 #   5. xrLocateHandJointsEXT is only ever called under the same focus/
 #      session-running gate bz_quest_xr_actions.c's action sync already uses
 #      - never an independent, potentially-unfocused call path;
-#   6. the frame-critical bz_quest_hand_sample_build() allocates nothing,
-#      locks nothing, and calls no log/file/bridge API (mirrors
+#   6. the frame-critical bz_quest_hand_sample_build() AND the two static
+#      helpers it calls every frame (bz_hand_build_fb_aim/
+#      bz_hand_build_ext_only) each allocate nothing, lock nothing, and
+#      call no log/file/bridge API (mirrors
 #      test-quest-audio-rt-callback-safety.sh's RT-safety contract for the
 #      AAudio callback);
 #   7. the renderer wires create/sync/destroy for the hand-tracking module,
@@ -134,16 +136,23 @@ if [ "$LOCATE_CALLS" -ne 1 ]; then
     FAIL=1
 fi
 
-# (6) Frame-critical RT-safety for bz_quest_hand_sample_build() - similar
-# technique to test-quest-audio-rt-callback-safety.sh, but anchored to a
-# line that actually STARTS the function definition (column 0, a letter/
+# (6) Frame-critical RT-safety for bz_quest_hand_sample_build() AND the two
+# static helpers it calls every frame (bz_hand_build_fb_aim/
+# bz_hand_build_ext_only) - all the real per-frame joint/aim math lives in
+# those two helpers, not in bz_quest_hand_sample_build() itself (which is
+# just a capability/active dispatch to one of them), so scanning only the
+# outer function would miss a forbidden call hidden in either helper
+# entirely - exactly the gap a reviewer flagged in this script's first
+# version, which scanned bz_quest_hand_sample_build() alone. Each of the
+# three is extracted and scanned independently below. Anchored to a line
+# that actually STARTS the function definition (column 0, a letter/
 # underscore - this codebase's convention for every top-level declaration)
-# rather than the bare substring match that script uses, which would
-# otherwise latch onto this very file's own header-comment prose mention of
-# the function name (verified while writing this check: an unanchored match
-# grabbed the header comment down to the first unrelated static helper's
-# closing brace, silently extracting zero lines of the real function and
-# missing an injected malloc() entirely - see docs/quest-tabletop.md).
+# rather than a bare substring match, which would otherwise latch onto a
+# header-comment prose mention of the function name (verified while writing
+# this check originally: an unanchored match grabbed the header comment
+# down to the first unrelated static helper's closing brace, silently
+# extracting zero lines of the real function and missing an injected
+# malloc() entirely - see docs/quest-tabletop.md).
 extract_fn() {
     file=$1
     name=$2
@@ -160,18 +169,20 @@ check_forbidden() {
                'BZ_QUEST_LOGE' 'BZ_QUEST_LOGW' 'BZ_QUEST_LOGI' \
                'fprintf(' 'printf(' 'fopen(' 'fread(' 'BZ_TT_' ; do
         if printf '%s' "$body" | grep -qF "$pat"; then
-            echo "test-quest-hand-tracking-layout: $label calls forbidden '$pat' - bz_quest_hand_sample_build() must not allocate, lock, log, or touch files/bridge APIs (frame-critical, runs every frame on the XR render thread - see $HAND_INPUT_H's header comment)" >&2
+            echo "test-quest-hand-tracking-layout: $label calls forbidden '$pat' - frame-critical hand-tracking code must not allocate, lock, log, or touch files/bridge APIs (runs every frame on the XR render thread - see $HAND_INPUT_H's header comment)" >&2
             FAIL=1
         fi
     done
 }
-build_body=$(extract_fn "$HAND_INPUT_C" "bz_quest_hand_sample_build")
-if [ -z "$build_body" ]; then
-    echo "test-quest-hand-tracking-layout: could not find bz_quest_hand_sample_build in $HAND_INPUT_C (renamed/removed?)" >&2
-    FAIL=1
-else
-    check_forbidden "bz_quest_hand_sample_build" "$build_body"
-fi
+for fn_name in bz_quest_hand_sample_build bz_hand_build_fb_aim bz_hand_build_ext_only; do
+    fn_body=$(extract_fn "$HAND_INPUT_C" "$fn_name")
+    if [ -z "$fn_body" ]; then
+        echo "test-quest-hand-tracking-layout: could not find $fn_name in $HAND_INPUT_C (renamed/removed?)" >&2
+        FAIL=1
+    else
+        check_forbidden "$fn_name" "$fn_body"
+    fi
+done
 
 # (7) Renderer wiring: create/sync/destroy all referenced, destroy ordered
 # before the session/instance teardown (bz_quest_xr_destroy).

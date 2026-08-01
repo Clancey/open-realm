@@ -22,10 +22,12 @@
  *
  * -- Frame-critical / real-time discipline --
  * bz_quest_hand_sample_build() runs once per hand, every frame, on the XR
- * render thread. It allocates nothing, locks nothing, does no file I/O,
- * calls no bridge/transport API, and calls no logging function - see
- * platform/android/quest/scripts/test-quest-hand-tracking-layout.sh, which
- * greps this exact function body for any of those, mirroring
+ * render thread - and so do the two static helpers it calls internally to
+ * do the actual per-tier work, bz_hand_build_fb_aim()/bz_hand_build_ext_only()
+ * (see bz_quest_hand_input.c). All three allocate nothing, lock nothing, do
+ * no file I/O, call no bridge/transport API, and call no logging function -
+ * see platform/android/quest/scripts/test-quest-hand-tracking-layout.sh,
+ * which greps all three exact function bodies for any of those, mirroring
  * bz_quest_audio.c's bz_quest_audio_data_callback() real-time contract.
  *
  * -- EXT-only ray-basis choice (why positions, not orientations) --
