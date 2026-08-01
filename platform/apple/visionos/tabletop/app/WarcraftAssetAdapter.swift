@@ -259,6 +259,7 @@ struct WarcraftExportedAssetCache {
 
 struct WarcraftProductionAssets: Equatable, Sendable {
     var abiVersion: UInt32
+    var terrainKey: String?
     var terrain: WarcraftTerrainDescriptor?
     var worldTransform: WarcraftWorldTransform?
     var entities: [UInt64: WarcraftProductionEntityAsset]
@@ -274,6 +275,49 @@ struct WarcraftProductionAssets: Equatable, Sendable {
             (terrain?.materials.filter { $0.role == .placeholder }.count ?? 0)
     }
     var placeholderCount: Int { placeholderModelCount + placeholderMaterialCount }
+}
+
+struct WarcraftEntityAssetSignature: Equatable, Sendable {
+    var id: UInt64
+    var classID: UInt32
+    var model: UInt32
+    var modelIdentity: String
+    var image: UInt32
+    var imageIdentity: String
+    var player: UInt32
+}
+
+struct WarcraftProductionAssetSignature: Equatable, Sendable {
+    var mapName: String?
+    var terrainKey: String?
+    var entities: [WarcraftEntityAssetSignature]
+}
+
+/* Snapshot generations change every frame, but immutable descriptors change only with these identities. */
+struct WarcraftProductionAssetCache {
+    private var entry: (signature: WarcraftProductionAssetSignature, assets: WarcraftProductionAssets)?
+    private(set) var hits: UInt64 = 0
+
+    mutating func assets(for signature: WarcraftProductionAssetSignature) -> WarcraftProductionAssets? {
+        guard let entry, entry.signature == signature else { return nil }
+        hits &+= 1
+        return presented(entry.assets)
+    }
+
+    @discardableResult
+    mutating func insert(_ assets: WarcraftProductionAssets, for signature: WarcraftProductionAssetSignature)
+        -> WarcraftProductionAssets {
+        entry = (signature, assets)
+        return presented(assets)
+    }
+
+    mutating func reset() { entry = nil; hits = 0 }
+
+    private func presented(_ assets: WarcraftProductionAssets) -> WarcraftProductionAssets {
+        var value = assets
+        value.counters.hits &+= hits
+        return value
+    }
 }
 
 private struct WarcraftAdaptedTerrain {
@@ -420,6 +464,22 @@ enum WarcraftAssetDescriptorAdapter {
         return try model(template)
     }
 
+    /* Team/skin variants change materials only; retain the base configstring's validated geometry buffers. */
+    static func modelTemplate(_ source: WarcraftExportedModel,
+                              reusingGeometry geometry: WarcraftProductionEntityAsset) throws
+        -> WarcraftProductionEntityAsset {
+        guard geometry.identity == source.identity else {
+            throw WarcraftDescriptorError.invalidMesh(
+                "asset '\(source.identity)' cannot reuse geometry from '\(geometry.identity)'")
+        }
+        var template = try modelTemplate(source)
+        guard var model = template.model, let geometryModel = geometry.model else { return template }
+        model.geosets = geometryModel.geosets
+        model.geometryKey = geometryModel.geometryKey
+        template.model = model
+        return template
+    }
+
     static func model(_ source: WarcraftExportedModel,
                       template: WarcraftProductionEntityAsset) -> WarcraftProductionEntityAsset {
         if source.metadataStatus != 0 {
@@ -447,7 +507,7 @@ enum WarcraftAssetDescriptorAdapter {
             entities[id] = adapted
         }
         return WarcraftProductionAssets(
-            abiVersion: abiVersion, terrain: adaptedTerrain?.descriptor,
+            abiVersion: abiVersion, terrainKey: nil, terrain: adaptedTerrain?.descriptor,
             worldTransform: adaptedTerrain?.transform, entities: entities, counters: counters,
             terrainTextureCount: adaptedTerrain?.textureCount ?? 0,
             terrainNoCliffCount: adaptedTerrain?.noCliffCount ?? 0,
@@ -459,7 +519,7 @@ enum WarcraftAssetDescriptorAdapter {
                            counters: WarcraftAssetCacheCounters) throws -> WarcraftProductionAssets {
         let adaptedTerrain = try sourceTerrain.map(terrain)
         return WarcraftProductionAssets(
-            abiVersion: abiVersion, terrain: adaptedTerrain?.descriptor,
+            abiVersion: abiVersion, terrainKey: nil, terrain: adaptedTerrain?.descriptor,
             worldTransform: adaptedTerrain?.transform, entities: entities, counters: counters,
             terrainTextureCount: adaptedTerrain?.textureCount ?? 0,
             terrainNoCliffCount: adaptedTerrain?.noCliffCount ?? 0,

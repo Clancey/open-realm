@@ -12,6 +12,13 @@ enum TabletopMapSource: UInt8, Codable, Equatable, Sendable {
     case archive
 }
 
+enum TabletopMapSourceResolver {
+    static func resolve(_ selectedMap: TabletopMapRecord?,
+                        fallback: TabletopMapSource = .campaign) -> TabletopMapSource {
+        selectedMap?.source ?? fallback
+    }
+}
+
 struct TabletopMapRecord: Identifiable, Codable, Equatable, Sendable {
     var edition: TabletopEdition
     var source: TabletopMapSource

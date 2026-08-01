@@ -6,8 +6,14 @@ struct TabletopLauncherView: View {
     @ObservedObject var model: TabletopSessionModel
     var automatedLaunch = false
     @State private var launcherState = TabletopLauncherState.waiting
-    @State private var source = TabletopMapSource.campaign
+    @State private var source: TabletopMapSource
     @State private var attemptedAutomatedLaunch = false
+
+    init(model: TabletopSessionModel, automatedLaunch: Bool = false) {
+        self.model = model
+        self.automatedLaunch = automatedLaunch
+        _source = State(initialValue: TabletopMapSourceResolver.resolve(model.selectedMap))
+    }
 
     private var maps: [TabletopMapRecord] {
         let filtered = model.availableMaps.filter { $0.source == source }
@@ -25,7 +31,7 @@ struct TabletopLauncherView: View {
             } else {
                 Picker("Game", selection: Binding(
                     get: { model.selectedEdition },
-                    set: { model.selectEdition($0) })) {
+                    set: { selectEdition($0) })) {
                     ForEach(TabletopEdition.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
@@ -87,6 +93,11 @@ struct TabletopLauncherView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(model.selectedMap == nil || launcherState == .opening)
         }
+    }
+
+    private func selectEdition(_ edition: TabletopEdition) {
+        model.selectEdition(edition)
+        source = TabletopMapSourceResolver.resolve(model.selectedMap)
     }
 
     @MainActor

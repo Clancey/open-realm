@@ -113,6 +113,12 @@ enum TabletopPureTests {
         expect(map.matches("Human02"), "bare acceptance map name matches a Warcraft backslash path")
         expect(map.matches("maps\\campaign\\human02.w3m"), "full map matching is case-insensitive")
         expect(!map.matches("Prologue01"), "a different bare map name does not match")
+        var archive = map
+        archive.source = .archive
+        expect(TabletopMapSourceResolver.resolve(archive) == .archive,
+               "launcher source begins on the persisted map's tagged segment")
+        expect(TabletopMapSourceResolver.resolve(nil) == .campaign,
+               "launcher source uses campaign only when no persisted map exists")
     }
 
     private static func testProductTransitionEffects() {
@@ -810,6 +816,16 @@ enum TabletopPureTests {
             expect(materials.contains(terrain.rampMaterialIndex), "ramps produce sloped surface geometry")
             let elevated = chunks.flatMap(\.mesh.geosets).flatMap(\.positions).map(\.y).max() ?? 0
             expect(elevated > 0.07, "terrain mesh preserves fixture height fields")
+            var cache = WarcraftTerrainChunkCache()
+            expect(cache.chunks(for: "terrain-a") == nil, "terrain mesh cache starts with a miss")
+            cache.insert(chunks, for: "terrain-a")
+            expect(cache.chunks(for: "terrain-a")?.map(\.contentKey) == chunks.map(\.contentKey),
+                   "unchanged generations reuse expanded terrain meshes")
+            expect(cache.chunks(for: "terrain-b") == nil,
+                   "a new terrain publication invalidates expanded terrain meshes")
+            cache.reset()
+            expect(cache.chunks(for: "terrain-a") == nil,
+                   "terrain mesh cache resets between native sessions")
         } catch {
             expect(false, "valid 128x128 terrain failed: \(error)")
         }
@@ -1071,7 +1087,7 @@ enum TabletopPureTests {
                    missingTree.diagnostics.contains { $0.contains("status 6") },
                    "a missing entity image preserves its status-bearing explicit placeholder")
             let placeholderCounts = WarcraftProductionAssets(
-                abiVersion: 1, terrain: nil, worldTransform: nil,
+                abiVersion: 1, terrainKey: nil, terrain: nil, worldTransform: nil,
                 entities: [1: missing, 2: missingTree],
                 counters: WarcraftAssetCacheCounters(hits: 0, misses: 0, placeholderLogs: 1),
                 terrainTextureCount: 0, terrainNoCliffCount: 0, diagnostics: [])
@@ -1371,6 +1387,19 @@ enum TabletopPureTests {
             cache.insertAdapted(adapted, for: firstKey)
             expect(cache.adaptedModel(for: firstKey) == adapted,
                    "copied asset cache reuses the immutable adapted model template")
+            var variant = first
+            variant.teamColorImage = replacementImage("TeamColor02.blp", value: 96)
+            let adaptedVariant = try WarcraftAssetDescriptorAdapter.modelTemplate(
+                variant, reusingGeometry: adapted)
+            let baseAddress = adapted.model!.geosets[0].positions.withUnsafeBufferPointer {
+                $0.baseAddress.map { UInt(bitPattern: $0) } ?? 0
+            }
+            let variantAddress = adaptedVariant.model!.geosets[0].positions.withUnsafeBufferPointer {
+                $0.baseAddress.map { UInt(bitPattern: $0) } ?? 0
+            }
+            expect(baseAddress == variantAddress &&
+                   adapted.model?.materialKey != adaptedVariant.model?.materialKey,
+                   "team variants share geometry buffers while retaining distinct authored materials")
         } catch {
             expect(false, "adapted model cache setup failed: \(error)")
         }
@@ -1444,6 +1473,41 @@ enum TabletopPureTests {
         cache.reset()
         expect(cache.model(for: thirdKey) == nil && cache.terrain(for: "map:a") == nil,
                "copied asset cache resets across transport lifecycles")
+
+        let entity = WarcraftEntityAssetSignature(
+            id: 7, classID: fourCC("hfoo"), model: 1, modelIdentity: "Footman.mdx",
+            image: 2, imageIdentity: "Footman.blp", player: 1)
+        let signature = WarcraftProductionAssetSignature(
+            mapName: "Maps/Test.w3m", terrainKey: "terrain:1", entities: [entity])
+        let assets = WarcraftProductionAssets(
+            abiVersion: 1, terrainKey: "terrain:1", terrain: nil, worldTransform: nil, entities: [:],
+            counters: WarcraftAssetCacheCounters(hits: 5, misses: 2, placeholderLogs: 0),
+            terrainTextureCount: 0, terrainNoCliffCount: 0, diagnostics: [])
+        var production = WarcraftProductionAssetCache()
+        expect(production.assets(for: signature) == nil,
+               "production snapshot cache records the first authoritative asset state as a miss")
+        _ = production.insert(assets, for: signature)
+        expect(production.assets(for: signature)?.counters.hits == 6,
+               "unchanged snapshot generations reuse production descriptors and record the hit")
+        var changed = signature
+        changed.entities[0].modelIdentity = "Knight.mdx"
+        let modelMiss = production.assets(for: changed) == nil
+        changed = signature
+        changed.entities[0].imageIdentity = "Knight.blp"
+        let imageMiss = production.assets(for: changed) == nil
+        changed = signature
+        changed.entities[0].player = 2
+        let teamMiss = production.assets(for: changed) == nil
+        changed = signature
+        changed.entities.append(WarcraftEntityAssetSignature(
+            id: 8, classID: 0, model: 3, modelIdentity: "Missile.mdx",
+            image: 0, imageIdentity: "", player: 0))
+        let spawnMiss = production.assets(for: changed) == nil
+        expect(modelMiss && imageMiss && teamMiss && spawnMiss,
+               "model, image, team, and late-spawn changes each invalidate production descriptors")
+        production.reset()
+        expect(production.assets(for: signature) == nil && production.hits == 0,
+               "production snapshot cache resets its descriptors and counters across sessions")
     }
 
     private static func exportedModel(placeholder: Bool = false) -> WarcraftExportedModel {
