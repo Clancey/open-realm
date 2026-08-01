@@ -184,6 +184,7 @@ find_package(OpenXR REQUIRED CONFIG)
 # at runtime via the platform's Vulkan loader) - link it like any other NDK
 # system library, no Prefab/find_package needed.
 find_library(BZ_VULKAN_LIB vulkan REQUIRED)
+find_library(BZ_AAUDIO_LIB aaudio REQUIRED)
 
 # --- Shader build pipeline ---------------------------------------------------
 # Regenerates bz_quest_shaders_generated.h from platform/android/quest/app/
@@ -264,6 +265,10 @@ add_library(bz_quest_native SHARED
     bz_quest_xr_bindings.c
     bz_quest_xr_actions.c
     bz_quest_vk_wc3_pointer.c
+    bz_quest_wav.c
+    bz_quest_audio_mixer.c
+    bz_quest_audio_lifecycle.c
+    bz_quest_audio.c
 )
 add_dependencies(bz_quest_native bz_quest_shaders)
 target_compile_definitions(bz_quest_native PRIVATE
@@ -272,6 +277,7 @@ target_compile_definitions(bz_quest_native PRIVATE
     BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS=1
     BZ_QUEST_ENABLE_WC3_RENDERER=1
     BZ_QUEST_ENABLE_INPUT=1
+    BZ_QUEST_ENABLE_AUDIO=1
 )
 target_include_directories(bz_quest_native PRIVATE
     "${BZ_REPO_ROOT}"
@@ -288,6 +294,7 @@ target_link_libraries(bz_quest_native PRIVATE
     openwarcraft3-shared
     OpenXR::openxr_loader
     ${BZ_VULKAN_LIB}
+    ${BZ_AAUDIO_LIB}
     android
     log
     z

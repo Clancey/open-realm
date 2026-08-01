@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E/6
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E/6/7
 
-This document tracks layers 5A/5B/5C/5D/5E/6 of a stacked Meta Quest port:
+This document tracks layers 5A/5B/5C/5D/5E/6/7 of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -79,13 +79,32 @@ This document tracks layers 5A/5B/5C/5D/5E/6 of a stacked Meta Quest port:
   below for full scope, the action map, the state machine, the ray-hit
   priority list, the command-mapping table (incl. the documented target-entity
   ABI gap), and the board-transform clamp ranges.
+- **Layer 7 (this layer, `clancey-quest-data-staging-audio`)**: adds the
+  reproducible developer workflow that stages a user's own local Warcraft
+  III ROC/TFT archives onto the device via `run-as`
+  (`platform/android/quest/scripts/stage-wc3-data.sh`), and a real Android
+  **AAudio** output sink (`bz_quest_audio.h`/`.c`) that dequeues from the
+  existing bounded `BZ_TTAudio_*` queue, parses only explicitly supported
+  RIFF/WAVE PCM layouts (`bz_quest_wav.h`/`.c`), converts/mixes a bounded
+  set of concurrent voices off the real-time thread
+  (`bz_quest_audio_mixer.h`/`.c`), and drives stream lifecycle in step with
+  Android/OpenXR app lifecycle (`bz_quest_audio_lifecycle.h`/`.c`). Neither
+  piece changes any existing shared bridge/transport/asset ABI. See
+  "[Layer 7: Warcraft III data staging + native AAudio output](#layer-7-warcraft-iii-data-staging--native-aaudio-output)"
+  below for full scope, the staging safety/idempotency design, the ROC/TFT
+  archive rules (and the one documented runtime `-tft` gap), and the AAudio
+  parser/mixer/lifecycle design.
 
 **These layers now render fog of war, per-entity selection markers, and a
-status/command-card HUD, and (layer 6) read Touch controllers to select
+status/command-card HUD, (layer 6) read Touch controllers to select
 units, activate command-card buttons, issue smart/target orders, cancel, and
-pan/rotate/zoom the board - all posted through the authoritative typed
-tabletop transport. They still do not render particles/effects, do not track
-hands, do not play audio, and do not stage WC3 data onto the device.**
+pan/rotate/zoom the board, and (layer 7) can stage a developer's own local
+Warcraft III data onto the device and play its non-spatial audio through
+AAudio — all posted through the authoritative typed tabletop transport, or
+(audio) dequeued from its existing bounded audio queue. They still do not
+render particles/effects, do not track hands, and do not implement
+multiplayer, Store asset delivery, the Meta Audio SDK, or Platform
+services.**
 See
 [Current limitations](#current-limitations) and
 `bz_quest_host.c`'s compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by
@@ -94,8 +113,12 @@ and `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` were layer 4's two seams;
 `BZ_QUEST_ENABLE_WC3_RENDERER` is the one seam *layer 5A* replaces with a
 real implementation (layer 5E's HUD renders under this same seam - it adds no
 new one); `BZ_QUEST_ENABLE_INPUT` is the seam *layer 6* replaces with the real
-OpenXR Touch-controller input layer; `BZ_QUEST_ENABLE_AUDIO` and
-`BZ_QUEST_ENABLE_DATA_STAGING` remain `#error`-gated for a later layer.
+OpenXR Touch-controller input layer; `BZ_QUEST_ENABLE_AUDIO` is the seam
+*layer 7* replaces with the real AAudio sink (now hard-required at `1`, an
+`#error` if ever turned off); `BZ_QUEST_ENABLE_DATA_STAGING` remains
+permanently `#error`-gated at its default `0` — data staging is an external
+ADB dev workflow, not an in-app runtime feature, so no real "on" value for
+this seam will ever exist.
 
 ## Architecture boundary
 
@@ -297,6 +320,39 @@ JAVA_HOME=/path/to/temurin-17 make quest
 # Installs (does not launch) the built debug APK via adb - untested against
 # real Quest hardware, see Current limitations.
 JAVA_HOME=/path/to/temurin-17 make quest-install-debug
+
+# --- Layer 7: data staging + audio -----------------------------------------
+
+# Fake-adb/run-as/pm/df host harness (no NDK/Gradle/device required) for the
+# developer data-staging script below. Runs as part of `make test`.
+make test-quest-stage-wc3-data
+
+# Structural (no-NDK/no-device) check that the AAudio real-time data
+# callback and the mixer render function it calls never allocate, lock,
+# log, or touch files/bridge APIs. Runs as part of `make test`.
+make test-quest-audio-rt-callback-safety
+
+# Stages a developer's own local, user-owned Warcraft III ROC (and,
+# optionally, TFT-over-ROC) data directory onto a connected/sideloaded
+# Quest device via the app's own run-as identity (works under Android
+# scoped storage - no root, no shell access to another app's private
+# storage). Requires the debug APK already installed
+# (`make quest-install-debug`) and a real adb-visible device. Never
+# bundles/copies any Warcraft III data into git or the APK.
+make quest-stage-wc3-data BZ_QUEST_WC3_DATA=/path/to/your/wc3/data
+
+# Reports what is currently staged on the device (files, sizes, sha256, and
+# the override file's contents) without transferring anything.
+make quest-verify-wc3-data
+
+# Removes only the app's private staged Warcraft III data subdirectory and
+# override file (never a broader/recursive delete).
+make quest-clean-wc3-data
+
+# Launches the installed app, and tails its logcat tag, on the connected/
+# sideloaded device.
+make quest-run
+make quest-log
 ```
 
 ### Exact on-device acceptance procedure (requires a connected Quest 3/3S)
@@ -385,6 +441,9 @@ test`, none of which need Gradle/NDK/Quest hardware:
 | `bz_quest_bridge.c` | `tests/test_bz_quest_bridge.c` | Valid-override start reaches `RUNNING`; missing-data start reaches `FAILED` with the engine's own error surfaced; invalid-override start reaches `FAILED` *before* any `bzTabletopLifecycle_t` exists; a second `start()` on an already-attempted instance is rejected; suspend/resume forward correctly (and are safe no-ops before a start or after a stop); `stop()` is idempotent and safe pre-start; `destroy()` then a fresh `start()` on the same storage succeeds; `is_terminal()` is correct for every bridge state — 10 tests, **linking the real** `bz_tabletop_lifecycle.c`/`common/bz_runtime.c` (not a stub), 67 assertions. |
 | `bz_quest_input_state.c` (layer 6) | `tests/test_bz_quest_input_state.c` | The pure Touch-controller interaction state machine: button edge detection (idle→press→hold→release→idle produces exactly one edge; two cycles produce two; a controller going inactive mid-hold clears the latch without firing a phantom release), deterministic ray-hit priority (HUD action > HUD cancel > HUD disabled/stale/hidden consumed-but-no-command > nearest-entity sphere > terrain plane > no-hit; boundary hits exactly on a region edge; entity-vs-terrain precedence), world↔composed coordinate inversion round-trip (forward `bz_quest_wc3_world_transform_point` then the new inverse, plus the degenerate no-bounds passthrough), board transform compose/inverse round-trip and scale/translate/pitch clamping at both ends, pan/rotate/zoom math, target/cancel transitions incl. the `ENTITY`/`ENTITY_OR_POINT` ABI-gap decision (target-point at the entity's ground origin), command-mapping-table completeness (every command type reachable, queue-full/stale-generation rejection paths surface a rejected haptic and leave no latched state), and idempotent transient-clear on focus-loss/controller-loss/generation-bump/map-epoch-change (clears once on entry, never re-fires while the condition persists). |
 | `bz_quest_xr_bindings.c` (layer 6) | `tests/test_bz_quest_xr_bindings.c` | The pure OpenXR binding tables: both profile path strings are legal OpenXR paths; every action/component path is lowercase-legal (no spaces/uppercase, no leading/trailing/double slash); `simple_controller` is a strict subset of `touch_controller` (same aim/grip/select/menu/haptic semantic actions bound, thumbstick/squeeze/face-buttons only on Touch); the reserved Oculus/system button is never bound; menu is left-hand-only; face buttons differ by hand (X/Y left, A/B right); no duplicate component path per side; and the path validator rejects malformed inputs. |
+| `bz_quest_wav.c` (layer 7) | `tests/test_bz_quest_wav.c` | The pure RIFF/WAVE parser: valid mono/stereo, 8-bit/16-bit PCM parses; every documented rejection (bad RIFF/WAVE magic, missing `fmt `/`data` chunk, `data` before `fmt `, non-PCM `audioFormat`, unsupported channel count/bit depth, `blockAlign`/`byteRate` inconsistent with the header's own fields, zero/oversized/out-of-bounds/misaligned `data` chunk size, truncated chunk header); odd-sized-chunk padding is honored when walking past a non-`fmt `/`data` chunk — 19 tests. |
+| `bz_quest_audio_mixer.c` (layer 7) | `tests/test_bz_quest_audio_mixer.c` | The bounded RT-safe voice pool + format conversion: `init` zeroes every slot; `convert` widens 8-bit to 16-bit, duplicates mono to stereo, resamples up/down deterministically (exact expected sample values, not just "some output"), rejects a zero target rate and an oversized computed output-frame count without allocating; `submit`/`render`/`reap` full lifecycle (submit into the first free slot, render mixes/clamps/advances cursor, a voice reaching its end goes inactive mid-`render` — not a separate step — and is only freed by a later `reap`); pool-full rejection when all `BZ_QUEST_AUDIO_MAX_VOICES` slots are active; two overlapping voices mix (sum, not overwrite) and clip-saturate at the int16 boundary instead of wrapping — 14 tests. |
+| `bz_quest_audio_lifecycle.c` (layer 7) | `tests/test_bz_quest_audio_lifecycle.c` | The pure AAudio lifecycle state machine: every legal `can_start`/`can_pause`/`can_resume`/`can_stop` transition and its inverse (illegal transitions from every other state); `FAILED` is reachable from a failed start attempt and itself allows a fresh `can_start` retry (never auto-retried by this module); `should_restart` is true only when a disconnect was flagged while `RUNNING`/`PAUSED` (never while `STOPPED`/`FAILED`); a successful restart always lands in `RUNNING` regardless of the pre-disconnect state; a failed restart lands in `FAILED`; `counter_changed` fires exactly once per distinct value (including a decrease) and never on a repeat — 14 tests. |
 
 `bz_quest_wc3_render.c`'s world-transform integration test
 (`tests/test_bz_quest_wc3_world_transform.c`) was also extended in layer 6
@@ -397,6 +456,33 @@ directory) and the `shared`/`sheet` dynamic libs — wired automatically as
 target dependencies of `make test-quest-bridge` (see "Build/run/log
 commands" above), exactly mirroring `games/warcraft-3/game.mk`'s existing
 `test-bz-tabletop-lifecycle` recipe.
+
+Two more layer-7 checks are their own shell-script targets, like
+`test-quest-wc3-fog-selection-layout` above, rather than rows in the pure
+host-test binary table:
+
+- `make test-quest-stage-wc3-data`
+  (`scripts/test-stage-wc3-data.sh`) — a fake `adb`/`run-as`/`pm`/`df`/
+  `sha256sum`/`cp` filesystem harness for
+  `scripts/stage-wc3-data.sh` (no real device/NDK/Gradle needed): 14 cases
+  covering ROC-only, TFT-over-ROC, incomplete-mixed-layout rejection,
+  TFT-without-ROC rejection, filenames with spaces/mixed case preserved
+  exactly, unchanged-file skip, changed-file atomic replace (temp name +
+  rename, no leftovers), device-side corruption detected (prior valid file
+  left intact), an interrupted transfer leaving the prior valid file
+  intact, no-device/wrong-package/non-debuggable-app/insufficient-space
+  all rejected with an actionable message, and `clean` refusing without
+  `--yes` then safely removing only the resolved app-data subdirectory.
+- `make test-quest-audio-rt-callback-safety`
+  (`scripts/test-quest-audio-rt-callback-safety.sh`) — greps the real
+  `bz_quest_audio_data_callback()`/`bz_quest_audio_mixer_render()` function
+  bodies (not the whole file, which legitimately allocates/logs elsewhere
+  on the control thread) for any `malloc`/`calloc`/`realloc`/`free`/
+  `pthread_mutex_`/log/`fopen`/`fread`/bridge (`BZ_TT_`) call, and confirms
+  `bz_quest_audio_data_callback` is registered exactly once as the AAudio
+  data callback — a future edit that reintroduces a forbidden call into
+  the real-time path fails loudly here instead of only as an on-device
+  glitch/dropout.
 
 No `+com_frame_limit`-bounded full engine run was additionally attempted on
 this host beyond what `test_bz_quest_bridge.c` already exercises: this
@@ -882,8 +968,10 @@ A **single, fixed, documented** file path —
 `"<internalDataPath>/warcraft_data_path_override.txt"`
 (`BZ_QUEST_DATA_OVERRIDE_FILENAME` in `bz_quest_data.h`) — lets a developer
 point at a non-default location (e.g. an external SD card path staged by
-`adb push` before an install-only-once ADB data-copy script lands in a
-later layer). This is **not** a silent secondary search path:
+`adb push` before launch, or — as of layer 7 — written automatically by
+`platform/android/quest/scripts/stage-wc3-data.sh stage <dir>`, see
+[Layer 7](#layer-7-warcraft-iii-data-staging--native-aaudio-output) below).
+This is **not** a silent secondary search path:
 
 - `internalDataPath` is always non-`NULL`, so this fixed location never
   itself depends on the value it might override — no chicken-and-egg
@@ -2749,6 +2837,324 @@ adb logcat -s bz_quest_native:V
 #      press; taking the headset off (focus loss) and back on resumes cleanly.
 ```
 
+## Layer 7: Warcraft III data staging + native AAudio output
+
+Two independent pieces, explicitly scoped together as this stacked layer's
+deliverable and nothing more: (1) a reproducible **developer ADB workflow**
+that stages a user-owned Warcraft III ROC/TFT data directory into the exact
+app-accessible path/override-file contract "Data-path contract" above
+already defines, and (2) an **Android AAudio sink** that consumes the
+existing shared bounded tabletop audio queue
+(`platform/bridge/bz_tabletop_audio.h`) and actually plays sound on-device.
+Explicitly out of scope (see "Current limitations" below for the honest
+accounting): hand tracking, particles/effects, multiplayer, Store asset
+delivery, Meta's spatial Audio SDK, and Platform services.
+
+### Why data staging is a developer script, not an in-app feature
+
+Warcraft III's ROC/TFT archives are the user's own purchased game data —
+this project never bundles, downloads, or ships them (see AGENTS.md and
+`platform/apple/visionos/scripts/wc3_data.sh`'s identical stance for the
+visionOS port). The app itself only ever *reads* whatever directory
+`bz_quest_data_resolve()` resolves to (see "Data-path contract" above); it
+has no in-app "pick/copy my data" UI or code path, and none is added here
+(`BZ_QUEST_ENABLE_DATA_STAGING` in `bz_quest_host.c` stays permanently at
+its default `0` — flipping it to `1` is a build-time `#error`, since there
+is no runtime feature it could gate). Getting the developer's own files
+from a host machine onto the device is a **build/dev-time** problem, solved
+entirely by `platform/android/quest/scripts/stage-wc3-data.sh` plus the
+`make quest-*-wc3-data` targets in "Build/run/log commands" above.
+
+### Why `run-as` + a `/data/local/tmp` bounce, not a direct `adb push`
+
+Android's scoped storage model (API 29+) blocks other processes — including
+an `adb shell` session — from writing directly into another app's private
+storage sandbox
+(<https://developer.android.com/training/data-storage/app-specific>: "the
+system prevents other apps from accessing [app-specific] directory[ies]").
+That rules out assuming shell access to `/sdcard/Android/data/<pkg>/...`,
+which the task explicitly calls out as the wrong assumption to make.
+
+The documented, supported dev-time mechanism instead is `run-as
+<package>`, which lets an ADB shell assume a **debuggable** app's own UID —
+"you can use the `run-as` command to invoke commands as that app"
+(<https://developer.android.com/studio/debug>, "Use run-as: run commands as
+a debuggable app"). Two consequences this script relies on, confirmed
+against that same official page:
+
+- `run-as <pkg> pwd` — the page's own example capability-check command —
+  is exactly how `stage-wc3-data.sh` verifies (a) the app is installed,
+  and (b) it is debuggable (a release/non-debug build makes `run-as` itself
+  fail, which the script surfaces as its own explicit
+  "app is not debuggable" error, not a generic ADB failure).
+- `run-as`'s default working directory is the package's own private data
+  root — so every remote path the script issues *inside* a `run-as`
+  invocation (e.g. `files/Warcraft III/War3.mpq`) is deliberately relative,
+  never a second, independently-computed absolute guess at where
+  `Context.getFilesDir()` lives on a given OS build.
+
+`run-as` itself has no way to receive bytes from the host machine directly
+(it only lets you *run a command* as the app, not stream a local file in).
+The standard workaround — and what this script does — is a two-hop bounce
+through `/data/local/tmp`: a world-writable, shell-owned location that is
+explicitly **outside** the scoped-storage sandbox model, so a plain `adb
+push` can write to it, and `run-as`'s own `cp` can then read from it into
+the app's private storage. `stage-wc3-data.sh` always deletes its own
+bounce file (`trap ... EXIT INT TERM`) whether the transfer succeeds or
+fails, and each bounce filename is unique per invocation (`bz_quest_stage.
+$$.<name>`) so two concurrent staging runs, or a stale leftover from a
+killed previous run, can never collide with or be mistaken for the current
+transfer.
+
+`ANativeActivity::internalDataPath` — the base `bz_quest_data.h`'s override
+file lives under — maps to `Context.getFilesDir()` per the NDK's own
+`ANativeActivity` struct reference
+(<https://developer.android.com/ndk/reference/struct/a-native-activity>),
+which is exactly `run-as`'s own default working directory root; this is why
+the script can write `files/warcraft_data_path_override.txt` (relative,
+inside `run-as`) and have it land at precisely the path `bz_quest_data.c`
+reads at startup, with no separate path-translation step to keep in sync.
+
+### ROC/TFT archive rules the script enforces (traced from `common/common.c`)
+
+`FS_AddDataDirectory()` scans the resolved directory recursively for any
+`.mpq` file, skips any whose basename starts with `"War3x"` (case-
+insensitive) unless `fs_expansion` is `1` (set by `-tft`, unset — the
+default — by no flag or `-roc`; see `common/cvar.c`), sorts every
+surviving archive alphabetically (case-insensitive `strcasecmp` on
+basename) before mounting, and — because `FS_OpenFile()` searches mounted
+archives in **reverse** mount order (highest index first, first match
+wins) — the alphabetically-*last* archive name wins any file-name
+collision. Since `War3x.mpq` sorts after `War3.mpq` (`.` < `x` in ASCII),
+this is exactly "TFT overrides ROC" without any special-cased merge logic
+anywhere in the engine — the script's staging behavior only needs to
+preserve that same ordering-by-filename on disk, not reimplement any
+override logic itself.
+
+`stage-wc3-data.sh` requires:
+
+- **ROC-only**: exactly `War3.mpq` present. Supported and the minimum
+  valid layout.
+- **TFT-over-ROC**: `War3.mpq` **and** both `War3x.mpq` and
+  `War3xlocal.mpq` present. All three are required together — a directory
+  with `War3x.mpq` but missing `War3.mpq`, or with `War3x.mpq` but missing
+  `War3xlocal.mpq`, is an **incomplete mixed layout** and is rejected with
+  an actionable error naming exactly which required file is missing,
+  never silently staged as ROC-only or silently ignoring the partial TFT
+  files.
+- Filenames are matched case-insensitively (Windows-sourced installs vary
+  case) but staged using the **source directory's own on-disk casing and
+  spacing verbatim** — never renamed/normalized — since `FS_AddDataDirectory`'s
+  own basename comparisons are already case-insensitive, so altering case
+  on-device would achieve nothing and would only make `verify`/manual
+  inspection confusing.
+
+**Known runtime limitation, documented honestly:** `bz_quest_data_build_argv()`
+(layer 4) does not currently pass `-tft`/`fs_expansion=1` — only `"-data"
+"<dir>"` (see "Engine startup argv construction" above). This means a
+correctly-staged TFT layout is discoverable-and-correctly-ordered *on
+disk*, but **not yet mounted at runtime** by this build: `fs_expansion`
+defaults to `0`, so `FS_AddArchiveScanEntry` still skips every `War3x*`
+archive regardless of what is staged. This layer's scope is the staging
+*script's* file-layout validation, not runtime argv plumbing, and
+`bz_quest_data.h`/`bz_quest_bridge.c` are a previously-reviewed shared
+layer-4 API this task explicitly says not to alter without concrete
+evidence requiring it — so this gap is deliberately left for a later
+layer to close, mirroring visionOS's own explicit `tft: Bool` → `-tft`
+toggle (`LiveTabletopTransport.swift`/`TabletopAdapter.swift`) as the
+template for that future change. **Do not report TFT audio/visuals as
+working end-to-end until that follow-up lands.**
+
+### Staging safety properties
+
+- **Every remote command is a single pre-quoted string** before it ever
+  reaches `adb shell`/`run-as` — POSIX single-quote escaping (`'` →
+  `'\''`) is applied at each shell-boundary transition, so a host path,
+  package name, or serial containing spaces or shell metacharacters is
+  never re-tokenized or allowed to break out of its argument. No `eval`,
+  no unquoted variable expansion in a command position.
+- **No wildcard destructive deletion.** The only two things this script
+  ever deletes are (a) one file's own temp-name family
+  (`<name>.stage.*`, scoped by concatenating a quoted known prefix with an
+  unquoted glob suffix — never a directory-wide `rm -rf *`), and (b) —
+  only under `clean --yes` — the app's private `files/Warcraft III`
+  subdirectory and the override file, nothing else, and only after an
+  explicit `--yes` confirmation (the bare `clean` command refuses to run).
+- **Atomic replace, never a partial file at the final name.** Each archive
+  is pushed to a unique bounce name, copied device-side into a `.stage.$$`
+  temp name inside the destination directory, sha256-verified against the
+  locally-computed hash, and only then `mv`'d over the final name. A
+  device-side `cp` failure, a `sha256sum` mismatch, or an interrupted
+  transfer (killed before the temp file lands) all leave whatever was
+  previously staged at the final name completely untouched — verified by
+  `test-stage-wc3-data.sh`'s corruption/interruption cases.
+- **Idempotent, without trusting stale files.** Before transferring
+  anything, the script hashes the local source file and — if a file of the
+  same name already exists at the final destination — its sha256 too
+  (never its size/mtime alone, which a corrupt or truncated prior transfer
+  could still match); an identical hash skips the transfer entirely
+  ("unchanged, skipping"), while any difference re-runs the full
+  push/copy/verify/atomic-replace sequence — this never assumes a
+  previously-staged file is still good without recomputing its hash.
+- **Explicit, distinct failures for every precondition** — no device
+  attached, package not installed, package not debuggable (`run-as`
+  itself fails), and insufficient free space on-device (checked, via
+  `run-as`'s own `df -Pk .`, against the total bytes about to be
+  transferred, **before** any push begins) each produce their own
+  actionable error message and a non-zero exit; none of these fall through
+  to a generic/silent failure.
+
+### AAudio sink design
+
+`bz_quest_audio.h`/`.c` is the **only** translation unit in this project
+that includes `<aaudio/AAudio.h>` or touches an `AAudioStream` — every
+other Android/AAudio type stays out of `platform/bridge`/
+`platform/tabletop` headers, per this task's explicit requirement. It
+consumes the existing, **unchanged** shared queue
+(`platform/bridge/bz_tabletop_audio.h`: `BZ_TTAudio_Configure()`/
+`_Dequeue()`/`_DroppedCount()`, `BZ_TT_AUDIO_QUEUE_CAPACITY = 32`,
+`BZ_TT_AUDIO_MAX_BYTES = 1 MiB`) exactly as `platform/tabletop/client/
+s_tabletop_null.c`'s `S_PlaySoundFile()` already fills it — no ABI change
+was made or was found to be necessary.
+
+**Three-thread model**, mirroring `bz_quest_bridge.h`'s "one thread owns
+the lifecycle" convention, extended with AAudio's own two callback
+threads:
+
+1. **Control thread** — Android's main/UI thread, the same one
+   `android_main()` already runs everything else on. Every function in
+   `bz_quest_audio.h` except the two callbacks below must only ever be
+   called here. `bz_quest_audio_drain()` — called once per
+   `android_main()` loop iteration, exactly like `bz_quest_snapshot_capture()`
+   already is — is the one function that dequeues, parses, converts,
+   submits, reaps, and logs; i.e. every allocating/decoding/I/O step in
+   this whole sink happens here, never on either callback thread.
+2. **AAudio RT (data) callback thread** — a dedicated real-time-priority
+   thread AAudio itself creates
+   (<https://developer.android.com/ndk/guides/audio/aaudio/aaudio#using-a-high-priority-callback>).
+   Calls **only** `bz_quest_audio_mixer_render()` — never allocates, locks,
+   logs, decodes, or calls into the bridge/engine (see "Real-time-safety"
+   below).
+3. **AAudio error-callback thread** — a separate thread AAudio may invoke
+   on disconnect. Per AAudio's own docs
+   (<https://developer.android.com/ndk/guides/audio/aaudio/aaudio#disconnected>:
+   "If you are notified of the disconnect in an error callback thread then
+   the stopping and closing of the stream must be done from another
+   thread"), this callback does nothing but publish one atomic flag;
+   `bz_quest_audio_drain()` (control thread) performs the actual
+   close+reopen+restart on its own next call.
+
+**Real-time-safety, verified structurally** (`make
+test-quest-audio-rt-callback-safety`, see "Testing" above): the data
+callback (`bz_quest_audio_data_callback`) touches nothing but
+`bz_quest_audio_mixer_render()`, which itself only does `memset` +
+saturating-add arithmetic over already-owned buffers plus a single atomic
+load/store per voice per callback (see `bz_quest_audio_mixer.h`'s header
+comment for the full lock-free producer/consumer handoff design: each
+voice's `active` field is the *sole* synchronization point between the
+control thread's `submit()`/`reap()` and the callback thread's `render()`
+— a release-store-then-acquire-load handoff, not a queue, with no mutex
+anywhere in the hot path).
+
+**WAV parsing** (`bz_quest_wav.h`/`.c`) is a strict, pure, host-testable
+RIFF/WAVE parser — the only container this sink ever needs, since every
+Warcraft III sound asset this engine loads is a `.wav` file (see
+`games/warcraft-3/docs/sounds.md`'s SLK-driven sound catalog). Explicitly
+supported: `RIFF`...`WAVE` with a `fmt ` chunk strictly before `data`,
+`audioFormat == 1` (integer PCM) only, 1 or 2 channels, 8-bit
+unsigned/16-bit signed samples, with `blockAlign`/`byteRate` required to be
+internally consistent with the header's own channel/bit-depth/sample-rate
+fields. Every chunk walk is bounds-checked against the buffer size before
+any read (a chunk size that would read past the end is a parse failure,
+never an out-of-bounds read), and RIFF's mandatory even-alignment pad byte
+after an odd-sized chunk is honored. Anything else — WAVE_FORMAT_EXTENSIBLE,
+ADPCM, MP3-in-WAV, 24/32-bit or float PCM, >2 channels, a truncated/
+misaligned/inconsistent header — is a hard, explicit rejection with a
+human-readable reason, logged **once per distinct rejection reason** (not
+once per occurrence) by the one real caller (`bz_quest_audio_drain()`),
+matching AGENTS.md's "Missing Asset Placeholders" once-per-unique-condition
+convention applied here to audio instead of textures/models. No decoder
+fallback of any kind exists.
+
+**Format negotiation**: the sink requests `AAUDIO_FORMAT_PCM_I16` and
+`BZ_QUEST_AUDIO_TARGET_CHANNELS` (2, stereo) explicitly on the builder,
+then re-verifies both after opening (defensive, not redundant — a future
+edit that drops one of the explicit builder calls would otherwise silently
+start converting to the wrong layout). Sample rate is deliberately **not**
+requested — AAudio picks the device's native rate
+(<https://developer.android.com/ndk/guides/audio/aaudio/aaudio>: "After the
+stream is opened you must query the sample data format"), queried once via
+`AAudioStream_getSampleRate()` after open. `bz_quest_audio_mixer_convert()`
+(control thread only) then deterministically converts every voice to that
+rate: 8-bit unsigned source samples widen to signed 16-bit, mono source
+duplicates to both output channels, and a source rate that differs from
+the target is resampled via **deterministic linear interpolation** (never
+a black-box resampling library) with an exact, test-asserted output frame
+count and per-sample values — never a heuristic/best-effort approximation.
+A conversion that would exceed `BZ_QUEST_AUDIO_MAX_OUTPUT_FRAMES` (30
+seconds at 48 kHz — already far beyond any real WC3 sound asset, since the
+*source* file is itself bounded to `BZ_TT_AUDIO_MAX_BYTES` = 1 MiB) is
+rejected rather than allocating an unbounded buffer.
+
+**Bounded voice pool/mixer** (`bz_quest_audio_mixer.h`/`.c`):
+`BZ_QUEST_AUDIO_MAX_VOICES = 8` fixed slots; `submit()` (control thread)
+takes ownership of a `malloc()`'d, already-converted PCM buffer into the
+first free slot or fails without touching ownership if every slot is
+active (the caller must `free()` it and count a drop); `render()` (RT
+thread) mixes every active voice's next `frameCount` frames into the
+caller's zeroed output buffer with saturating add-and-clamp, advances each
+mixed voice's cursor, and flips a voice inactive the instant it reaches
+its end (a single atomic store — still real-time-safe); `reap()` (control
+thread) frees the owned buffer of any voice the callback has since marked
+inactive. Two overlapping voices genuinely sum (not overwrite/replace) and
+clip-saturate at the `int16` boundary rather than wrapping.
+
+**Lifecycle** (`bz_quest_audio_lifecycle.h`/`.c`, pure state machine):
+`STOPPED` → `RUNNING` (start) ⇄ `PAUSED` (pause/resume) → `STOPPED` (stop),
+with a `FAILED` terminal state reachable from a failed start *or* a failed
+disconnect-restart, itself allowing a fresh start attempt to retry (never
+auto-retried by this module itself — mirrors `bz_quest_renderer_init()`'s
+own "never silently retry from inside the command loop" convention).
+`bz_quest_host.c` wires this to the Android lifecycle exactly like the
+bridge/renderer: `bz_quest_ensure_audio_start()` on `APP_CMD_START`
+(guarded, so a second `APP_CMD_START` never double-opens a stream),
+`bz_quest_audio_suspend()`/`_resume()` on `APP_CMD_PAUSE`/`APP_CMD_RESUME`
+(each gated on the lifecycle's own `can_pause`/`can_resume` check, not
+just the module's internal error log, so a stray extra pause/resume is a
+true no-op rather than a logged-but-otherwise-silent double-call), one
+`bz_quest_audio_drain()` call per main-loop iteration, and
+`bz_quest_audio_stop()` in final teardown (guarded on
+`audioStartAttempted && bz_quest_audio_lifecycle_can_stop(...)`, so tearing
+down a sink that never successfully started is a safe no-op, never a
+double-close). `bz_quest_audio_stop()` frees every voice slot's owned PCM
+regardless of its active flag — safe because no callback can still be
+running once `AAudioStream_close()` has returned
+(<https://developer.android.com/ndk/guides/audio/aaudio/aaudio>: "Closing
+an audio stream").
+
+**Drop-counter logging** follows the same one-shot-per-value-change rule as
+the shared queue's own drop counter: `BZ_TTAudio_DroppedCount()` (queue
+overflow — `S_PlaySoundFile()` filled the shared queue faster than
+`drain()` emptied it) and this sink's own voice-pool-full count
+(`bz_quest_audio_mixer_submit()` found every slot active) are each logged
+only when their value actually changes since the last log, never once per
+`drain()` call/frame/callback — verified by
+`bz_quest_audio_lifecycle_counter_changed()`'s own tests.
+
+### Supported vs. unsupported audio behavior
+
+| Behavior | Status |
+|---|---|
+| Mono or stereo, 8-bit unsigned or 16-bit signed PCM WAVE | Supported |
+| Any other WAVE subtype (ADPCM, float, WAVE_FORMAT_EXTENSIBLE) or non-WAVE container | Explicitly rejected, logged once, dropped |
+| Sample-rate conversion to the device's native rate | Supported (deterministic linear interpolation) |
+| Up to 8 concurrent overlapping one-shot voices, saturating-mixed | Supported |
+| A 9th concurrent voice while all 8 are active | Dropped, counted, logged once per count change |
+| Pause/resume/stop across Android `APP_CMD_*` transitions | Supported, idempotent, no double-close |
+| AAudio disconnect (e.g. headset/route change) | Detected via error callback, restarted from the control thread on the next `drain()` |
+| Spatial/positional audio (Meta XR Audio SDK) | **Out of scope** — every voice plays as flat, non-positional stereo; this is an honest prototype limitation, not a bug |
+| Exclusive sharing mode / low-latency performance mode | **Out of scope** — `AAUDIO_SHARING_MODE_SHARED` / `AAUDIO_PERFORMANCE_MODE_NONE` (the balanced default) only |
+
 ## Manifest requirements
 
 Unchanged from layer 2: `AndroidManifest.xml`'s NativeActivity metadata,
@@ -2768,19 +3174,35 @@ debug prototype. Replace before any wider distribution.
 
 Everything below is explicitly out of scope for this layer; each has a
 compile-time `#error`-guarded seam in `bz_quest_host.c`
-(`BZ_QUEST_ENABLE_AUDIO`, `BZ_QUEST_ENABLE_DATA_STAGING`) so a later layer
-flips exactly one on as its real implementation lands, instead of a silent
-stub reporting fake success. `BZ_QUEST_ENABLE_VULKAN_RENDERER`,
-`BZ_QUEST_ENABLE_ENGINE_START`, `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS`,
-`BZ_QUEST_ENABLE_WC3_RENDERER`, and (new this layer) `BZ_QUEST_ENABLE_INPUT`
-are now all hard-required to `1` (a `#error` fires if a build tries to set any
+(`BZ_QUEST_ENABLE_DATA_STAGING`) so a later layer can flip it on only if it
+ever grows a real in-app meaning, instead of a silent stub reporting fake
+success. `BZ_QUEST_ENABLE_VULKAN_RENDERER`, `BZ_QUEST_ENABLE_ENGINE_START`,
+`BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS`, `BZ_QUEST_ENABLE_WC3_RENDERER`,
+`BZ_QUEST_ENABLE_INPUT`, and (new this layer) `BZ_QUEST_ENABLE_AUDIO` are
+now all hard-required to `1` (a `#error` fires if a build tries to set any
 of them to `0`) since the Warcraft renderer, procedural renderer, tabletop
-bridge, and OpenXR Touch input are no longer optional:
+bridge, OpenXR Touch input, and AAudio output are no longer optional:
 
-- Touch-controller input (layer 6) is now present and posts real typed
-  commands; audio output and War3 MPQ data staging onto the device remain out
-  of scope (no ADB data-copy script yet — a developer must stage data manually
-  per "Data-path contract" above until that later layer lands).
+- Touch-controller input (layer 6) and AAudio output (layer 7) are now both
+  present. War3 MPQ data staging is provided as a developer-time ADB script
+  (`platform/android/quest/scripts/stage-wc3-data.sh`, see
+  [Layer 7](#layer-7-warcraft-iii-data-staging--native-aaudio-output) above)
+  rather than an in-app feature — this is a deliberate design choice (the
+  user's own purchased game data is never bundled/copied by this project),
+  not a gap.
+- **Staged TFT archives are not yet mounted at runtime.**
+  `bz_quest_data_build_argv()` still only passes `"-data" "<dir>"`, never
+  `-tft`/`fs_expansion=1` — see [Layer 7](#layer-7-warcraft-iii-data-staging--native-aaudio-output)'s
+  "Known runtime limitation" for the full trace through `common/common.c`/
+  `common/cvar.c` and why this was deliberately left for a later layer
+  rather than altering the previously-reviewed layer-4 `bz_quest_data.h`/
+  `bz_quest_bridge.c` API without concrete evidence requiring it. A TFT
+  layout stages and orders correctly on disk; it is not loaded by the
+  engine on this build.
+- **Spatial/positional audio (Meta XR Audio SDK) is out of scope for this
+  prototype** — every voice plays as flat, non-positional stereo through
+  the device's built-in speakers/output route; see [Layer 7](#layer-7-warcraft-iii-data-staging--native-aaudio-output)'s
+  "Supported vs. unsupported audio behavior" table.
 - No map is ever loaded (`bz_quest_bridge_start()` always passes a `NULL`
   map name) — see "Known limitations of this frame descriptor" above. With
   no map loaded, `BZ_TT_Latest()` returns an entity-less snapshot, so layer
@@ -2788,7 +3210,10 @@ bridge, and OpenXR Touch input are no longer optional:
   eye renders the procedural diagnostic scene (see "Diagnostic-scene
   fallback is explicit, not silent" above) — this was never observed
   rendering real Warcraft geometry on a live snapshot in this environment
-  (see "Hardware/data-only acceptance procedure" below).
+  (see "Hardware/data-only acceptance procedure" below). With no map
+  loaded, `S_PlaySoundFile()` also never actually fires in this
+  environment — see "Hardware/data-only acceptance procedure" below for
+  what was, and was not, exercised for audio this session.
 - Terrain (layer 5B), model animation (layer 5C), fog of war, per-entity
   selection markers (layer 5D), and the status/command-card HUD (layer 5E)
   are now all present; particles/effects and any renderable player
@@ -2818,10 +3243,11 @@ bridge, and OpenXR Touch input are no longer optional:
   (node hierarchy/keyframe tracks/sequences/global sequences/geoset alpha),
   after concrete evidence showed v2 exposed no animation data whatsoever —
   see "ABI decision: extended in place (v2 → v3), not tunneled" above. No
-  further widening has occurred since; camera-facing billboarding and
-  texture-coordinate/material-ID animation (TXAN/KMTF) remain outside the
-  ABI's exposed surface — see "Layer 5C"'s "Supported vs. unsupported
-  animated behavior" table above.
+  further widening has occurred since (layer 7 made no ABI change at all —
+  `platform/bridge/bz_tabletop_audio.h` was consumed exactly as-is); camera-
+  facing billboarding and texture-coordinate/material-ID animation (TXAN/
+  KMTF) remain outside the ABI's exposed surface — see "Layer 5C"'s
+  "Supported vs. unsupported animated behavior" table above.
 
 ### Hardware-only acceptance gates
 
@@ -2897,6 +3323,43 @@ against a real device:
     `_MAX_NEW_TEXTURE_UPLOADS_PER_FRAME`) is well-tuned for a real map's
     worth of unique models/textures streaming in after a real map load —
     untestable without real data and a device to profile against.
+- **New this layer (7)** — none of the following was verified against a
+  real Meta Quest device, a real adb-attached Android install, or real
+  retail Warcraft III data; **do not report any of these as confirmed**
+  until checked with real hardware/data (see "Exact acceptance commands"
+  at the end of the Hardware/data-only acceptance procedure below):
+  - Whether `stage-wc3-data.sh` actually transfers real files over a real
+    `adb`/`run-as` connection to a real installed debug APK — this session
+    only exercised it against `test-stage-wc3-data.sh`'s fake `adb`/
+    `run-as`/`pm`/`df`/`sha256sum`/`cp` shims (no real device attached),
+    which prove the script's *logic* (quoting, atomicity, ROC/TFT
+    validation, idempotency, error paths) but not real `adb`/`run-as`
+    behavior on a real Quest OS build.
+  - Whether a real staged ROC or TFT-over-ROC data directory is actually
+    discovered, mounted, and loaded successfully end-to-end by
+    `BZ_RuntimeInit()`/`FS_AddDataDirectory()` on-device with real
+    `War3.mpq`/`War3x.mpq`/`War3xlocal.mpq` archives — no retail Warcraft
+    III data was available in this environment; only synthetic fixture
+    bytes were used in `test-stage-wc3-data.sh`.
+  - Whether the AAudio stream actually opens, starts, and produces audible
+    sound through the Quest's real output route on real hardware — this
+    session verified the AAudio sink compiles against the real NDK headers
+    (see "What *was* verified this session" below) and that its pure
+    parsing/mixing/lifecycle logic is correct on the host, but no real
+    `AAudioStream_open()`/`_requestStart()` call was ever executed against
+    real AAudio hardware/drivers.
+  - Whether a real AAudio disconnect (e.g. a Bluetooth/wired route change)
+    is actually delivered to `bz_quest_audio_error_callback()` and
+    correctly triggers `bz_quest_audio_drain()`'s close+reopen+restart path
+    on a real device — only the pure lifecycle state-machine transitions
+    this depends on were host-tested.
+  - Whether a real Warcraft III sound asset (a real `.wav` payload
+    extracted from a real MPQ) actually parses successfully through
+    `bz_quest_wav_parse()` and sounds correct once mixed/resampled and
+    played — the parser's format/bounds/consistency rules were derived
+    from the WAVE spec and tested against synthetic fixture bytes built to
+    match those rules, not against a real extracted Warcraft III `.wav`
+    file (none was available in this environment).
 
 ### Hardware/data-only acceptance procedure
 
@@ -2948,6 +3411,51 @@ real staged data together, which was not available in this environment;
 do not report either as confirmed until both are combined on a real
 device.
 
+**C. Data staging + audio acceptance (layer 7, requires a real connected
+Quest 3/3S with the debug APK installed and a developer's own local
+ROC/TFT data directory).** Not run in this environment (no device/data
+available) — this is the exact procedure and expected output:
+
+```sh
+# 1. Build + install (see "Build/run/log commands" above).
+JAVA_HOME=/path/to/temurin-17 make quest-assemble-debug
+JAVA_HOME=/path/to/temurin-17 make quest-install-debug
+
+# 2. Stage a ROC-only directory (exactly War3.mpq) or a TFT-over-ROC
+#    directory (War3.mpq + War3x.mpq + War3xlocal.mpq) from your own local,
+#    user-owned Warcraft III install.
+make quest-stage-wc3-data BZ_QUEST_WC3_DATA=/path/to/your/wc3/data
+# Expect: one "staged <name> (<N> bytes, sha256 <hash>)" line per archive,
+# then the app's private data root/override file printed at the end.
+
+# 3. Confirm what is actually staged (no transfer, read-only).
+make quest-verify-wc3-data
+# Expect: each archive's size/sha256 and the override file's exact
+# contents (an absolute path ending in ".../files/Warcraft III").
+
+# 4. Re-run step 2 unchanged - expect every archive to report "unchanged,
+#    skipping" (idempotent skip, no re-transfer).
+make quest-stage-wc3-data BZ_QUEST_WC3_DATA=/path/to/your/wc3/data
+
+# 5. Launch and tail the log tag (see "Exact on-device acceptance
+#    procedure" above for the full expected sequence); log line 10 should
+#    now read `bz_quest_bridge_start succeeded (data dir '.../Warcraft III')`
+#    instead of the failure line "Hardware-only acceptance gates" A above
+#    describes, since a valid data directory is now staged.
+make quest-run
+make quest-log
+
+# 6. With a real map loaded and an in-game sound-triggering action taken
+#    (e.g. selecting/ordering a unit), confirm audible, non-spatial stereo
+#    sound plays through the headset's speakers/output route with no
+#    stutter/dropout, and that pausing the app (removing the headset or
+#    pressing the Oculus button) stops sound cleanly with no stuck/looping
+#    audio on resume - all hardware-only, unproven here.
+
+# 7. Clean up (requires explicit confirmation - only removes this app's
+#    own private Warcraft III data subdirectory and override file).
+make quest-clean-wc3-data
+```
 
 ### What *was* verified this session
 
@@ -3088,6 +3596,73 @@ device.
   cost. Do not report any of these as confirmed until checked against real
   hardware and real staged `War3.mpq`/`War3x.mpq` data.
 
+### What *was* verified this session (layer 7)
+
+- `stage-wc3-data.sh` and its fake-device test harness
+  `test-stage-wc3-data.sh` were iterated against each other until all 14
+  cases passed (`make test-quest-stage-wc3-data`), including diagnosing and
+  fixing two real bugs found only by actually running the harness (not
+  assumed/guessed): (1) the fake `adb push`/`run-as` filesystem mapping
+  initially let an absolute `/data/local/tmp/...` path inside a `run-as`-
+  wrapped command resolve against the real host filesystem instead of the
+  fake device root — fixed by making the script's remote bounce directory
+  an overridable variable (`BZ_QUEST_STAGE_REMOTE_TMP`, defaulting to the
+  real `/data/local/tmp` in normal use) so the test harness can point it at
+  a real, harness-owned host directory instead; (2) a `TMPDIR` with a
+  trailing slash on this host produced a double-slash in the harness's own
+  expected-path string that a real `pwd`-based path (used by the override-
+  file write) naturally collapses away — fixed by canonicalizing the
+  harness's scratch directory once via `cd ... && pwd` at startup. Also
+  fixed a test-isolation bug where every test shared one fake device root,
+  so an earlier test's staged files could make a later test's assertions
+  pass or fail for the wrong reason — fixed by resetting the fake device's
+  package-root and remote-tmp directories at the start of every test.
+- The real AAudio-owning `bz_quest_audio.c`/`.h` (plus
+  `bz_quest_wav.c`/`.h`, `bz_quest_audio_mixer.c`/`.h`,
+  `bz_quest_audio_lifecycle.c`/`.h`) compiled successfully in the real
+  Gradle/CMake `assembleDebug` build (`JAVA_HOME` pointed at Temurin 17,
+  NDK 27.2.12479018) — the first time any of these four files had been
+  compiled under the real NDK/AAudio headers, with no compile errors
+  against the API-usage assumptions made during the pure-host design phase
+  (builder pattern, callback signatures, format/channel/performance-mode
+  enums).
+- `scripts/verify-native-lib.sh` passes against that APK. Manual
+  `llvm-readelf -d`/`-s` inspection additionally confirmed: `libaaudio.so`
+  is now a `DT_NEEDED` entry alongside the existing allow-listed set
+  (`libopenxr_loader.so`, `libvulkan.so`, `libandroid.so`, `liblog.so`,
+  `libz.so`, `libm.so`, `libdl.so`, `libc.so`) — no SDL2/desktop-GL/Apple-
+  ObjC/VrApi dependency entered the APK from the new audio code — and that
+  `AAudio_createStreamBuilder`/`AAudioStreamBuilder_*`/`AAudioStream_*`
+  symbols are present as expected undefined (external, platform-provided)
+  symbols, never statically bundled.
+- `make test-quest-host-tests` passes at **5067/5067** assertions (up from
+  4880/4880 at the end of layer 6's own session; the delta is this layer's
+  new `bz_quest_wav.c`/`bz_quest_audio_mixer.c`/`bz_quest_audio_lifecycle.c`
+  test suites — 47 new test functions across the three files).
+- A new structural test script,
+  `platform/android/quest/scripts/test-quest-audio-rt-callback-safety.sh`
+  (wired into `make test-quest-audio-rt-callback-safety`, and into both the
+  `test` and `quest` convenience targets in `build.mk`), extracts the real
+  `bz_quest_audio_data_callback()`/`bz_quest_audio_mixer_render()` function
+  bodies and greps them for any allocation/lock/log/file/bridge call,
+  confirming the real-time-safety contract holds in the actual shipped
+  source — verified to actually catch a violation by temporarily injecting
+  a `malloc()` call into the callback body and confirming the script fails
+  loudly, then reverting.
+- `make test-quest-source-sync`, `make test-quest-host-tests` (5067/5067),
+  `make test-quest-bridge` (67/67, unchanged), `make test-quest-stage-wc3-data`
+  (14/14), `make test-quest-audio-rt-callback-safety`, and the full
+  repo-root `make test` all pass with no regressions.
+- `git diff --check clancey-quest-touch-controls...HEAD` reports no
+  whitespace errors.
+- **Not verified this session** — see "Hardware-only acceptance gates" and
+  "Hardware/data-only acceptance procedure" above's "New this layer (7)"
+  and "C. Data staging + audio acceptance" subsections: no physical Quest
+  device, no real retail Warcraft III data, and therefore no real `adb`/
+  `run-as` transfer, no real AAudio stream open/start, and no real audible
+  sound were exercised — do not report any of these as confirmed until
+  checked against real hardware and real staged data.
+
 ## Related documents
 
 - [visionos-tabletop.md](visionos-tabletop.md) — the shared
@@ -3157,3 +3732,21 @@ device.
 - Meta's `XR_FB_passthrough` sample/guidance (start/pause on app
   resume/pause pattern):
   <https://developers.meta.com/horizon/documentation/native/android/mobile-passthrough/>
+- Android scoped storage (why an ADB shell cannot write directly into
+  another app's private storage on API 29+, motivating the `run-as` +
+  `/data/local/tmp` bounce design):
+  <https://developer.android.com/training/data-storage/app-specific>
+- `adb`/`run-as` reference (`run-as <package> pwd` as the official
+  debuggable-app capability-check command, and `run-as`'s default working
+  directory being the package's own private data root):
+  <https://developer.android.com/studio/debug>,
+  <https://developer.android.com/tools/adb>
+- `ANativeActivity` NDK struct reference (`internalDataPath`'s
+  `Context.getFilesDir()` equivalence, `externalDataPath` mapping to
+  `Context.getExternalFilesDir(null)` and its documented possible-`NULL`
+  case):
+  <https://developer.android.com/ndk/reference/struct/a-native-activity>
+- AAudio developer guide (real-time data-callback constraints, high-
+  priority callback threads, format/sample-rate query-after-open,
+  disconnect/error-callback threading rules, stream close semantics):
+  <https://developer.android.com/ndk/guides/audio/aaudio/aaudio>

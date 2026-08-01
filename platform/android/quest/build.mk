@@ -59,6 +59,16 @@ test-quest-wc3-hud-layout:
 test-quest-wc3-pointer-layout:
 	@$(BZ_QUEST_DIR)/scripts/test-wc3-pointer-layout.sh
 
+# Structural (no-NDK/no-device) check that the AAudio real-time data
+# callback and the mixer render function it calls never allocate, lock,
+# log, touch files, or call bridge APIs - see
+# platform/android/quest/scripts/test-quest-audio-rt-callback-safety.sh and
+# bz_quest_audio.c's bz_quest_audio_data_callback header comment for the
+# real-time-safety contract this guards.
+.PHONY: test-quest-audio-rt-callback-safety
+test-quest-audio-rt-callback-safety:
+	@$(BZ_QUEST_DIR)/scripts/test-quest-audio-rt-callback-safety.sh
+
 # Host-native (no NDK/Gradle/Quest hardware required) unit tests for the
 # platform-independent bz_quest_pure.c/bz_quest_scene.c helpers (projection/
 # view-matrix math, format/extension/passthrough-capability selection, and
@@ -83,6 +93,9 @@ test-quest-host-tests:
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wc3_hud.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_input_state.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_xr_bindings.c \
+		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wav.c \
+		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_audio_mixer.c \
+		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_audio_lifecycle.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_pure.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_scene.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_data.c \
@@ -96,6 +109,9 @@ test-quest-host-tests:
 		$(BZ_QUEST_CPP_DIR)/bz_quest_wc3_hud.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_input_state.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_xr_bindings.c \
+		$(BZ_QUEST_CPP_DIR)/bz_quest_wav.c \
+		$(BZ_QUEST_CPP_DIR)/bz_quest_audio_mixer.c \
+		$(BZ_QUEST_CPP_DIR)/bz_quest_audio_lifecycle.c \
 		-lm -o $(BZ_QUEST_HOST_TEST_BIN)
 	@$(BZ_QUEST_HOST_TEST_BIN)
 	@rm -f $(BZ_QUEST_HOST_TEST_BIN)
@@ -116,7 +132,16 @@ test-quest-host-tests:
 .PHONY: test-quest-bridge
 $(eval $(call test_schema,test-quest-bridge,test-assets $(SHARED_LIB) $(SHEET_LIB),$(CFLAGS) -I$(BZ_QUEST_CPP_DIR) -Iplatform/tabletop/bridge -Iserver -Iclient -Igames/warcraft-3 -I$(BZ_QUEST_TESTS_DIR) -Itests,$(BIN_DIR)/test_bz_quest_bridge$(EXE_EXT),$(BZ_QUEST_TESTS_DIR)/test_bz_quest_bridge_main.c $(BZ_QUEST_TESTS_DIR)/test_bz_quest_bridge.c $(BZ_QUEST_CPP_DIR)/bz_quest_data.c $(BZ_QUEST_CPP_DIR)/bz_quest_bridge.c platform/tabletop/bridge/bz_tabletop_lifecycle.c common/bz_runtime.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz -lpthread,))
 
-test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-host-tests test-quest-bridge
+# Fake-adb/run-as/pm/df host harness (no NDK/Gradle/device required) for the
+# Layer 7 developer data-staging script - see
+# platform/android/quest/scripts/test-stage-wc3-data.sh and
+# docs/quest-tabletop.md's "Data staging" section for the exact path
+# contract, ROC/TFT rules, and safety properties this exercises.
+.PHONY: test-quest-stage-wc3-data
+test-quest-stage-wc3-data:
+	@$(BZ_QUEST_DIR)/scripts/test-stage-wc3-data.sh
+
+test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-audio-rt-callback-safety test-quest-host-tests test-quest-bridge test-quest-stage-wc3-data
 
 # Assembles the unsigned arm64-v8a debug APK via the project's own Gradle
 # wrapper. Requires an installed Android SDK/NDK (see docs/quest-tabletop.md)
@@ -140,8 +165,46 @@ quest-verify-native-lib: quest-assemble-debug
 quest-install-debug: quest-assemble-debug
 	@adb install -r $(BZ_QUEST_APK)
 
+# Stages a developer's local, user-owned Warcraft III ROC/TFT data directory
+# onto a connected/sideloaded Quest device via the app's own run-as identity
+# (works under Android scoped storage without requiring a rooted device or
+# shell access to another app's /sdcard/Android/data). Requires the debug
+# APK already installed (quest-install-debug) and BZ_QUEST_WC3_DATA=<dir>.
+# Never bundles/copies any Warcraft III data into git or the APK - see
+# platform/android/quest/scripts/stage-wc3-data.sh and
+# docs/quest-tabletop.md's "Data staging" section for the full contract.
+.PHONY: quest-stage-wc3-data
+quest-stage-wc3-data:
+	@test -n "$(BZ_QUEST_WC3_DATA)" || { echo "usage: make quest-stage-wc3-data BZ_QUEST_WC3_DATA=/path/to/your/wc3/data" >&2; exit 2; }
+	@$(BZ_QUEST_DIR)/scripts/stage-wc3-data.sh stage "$(BZ_QUEST_WC3_DATA)"
+
+# Reports what is currently staged on the device (files present, sizes,
+# sha256, and the override file's contents) without transferring anything.
+.PHONY: quest-verify-wc3-data
+quest-verify-wc3-data:
+	@$(BZ_QUEST_DIR)/scripts/stage-wc3-data.sh verify
+
+# Removes only the app's private staged Warcraft III data subdirectory and
+# override file (never a broader/recursive delete) - requires an explicit
+# confirmation, which this target supplies since invoking it is itself the
+# developer's confirmation.
+.PHONY: quest-clean-wc3-data
+quest-clean-wc3-data:
+	@$(BZ_QUEST_DIR)/scripts/stage-wc3-data.sh clean --yes
+
+# Launches the installed app on the connected/sideloaded device via adb.
+.PHONY: quest-run
+quest-run:
+	@$(BZ_QUEST_DIR)/scripts/stage-wc3-data.sh run
+
+# Tails this app's logcat output (filtered to its own log tag) for the
+# connected/sideloaded device via adb.
+.PHONY: quest-log
+quest-log:
+	@$(BZ_QUEST_DIR)/scripts/stage-wc3-data.sh log
+
 # Convenience target bundling the checks that do not require physical Quest
 # hardware: source-list sync plus a full Gradle/CMake build and native
 # library verification.
 .PHONY: quest
-quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout quest-verify-native-lib
+quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-audio-rt-callback-safety test-quest-stage-wc3-data quest-verify-native-lib

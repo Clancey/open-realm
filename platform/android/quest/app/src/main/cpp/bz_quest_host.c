@@ -12,11 +12,17 @@
  * OpenXR or Vulkan type (see AGENTS.md's "Keep all OpenXR/Vulkan/Android
  * types inside the Quest host").
  *
- * This file deliberately still does NOT:
- *
- *   - poll OpenXR input actions (BZ_QUEST_ENABLE_INPUT)
- *   - open an audio track/mixer (BZ_QUEST_ENABLE_AUDIO)
- *   - stage War3.mpq/War3x.mpq data onto the device (BZ_QUEST_ENABLE_DATA_STAGING)
+ * As of layer 7, none of the previous per-layer runtime gaps remain: OpenXR
+ * input (BZ_QUEST_ENABLE_INPUT) and AAudio output (BZ_QUEST_ENABLE_AUDIO)
+ * are both real, always-on implementations - see bz_quest_audio.h's header
+ * comment for the AAudio sink's threading/format/lifecycle contract. War3.mpq/
+ * War3x.mpq data staging (BZ_QUEST_ENABLE_DATA_STAGING) is intentionally NOT
+ * an in-app feature at all - it is a developer-time ADB workflow
+ * (platform/android/quest/scripts/stage-wc3-data.sh) that runs BEFORE this
+ * app starts, using the app's own run-as identity to write into its private
+ * storage; there is no runtime code path for the app to stage its own data,
+ * so this seam stays permanently off (an #error fires if a build ever tries
+ * to flip it to 1 - see below).
  *
  * Each seam below is a real compile-time gate: flipping one on without also
  * providing its implementation fails the build with a clear #error instead
@@ -53,6 +59,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "bz_quest_audio.h"
 #include "bz_quest_bridge.h"
 #include "bz_quest_frame.h"
 #include "bz_quest_log.h"
@@ -107,6 +114,14 @@
 #error "BZ_QUEST_ENABLE_INPUT: layer 6 always builds the real OpenXR Touch-controller input layer - CMakeLists.txt must define this to 1"
 #endif
 #if BZ_QUEST_ENABLE_AUDIO
+/* Layer 7 replaces this seam with the real AAudio output sink
+ * (bz_quest_audio.h/.c, dequeuing from the shared platform/bridge/
+ * bz_tabletop_audio.h queue) - driven from bz_quest_handle_cmd() (start/
+ * suspend/resume/stop) and once per android_main() loop iteration
+ * (bz_quest_audio_drain(), mirroring bz_quest_snapshot_capture()'s own
+ * "once per iteration on the control thread" convention) - see
+ * docs/quest-tabletop.md's "Layer 7: data staging + native audio". */
+#else
 #error "BZ_QUEST_ENABLE_AUDIO: audio output is a later Quest layer - see docs/quest-tabletop.md"
 #endif
 #if BZ_QUEST_ENABLE_DATA_STAGING
@@ -142,6 +157,15 @@ typedef struct bzQuestAppState_s {
      * header comment and android_main()'s teardown block below for why
      * this host is the sole owner of that ordering. */
     bzQuestBridge_t bridge;
+    /* Owns the AAudio output stream + RT-safe mixer/voice-pool (layer 7).
+     * Zero-initialized to STOPPED by android_main()'s memset() below -
+     * bz_quest_audio_drain() is always safe to call unconditionally every
+     * loop iteration even before bz_quest_ensure_audio_start() has run
+     * (see bz_quest_audio.h's own "no-op when STOPPED/FAILED" contract),
+     * exactly like bz_quest_snapshot_capture() already tolerates a NULL
+     * bridge.lc. */
+    bzQuestAudio_t audio;
+    bool audioStartAttempted; /* mirrors initAttempted/bridge.startAttempted's "attempt once" convention */
     /* Last diagnostic frame descriptor captured on this (the XR/render)
      * thread - compared against the newly captured one every iteration to
      * decide whether bz_quest_frame_should_log() should emit a throttled
@@ -192,6 +216,24 @@ static void bz_quest_ensure_bridge_start(struct android_app *app) {
 }
 
 /*
+ * Runs bz_quest_audio_start() exactly once (on the first APP_CMD_START,
+ * independent of both bz_quest_ensure_renderer_init() and
+ * bz_quest_ensure_bridge_start() above - audio output never depends on
+ * whether Vulkan/OpenXR rendering or the tabletop engine thread
+ * themselves succeeded, matching this layer's "each subsystem fails
+ * independently, never silently disables another" requirement). A failed
+ * attempt already logged its exact reason inside bz_quest_audio_start()
+ * itself (see bz_quest_audio.h/.c) - never retried from inside the
+ * command loop, mirroring every other bz_quest_ensure_*_start() above.
+ */
+static void bz_quest_ensure_audio_start(struct android_app *app) {
+    bzQuestAppState_t *state = (bzQuestAppState_t *)app->userData;
+    if (state->audioStartAttempted) return;
+    state->audioStartAttempted = true;
+    (void)bz_quest_audio_start(&state->audio);
+}
+
+/*
  * Runs bz_quest_renderer_init() exactly once (on the first APP_CMD_START,
  * which android_native_app_glue delivers before APP_CMD_INIT_WINDOW/RESUME
  * and while app->activity->vm/clazz are already valid - see the NDK's
@@ -226,6 +268,7 @@ static void bz_quest_handle_cmd(struct android_app *app, int32_t cmd) {
             BZ_QUEST_LOGI("APP_CMD_START");
             bz_quest_ensure_renderer_init(app);
             bz_quest_ensure_bridge_start(app);
+            bz_quest_ensure_audio_start(app);
             break;
         case APP_CMD_RESUME:
             BZ_QUEST_LOGI("APP_CMD_RESUME");
@@ -234,6 +277,7 @@ static void bz_quest_handle_cmd(struct android_app *app, int32_t cmd) {
                 bz_quest_passthrough_start(&state->renderer.xr, &state->renderer.passthrough);
             }
             bz_quest_bridge_resume(&state->bridge);
+            if (state->audio.lc.state == BZ_QUEST_AUDIO_LC_PAUSED) bz_quest_audio_resume(&state->audio);
             break;
         case APP_CMD_PAUSE:
             BZ_QUEST_LOGI("APP_CMD_PAUSE");
@@ -242,6 +286,7 @@ static void bz_quest_handle_cmd(struct android_app *app, int32_t cmd) {
                 bz_quest_passthrough_pause(&state->renderer.xr, &state->renderer.passthrough);
             }
             bz_quest_bridge_suspend(&state->bridge);
+            if (state->audio.lc.state == BZ_QUEST_AUDIO_LC_RUNNING) bz_quest_audio_suspend(&state->audio);
             break;
         case APP_CMD_STOP:
             BZ_QUEST_LOGI("APP_CMD_STOP");
@@ -330,6 +375,15 @@ void android_main(struct android_app *app) {
         }
         state.lastFrame = frame;
 
+        /* Drains the shared bounded audio queue into the AAudio voice pool
+         * exactly once per loop iteration, on this same control thread -
+         * see bz_quest_audio.h's header comment. Always safe to call even
+         * before bz_quest_ensure_audio_start() has run or if it failed
+         * (bz_quest_audio_drain() no-ops while STOPPED/FAILED - see that
+         * function's own comment), mirroring bz_quest_snapshot_capture()'s
+         * tolerance of a not-yet-started bridge just above. */
+        bz_quest_audio_drain(&state.audio);
+
         /* The engine's own dedicated thread can self-transition to
          * FAILED/STOPPED asynchronously (e.g. a frame-limit/console "quit"
          * - see bz_tabletop_lifecycle.c's Sys_Quit() handling), independent
@@ -360,7 +414,10 @@ void android_main(struct android_app *app) {
      * "business logic" side first, then the presentation side, keeps this
      * ordering simple and deterministic instead of depending on which side
      * happened to trigger the exit. */
-    BZ_QUEST_LOGI("bz_quest_host: destroy requested, tearing down bridge and renderer");
+    BZ_QUEST_LOGI("bz_quest_host: destroy requested, tearing down audio, bridge, and renderer");
+    if (state.audioStartAttempted && bz_quest_audio_lifecycle_can_stop(&state.audio.lc)) {
+        bz_quest_audio_stop(&state.audio);
+    }
     if (state.bridge.startAttempted) {
         bz_quest_bridge_destroy(&state.bridge);
     }

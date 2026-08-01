@@ -27,6 +27,9 @@ void run_bz_quest_wc3_hud_font_tests(void);
 void run_bz_quest_wc3_hud_tests(void);
 void run_bz_quest_input_state_tests(void);
 void run_bz_quest_xr_bindings_tests(void);
+void run_bz_quest_wav_tests(void);
+void run_bz_quest_audio_mixer_tests(void);
+void run_bz_quest_audio_lifecycle_tests(void);
 
 int main(void) {
     printf("=== OpenRealm Quest Pure Helper Tests ===\n\n");
@@ -84,6 +87,18 @@ int main(void) {
 
     printf("[bz_quest_xr_bindings]\n");
     run_bz_quest_xr_bindings_tests();
+    printf("\n");
+
+    printf("[bz_quest_wav]\n");
+    run_bz_quest_wav_tests();
+    printf("\n");
+
+    printf("[bz_quest_audio_mixer]\n");
+    run_bz_quest_audio_mixer_tests();
+    printf("\n");
+
+    printf("[bz_quest_audio_lifecycle]\n");
+    run_bz_quest_audio_lifecycle_tests();
     printf("\n");
 
     TEST_RESULTS();
