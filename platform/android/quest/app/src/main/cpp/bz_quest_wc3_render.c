@@ -73,6 +73,22 @@ void bz_quest_wc3_build_world_matrix(const bzQuestWc3EntityInput_t *entity, floa
     outWorld[14] = tz;
 }
 
+void bz_quest_wc3_convert_matrix_zup_to_yup(const float inZup[16], float outYup[16]) {
+    /* Same Y<->Z axis swap as the position/normal conversion above, expressed
+     * as a column-major 4x4 with no translation component: maps (x,y,z,1)
+     * -> (x,z,y,1). Symmetric and its own inverse (S*S = Identity) - see
+     * this function's declaration comment. */
+    static const float kAxisSwap[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    };
+    float tmp[16];
+    bz_quest_mat4_multiply(kAxisSwap, inZup, tmp);
+    bz_quest_mat4_multiply(tmp, kAxisSwap, outYup);
+}
+
 void bz_quest_wc3_build_render_list(const bzQuestWc3EntityInput_t *entities, uint32_t entityCount,
                                     bzQuestWc3RenderList_t *outList) {
     memset(outList, 0, sizeof(*outList));

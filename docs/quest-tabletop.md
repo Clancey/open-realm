@@ -1577,10 +1577,41 @@ wall clock:
    resolved bone-palette node-index list (already node-index-remapped by the
    ABI - see `BZ_TTAsset_CopyGeosetMatrixPalette`'s doc comment) into the
    final per-geoset matrix palette the GPU consumes.
-5. The palette is written into the persistently-mapped bone-palette UBO and
-   bound via a per-draw dynamic offset; the vertex shader does the actual
-   skinning (see "GPU skinning" below) - the CPU never transforms a single
-   vertex.
+5. **Coordinate-basis conversion (fixed post-review; was previously missing).**
+   Every matrix produced by steps 2-4 above (`bz_quest_wc3_anim.c`'s pivots,
+   tracks, and composed global/palette matrices) is deliberately kept in raw
+   MDX space (Z-up, left as documented in `bz_quest_wc3_anim.h`'s own header
+   comment, to stay byte-for-byte faithful to desktop's formulas) - but
+   `decode_geoset_geometry()` in `bz_quest_wc3_capture.c` already Y/Z-swaps
+   every vertex position and normal (and flips triangle winding) into the
+   target Y-up right-handed space before it ever reaches the GPU. Uploading
+   the raw Z-up palette directly, as an earlier revision of this slice did,
+   is a basis mismatch: the vertex shader multiplies an already-Y-up vertex
+   by a still-Z-up bone matrix, so animated translations/rotations land on
+   the wrong target axes even though static (identity-palette) models look
+   correct. The fix, `bz_quest_wc3_convert_matrix_zup_to_yup()`
+   (`bz_quest_wc3_render.h`/`.c`), applies `M_yup = S * M_zup * S` to every
+   resolved palette slot in `build_frame_dynamic_material()`
+   (`bz_quest_vk_wc3.c`), where `S` is the same Y/Z-swap matrix used for
+   vertices; `S` is an involution (`S*S=I`), so this is the exact conjugation
+   `S * M * S^-1` a change of basis requires, reduced algebraically since
+   `S^-1 == S`. Verified independently (Python/numpy, not by invoking
+   production code): identity stays identity; a pure MDX +Z translation
+   becomes a pure target +Y translation; an MDX Z-axis rotation becomes a
+   rotation strictly about target Y matching this codebase's own `Ry(-theta)`
+   convention in `bz_quest_wc3_build_world_matrix()`. Regression-tested in
+   `test_bz_quest_wc3_render.c` (`test_convert_zup_to_yup_identity_stays_identity`,
+   `test_convert_zup_to_yup_translation_z_becomes_translation_y`,
+   `test_convert_zup_to_yup_rotation_about_z_becomes_rotation_about_y`,
+   `test_convert_zup_to_yup_in_place_matches_separate_buffer`,
+   `test_convert_zup_to_yup_preserves_hierarchy_composition` - the last one
+   builds a real 2-node parent/child pose via `bz_quest_wc3_build_pose()` and
+   proves the conversion commutes correctly with hierarchy composition:
+   `S*(parent*local)*S == (S*parent*S)*(S*local*S)`).
+6. The converted palette is written into the persistently-mapped bone-palette
+   UBO and bound via a per-draw dynamic offset; the vertex shader does the
+   actual skinning (see "GPU skinning" below) - the CPU never transforms a
+   single vertex.
 
 No step above samples wall-clock time for entity-driven (non-global)
 animation; the only clock read is the Quest render clock, and only for the

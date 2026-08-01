@@ -1388,6 +1388,19 @@ static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3Re
             uint32_t slot = 1 + vk3->paletteSlotsUsedThisFrame++;
             bz_quest_wc3_build_bone_palette(ga->paletteNodeIndices, ga->paletteNodeIndexCount,
                                             s_poseNodeMatricesScratch, nodeCount, s_posePaletteScratch);
+            /* bz_quest_wc3_build_bone_palette() (like the rest of
+             * bz_quest_wc3_anim.c) works entirely in raw MDX (Z-up) space -
+             * see that module's own header comment. Vertex positions were
+             * already converted to this project's target Y-up space back in
+             * bz_quest_wc3_capture.c's decode_geoset_geometry(), so the
+             * shader's `uBonePalette.bones[i] * pos4` multiply requires
+             * Y-up matrices too, or animated translations/rotations land on
+             * the wrong axes. Convert every slot (used and identity-padded
+             * alike - the conversion maps identity to identity, see
+             * bz_quest_wc3_convert_matrix_zup_to_yup()'s own doc comment)
+             * before it ever reaches the mapped UBO. */
+            for (uint32_t p = 0; p < BZ_QUEST_WC3_MAX_MATRIX_PALETTE; p++)
+                bz_quest_wc3_convert_matrix_zup_to_yup(s_posePaletteScratch[p], s_posePaletteScratch[p]);
             VkDeviceSize byteOffset = (VkDeviceSize)slot * vk3->paletteSlotStride;
             memcpy((uint8_t *)vk3->paletteMapped + byteOffset, s_posePaletteScratch,
                   sizeof(float) * 16 * BZ_QUEST_WC3_MAX_MATRIX_PALETTE);

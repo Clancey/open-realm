@@ -414,6 +414,35 @@ typedef struct {
 void bz_quest_wc3_build_world_matrix(const bzQuestWc3EntityInput_t *entity, float outWorld[16]);
 
 /*
+ * Converts one MDX-space (Z-up) bone/node pose matrix - a
+ * bz_quest_wc3_anim.c bone-palette entry - into this file's own target
+ * (Y-up right-handed) space, so it can be safely multiplied against vertex
+ * positions that have ALREADY been through the Y<->Z axis swap documented
+ * in this file's header comment. `bz_quest_wc3_anim.c` deliberately stays
+ * in raw MDX (Z-up) space end to end (its own header comment: formulas are
+ * transcribed verbatim from the desktop renderer and must not be altered),
+ * so this conversion is a separate, explicit step owned by this coordinate
+ * module, applied once to each finished 4x4 matrix - not to individual
+ * translation/rotation/scale track components, which the task that
+ * introduced this function called out as the wrong approach.
+ *
+ * The general rule for converting an affine matrix M under a linear
+ * coordinate map S is M' = S * M * S^-1. The Y<->Z swap S used everywhere
+ * else in this file (position/normal swap above) is an involution as a
+ * 4x4 matrix (S*S = Identity - swapping two axes twice returns the
+ * original), so S^-1 = S and the formula reduces to M' = S * M * S. This
+ * also means an already-identity matrix (a genuinely static model, or an
+ * unused/identity-padded bone-palette slot - see
+ * bz_quest_wc3_build_bone_palette()'s own fill convention) converts to the
+ * identity again (S*I*S = S*S = I), so callers may run every palette slot
+ * - used and identity-padded alike - through this same function
+ * unconditionally, with no special-casing for "is this slot really
+ * animated" required. `inZup`/`outYup` may safely be the same array (every
+ * read of `inZup` happens before the first write to `outYup`).
+ */
+void bz_quest_wc3_convert_matrix_zup_to_yup(const float inZup[16], float outYup[16]);
+
+/*
  * Builds `outList` from `entities`/`entityCount` (already-captured,
  * already-resolved POD entity inputs - see bz_quest_wc3_capture.h).
  * Entities with an empty modelIdentity are skipped (no model resolved this

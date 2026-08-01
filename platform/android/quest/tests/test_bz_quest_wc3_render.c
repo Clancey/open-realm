@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bz_quest_wc3_anim.h"
 #include "bz_quest_wc3_render.h"
 #include "test_framework.h"
 
@@ -325,6 +326,152 @@ static void test_model_anim_free_releases_arena_and_struct(void) {
     bz_quest_wc3_model_anim_free(anim); /* frees anim->arena then anim - no separate free(anim->nodes) needed */
 }
 
+/* ------------------------------------------------------------------ */
+/* bz_quest_wc3_convert_matrix_zup_to_yup - layer 5C palette basis fix  */
+/* ------------------------------------------------------------------ */
+/* Expected values below are hand-derived independently from the M' =
+ * S*M*S conjugation formula documented on the function's declaration
+ * (never by calling bz_quest_mat4_multiply or re-deriving the production
+ * formula in-test - see AGENTS.md's "avoid tests that duplicate
+ * production formulas" rule). S is the column-major Y<->Z axis swap
+ * (swap rows/cols 1 and 2, fix rows/cols 0 and 3). */
+
+static void test_convert_zup_to_yup_identity_stays_identity(void) {
+    /* S*I*S = S*S = Identity - a static model or an identity-padded
+     * bone-palette slot must convert unchanged (this function's own
+     * declaration comment). */
+    float identity[16] = {
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,0,1,
+    };
+    float out[16];
+    bz_quest_wc3_convert_matrix_zup_to_yup(identity, out);
+    for (int i = 0; i < 16; i++) {
+        float expected = (i % 5 == 0) ? 1.0f : 0.0f; /* diagonal entries at 0,5,10,15 */
+        ASSERT_EQ_FLOAT(out[i], expected, 0.0001f);
+    }
+}
+
+static void test_convert_zup_to_yup_translation_z_becomes_translation_y(void) {
+    /* A pure MDX-space translation of tz=10 along raw Z: hand-derived via
+     * S*T*S, the translation column's Y/Z components swap exactly like
+     * vertex positions do (see bz_quest_wc3_build_world_matrix's own
+     * Y/Z position swap and test_position_swaps_y_and_z above), so a
+     * root +Z-in-MDX translation must land as +Y in target space. */
+    float translateZ[16] = {
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,10,1,
+    };
+    float out[16];
+    bz_quest_wc3_convert_matrix_zup_to_yup(translateZ, out);
+    ASSERT_EQ_FLOAT(out[12], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[13], 10.0f, 0.0001f); /* target Y gains the raw Z translation */
+    ASSERT_EQ_FLOAT(out[14], 0.0f, 0.0001f);  /* target Z loses it (raw Y was 0) */
+}
+
+static void test_convert_zup_to_yup_rotation_about_z_becomes_rotation_about_y(void) {
+    /* A rotation about raw MDX Z by 90 degrees (cos=0, sin=1), in this
+     * codebase's own column-major layout (see bz_quest_mat4_multiply's
+     * out[col*4+row] convention): column 0 = (cos, sin, 0), column 1 =
+     * (-sin, cos, 0), column 2 = (0,0,1). Hand-derived conjugation by S
+     * (swap rows/cols 1,2) yields exactly Ry(-90) in this file's own
+     * rotScale convention from bz_quest_wc3_build_world_matrix (column 0 =
+     * (c,0,-s), column 1 = (0,1,0), column 2 = (s,0,c) with theta=-90:
+     * c=0, s=-1) - i.e. the result is confined to a rotation strictly
+     * about the target Y axis, matching this codebase's established
+     * heading-rotation sign convention exactly (the sign flip is an
+     * inherent, correct consequence of S being an orientation-reversing
+     * reflection, not an error - the same S applies to vertices too). */
+    float rotateZ90[16] = {
+        0,1,0,0,
+        -1,0,0,0,
+        0,0,1,0,
+        0,0,0,1,
+    };
+    float out[16];
+    bz_quest_wc3_convert_matrix_zup_to_yup(rotateZ90, out);
+    /* Ry(-90): column0=(0,0,1), column1=(0,1,0), column2=(-1,0,0). */
+    ASSERT_EQ_FLOAT(out[0], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[1], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[2], 1.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[4], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[5], 1.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[6], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[8], -1.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[9], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[10], 0.0f, 0.0001f);
+    /* rotation-only, no translation introduced. */
+    ASSERT_EQ_FLOAT(out[12], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[13], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[14], 0.0f, 0.0001f);
+}
+
+static void test_convert_zup_to_yup_in_place_matches_separate_buffer(void) {
+    /* bz_quest_vk_wc3.c's build_frame_dynamic_material() calls this
+     * function with inZup==outYup (converts every palette slot in place
+     * before GPU upload) - the declaration comment guarantees this is
+     * safe because inZup is fully read into a temp buffer before outYup
+     * is written. Prove the in-place result matches an out-of-place call
+     * on the same input. */
+    float m[16] = {
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        2,3,10,1,
+    };
+    float outOfPlace[16];
+    bz_quest_wc3_convert_matrix_zup_to_yup(m, outOfPlace);
+    bz_quest_wc3_convert_matrix_zup_to_yup(m, m); /* in place, aliasing input==output */
+    for (int i = 0; i < 16; i++) ASSERT_EQ_FLOAT(m[i], outOfPlace[i], 0.0001f);
+}
+
+/* Integration: prove hierarchy/pivot composition survives the conversion.
+ * Root translates along raw MDX Z=10; its child translates along raw MDX
+ * Y=5. bz_quest_wc3_build_pose (bz_quest_wc3_anim.c, deliberately left in
+ * raw MDX space - see that file's own header comment) composes these as
+ * plain translations: root_zup=(0,0,10), child_zup=root_zup+(0,5,0)=
+ * (0,5,10). Converting the FINISHED composed matrices (as
+ * build_frame_dynamic_material() does, once per final palette slot) must
+ * still land child's target position at parent's target Y plus child's
+ * own contribution: converted root=(0,10,0), converted child=(0,10,5) -
+ * i.e. S*(parent*local)*S == (S*parent*S)*(S*local*S), since S*S=I. */
+static void test_convert_zup_to_yup_preserves_hierarchy_composition(void) {
+    bzQuestWc3Node_t nodes[2];
+    memset(nodes, 0, sizeof(nodes));
+    nodes[0].parentIndex = BZ_QUEST_WC3_NO_PARENT;
+    nodes[0].translation.keyCount = 1;
+    nodes[0].translation.interp = BZ_QUEST_WC3_INTERP_LINEAR;
+    nodes[0].translation.globalSequence = BZ_QUEST_WC3_NO_GLOBAL_SEQUENCE;
+    nodes[0].translation.vec3Keys[0] = (bzQuestWc3Vec3Key_t){0, {0, 0, 10}, {0, 0, 0}, {0, 0, 0}};
+
+    nodes[1].parentIndex = 0;
+    nodes[1].translation.keyCount = 1;
+    nodes[1].translation.interp = BZ_QUEST_WC3_INTERP_LINEAR;
+    nodes[1].translation.globalSequence = BZ_QUEST_WC3_NO_GLOBAL_SEQUENCE;
+    nodes[1].translation.vec3Keys[0] = (bzQuestWc3Vec3Key_t){0, {0, 5, 0}, {0, 0, 0}, {0, 0, 0}};
+
+    float pose[2][16];
+    bz_quest_wc3_build_pose(nodes, 2, 0, 1000, 0, 0, NULL, 0, pose);
+    /* sanity: still raw MDX space before conversion (matches
+     * test_hierarchy_child_inherits_parent_translation's convention). */
+    ASSERT_EQ_FLOAT(pose[0][14], 10.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(pose[1][13], 5.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(pose[1][14], 10.0f, 0.0001f);
+
+    float converted[2][16];
+    bz_quest_wc3_convert_matrix_zup_to_yup(pose[0], converted[0]);
+    bz_quest_wc3_convert_matrix_zup_to_yup(pose[1], converted[1]);
+
+    ASSERT_EQ_FLOAT(converted[0][13], 10.0f, 0.0001f); /* root's raw Z=10 -> target Y=10 */
+    ASSERT_EQ_FLOAT(converted[0][14], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(converted[1][13], 10.0f, 0.0001f); /* child inherits root's target Y */
+    ASSERT_EQ_FLOAT(converted[1][14], 5.0f, 0.0001f);  /* child's own raw Y=5 -> target Z=5 */
+}
+
 void run_bz_quest_wc3_render_tests(void) {
     RUN_TEST(test_position_swaps_y_and_z);
     RUN_TEST(test_zero_heading_yields_identity_rotation);
@@ -345,4 +492,9 @@ void run_bz_quest_wc3_render_tests(void) {
     RUN_TEST(test_identity_equal_rejects_different_strings);
     RUN_TEST(test_model_anim_free_null_is_a_no_op);
     RUN_TEST(test_model_anim_free_releases_arena_and_struct);
+    RUN_TEST(test_convert_zup_to_yup_identity_stays_identity);
+    RUN_TEST(test_convert_zup_to_yup_translation_z_becomes_translation_y);
+    RUN_TEST(test_convert_zup_to_yup_rotation_about_z_becomes_rotation_about_y);
+    RUN_TEST(test_convert_zup_to_yup_in_place_matches_separate_buffer);
+    RUN_TEST(test_convert_zup_to_yup_preserves_hierarchy_composition);
 }
