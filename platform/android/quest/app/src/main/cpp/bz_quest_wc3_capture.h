@@ -35,7 +35,12 @@
  * priority is explicit ("favor correct ownership and draw ordering over
  * speculative optimization"), so this slice takes the simple, correct path;
  * a later layer can add a cross-module "already GPU-cached" query once
- * profiling on real hardware justifies the extra complexity.
+ * profiling on real hardware justifies the extra complexity. The one
+ * exception: the per-model bzQuestWc3ModelAnim_t arena is only built when
+ * callbacks->onModelReady is non-NULL, since that callback is the arena's
+ * only free/ownership-transfer path (see model_ready_cb() in
+ * bz_quest_vk_wc3.c) - building it with no consumer would leak it, not
+ * just waste CPU.
  *
  * -- Texture decode policy (same trade-off, applied to replaceable_id 0/1/2) --
  * replaceable_id 0 (direct/non-team texture, see

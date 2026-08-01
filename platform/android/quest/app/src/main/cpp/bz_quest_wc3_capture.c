@@ -786,8 +786,22 @@ static void decode_model(const bzTTAsset_t *asset, const char *identity,
     s_scratchModel.meta.vertexCount = vertexCursor;
     s_scratchModel.meta.indexCount = indexCursor;
     s_scratchModel.meta.geosetCount = outGeosetCount;
-    s_scratchModel.meta.anim =
-        build_model_anim(asset, identity, &modelInfo, s_rawToOutGeoset, geosetCount, outGeosetCount);
+
+    /* build_model_anim() malloc()s an owned bzQuestWc3ModelAnim_t arena
+     * whose ONLY free/ownership-transfer path is onModelReady (see
+     * model_ready_cb()'s doc comment in bz_quest_vk_wc3.c - every one of
+     * its branches either frees the arena or transfers it into the
+     * persistent model cache). With no onModelReady consumer, nothing
+     * would ever do either: s_scratchModel is a static scratch buffer
+     * memset() at the top of the next decode_model() call, so the arena
+     * pointer would simply be overwritten and lost - a leak. Building the
+     * arena at all is also pointless work when nobody will read it. So,
+     * matching this file's own header comment's documented "NULL callback
+     * is safe/no-op, geometry/texture decode is simply skipped" contract,
+     * skip the allocation entirely when there is no consumer. */
+    s_scratchModel.meta.anim = (callbacks && callbacks->onModelReady)
+        ? build_model_anim(asset, identity, &modelInfo, s_rawToOutGeoset, geosetCount, outGeosetCount)
+        : NULL;
 
     if (callbacks && callbacks->onModelReady) {
         callbacks->onModelReady(&s_scratchModel, callbacks->modelUserdata);

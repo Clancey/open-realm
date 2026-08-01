@@ -1705,6 +1705,37 @@ buildable Vulkan cache is available to exercise it dynamically), and
 `test_model_anim_free_releases_arena_and_struct` host-cover the release
 function itself (NULL-safety and the real single-allocation free path).
 
+**Second, distinct NULL-callback ownership leak found and fixed this
+slice**: `decode_model()` previously called `build_model_anim()`
+unconditionally, but `model_ready_cb()` — the *only* code path anywhere
+that frees or transfers ownership of `meta.anim` (the hit/miss/deferral
+paths above) — is itself only invoked by `bz_quest_wc3_capture_frame()`
+`if (callbacks && callbacks->onModelReady)`. With a NULL `onModelReady`,
+the freshly-`malloc()`'d arena pointer was silently overwritten by the
+next frame's `memset(&s_scratchModel, 0, ...)`, leaking it — a case the
+header's own documented contract ("safe to call with `callbacks` fields
+NULL — no-ops, decode is simply skipped") explicitly promised but did not
+implement for this one field. Fixed by only building the arena
+`if (callbacks && callbacks->onModelReady)`, leaving `meta.anim` `NULL`
+(already zeroed) otherwise, so the documented "skip decode" behavior now
+actually holds for the animation arena, matching every other resource this
+policy already covers. There is exactly one production caller
+(`bz_quest_wc3_capture_and_upload()`), and it always sets both callbacks
+together, so this was a defensive-contract gap, not a reachable production
+leak. `bz_quest_wc3_capture.c` calls 35 distinct `platform/bridge` ABI
+functions that are only implemented by real, Android/NDK- or WC3-game-
+linked provider libraries (see `games/warcraft-3/tests/
+test_bz_tabletop_assets_stubs.c` for the one precedent, which links the
+real WC3 asset provider and game-engine state — architecturally unrelated
+to and far heavier than this Quest-only file could reasonably link on
+host), so — consistent with this file's own pre-existing "no direct unit
+test, reviewed by inspection" trade-off (identical to `bz_quest_snapshot.c`)
+— no new fake-ABI host-test harness was built for this one boolean gate;
+the closest legitimate automated coverage remains the existing
+`bz_quest_wc3_model_anim_free()` tests above, and the fix is otherwise
+compile- and behavior-verified via the real `make quest-assemble-debug`
+NDK build.
+
 ### GPU skinning: vertex-shader, not CPU
 
 Chosen because it is the **only** path the reviewed desktop renderer itself
