@@ -248,6 +248,16 @@ bool bz_quest_wc3_terrain_capture(const bzQuestWc3TerrainCaptureCallbacks_t *cal
     char terrainIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
     terrain_key(terrain, &info, terrainIdentity, sizeof(terrainIdentity));
     if (bz_quest_wc3_identity_equal(terrainIdentity, s_lastTerrainKey)) {
+        /* Same generation: skip the expensive corner walk/onTerrainReady rebuild,
+         * but still re-offer this generation's already-known referenced textures
+         * every call. s_scratchTerrain's referencedGround/Cliff/water tables were
+         * populated the frame this generation first appeared and are untouched
+         * here, so this is just re-registering/copying+re-callbacking them - the
+         * Vulkan cache dedups anything already uploaded via cache_find() before
+         * spending a budget slot. Without this, any texture rejected by the first
+         * frame's bounded upload budget would never be retried (see
+         * bz_quest_wc3_terrain_capture.h's header comment). */
+        emit_textures(terrain, &s_scratchTerrain, callbacks);
         BZ_TTTerrain_Release(terrain);
         return true;
     }

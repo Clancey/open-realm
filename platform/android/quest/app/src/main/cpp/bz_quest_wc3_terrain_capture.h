@@ -42,10 +42,26 @@ typedef struct {
  * published or its metadata could not even be read. The
  * generation key mirrors LiveTabletopTransport.swift:575-610's terrainKey
  * precedent: a stable composite string derived from the retained terrain handle
- * plus its dimensions/bounds, so same-generation frames do no decode/callback
- * work. Newly referenced ground/cliff/water textures for that generation are
- * then re-registered/copied and fed to callbacks->onTextureReady. Safe with any
- * callback field NULL: the corresponding work is simply omitted.
+ * plus its dimensions/bounds, so same-generation frames skip the expensive
+ * corner walk/mesh-input rebuild and the onTerrainReady callback entirely.
+ *
+ * Textures are handled differently on purpose: this generation's referenced
+ * ground/cliff/water textures are re-registered/copied and fed to
+ * callbacks->onTextureReady on EVERY call, including same-generation frames,
+ * not only when the generation first changes. The Vulkan-side GPU upload path
+ * bounds uploads to a small per-frame budget (see bz_quest_vk_wc3_terrain.c),
+ * so a generation with more referenced textures than one frame's budget would
+ * otherwise get exactly one shot at each texture and any texture rejected by
+ * that budget would never be retried. Re-offering every call is cheap (the
+ * Vulkan cache's cache_find() dedups an already-uploaded identity before this
+ * module's decode work even runs... note: this module still decodes pixels
+ * into the scratch buffer before the cache dedup check happens downstream, so
+ * "cheap" means "one ABI registration + memcpy", not "free" - acceptable given
+ * terrain texture counts are bounded and this mirrors the chunk upload path's
+ * existing every-frame re-scan in upload_missing_chunks()) and guarantees the
+ * bounded per-frame texture budget eventually drains across frames instead of
+ * silently, permanently losing textures beyond the first frame's budget.
+ * Safe with any callback field NULL: the corresponding work is simply omitted.
  */
 bool bz_quest_wc3_terrain_capture(const bzQuestWc3TerrainCaptureCallbacks_t *callbacks);
 

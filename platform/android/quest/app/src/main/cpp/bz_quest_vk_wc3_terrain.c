@@ -26,6 +26,26 @@ static TerrainBlendedDraw_t s_blendedDraws[BZ_QUEST_VK_WC3_TERRAIN_MAX_BLENDED_D
 static uint32_t s_blendedDrawCount;
 static char s_loggedRangeIdentity[BZ_QUEST_WC3_TERRAIN_MAX_KEY];
 
+/* Bounded log-once set for "texture upload deferred by this frame's budget"
+ * diagnostics: logged exactly once per identity the first time it is deferred,
+ * never again for that same identity (whether it later uploads successfully or
+ * keeps getting deferred), so a texture stuck pending across many frames stays
+ * explicitly diagnosable without per-frame log spam. */
+enum { BZ_QUEST_VK_WC3_TERRAIN_MAX_LOGGED_DEFERRED = BZ_QUEST_WC3_TERRAIN_MAX_GROUND_TYPES +
+                                                      BZ_QUEST_WC3_TERRAIN_MAX_CLIFF_TYPES + 1 };
+static char s_loggedDeferredIdentity[BZ_QUEST_VK_WC3_TERRAIN_MAX_LOGGED_DEFERRED][BZ_QUEST_WC3_MAX_IDENTITY];
+static uint32_t s_loggedDeferredCount;
+
+static bool log_deferred_once(const char *identity) {
+    for (uint32_t i = 0; i < s_loggedDeferredCount; i++)
+        if (bz_quest_wc3_identity_equal(s_loggedDeferredIdentity[i], identity)) return false;
+    if (s_loggedDeferredCount < BZ_QUEST_VK_WC3_TERRAIN_MAX_LOGGED_DEFERRED) {
+        snprintf(s_loggedDeferredIdentity[s_loggedDeferredCount], BZ_QUEST_WC3_MAX_IDENTITY, "%s", identity);
+        s_loggedDeferredCount++;
+    }
+    return true;
+}
+
 static bool find_memory_type(VkPhysicalDevice physicalDevice, uint32_t typeBits,
                              VkMemoryPropertyFlags required, uint32_t *outIndex) {
     VkPhysicalDeviceMemoryProperties props;
@@ -660,8 +680,17 @@ static bool ensure_texture_uploaded(bzQuestVkWc3Terrain_t *vkTerrain, const char
     bzQuestWc3CacheKey_t key = {0};
     snprintf(key.identity, sizeof(key.identity), "%s", identity ? identity : "");
     if (cache_find(&vkTerrain->textureCache, key.identity)) return true;
-    if (vkTerrain->newTextureUploadsThisFrame >= BZ_QUEST_VK_WC3_TERRAIN_MAX_NEW_TEXTURE_UPLOADS_PER_FRAME)
+    if (vkTerrain->newTextureUploadsThisFrame >= BZ_QUEST_VK_WC3_TERRAIN_MAX_NEW_TEXTURE_UPLOADS_PER_FRAME) {
+        /* Deferred, not lost: bz_quest_wc3_terrain_capture() re-offers this same
+         * identity every subsequent call (see its header comment), and cache_find()
+         * above will keep missing until a later frame has budget headroom, so this
+         * texture is retried - never silently dropped. Log once so a texture stuck
+         * pending for a long time is still explicitly diagnosable. */
+        if (log_deferred_once(key.identity))
+            BZ_QUEST_LOGE("bz_quest_vk_wc3_terrain: texture '%s' upload deferred by per-frame budget, will retry",
+                          key.identity);
         return false;
+    }
     vkTerrain->pendingTextureIdentity = identity;
     vkTerrain->pendingTextureWidth = width;
     vkTerrain->pendingTextureHeight = height;

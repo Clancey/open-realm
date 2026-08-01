@@ -1403,7 +1403,7 @@ module split mirrors 5A exactly:
 | File | Kind | Owns |
 |------|------|------|
 | [`bz_quest_wc3_terrain.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_terrain.c) | pure, host-testable | Terrain scale validation, chunk grid/bounds math, surface-layer UV selection, water/cliff detection, chunk mesh emission, and stable chunk/texture keys. |
-| [`bz_quest_wc3_terrain_capture.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_terrain_capture.c) | impure, ABI-calling | The one retain/copy/release walk over `BZ_TTA_LatestTerrain()`/`BZ_TTTerrain_*()`/`BZ_TTA_RegisterTerrainTexture()`/`BZ_TTAsset_*()`. Detects same-generation terrain cheaply and skips rebuild work there. |
+| [`bz_quest_wc3_terrain_capture.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_terrain_capture.c) | impure, ABI-calling | The one retain/copy/release walk over `BZ_TTA_LatestTerrain()`/`BZ_TTTerrain_*()`/`BZ_TTA_RegisterTerrainTexture()`/`BZ_TTAsset_*()`. Detects same-generation terrain cheaply and skips *chunk-metadata* rebuild work there, but still re-offers every referenced ground/cliff/water texture on every call (see "Bounded texture upload budget spans multiple frames" below) — a same-generation short-circuit must never also skip texture emission. |
 | [`bz_quest_vk_wc3_terrain.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_vk_wc3_terrain.c) | impure, Vulkan-calling | Owns terrain-only descriptor set layout/pool/sampler/pipeline layout/shaders/staging buffer/upload command buffer plus one chunk cache and one texture cache, fully separate from both `bz_quest_vk.c` and `bz_quest_vk_wc3.c`. |
 | [`shaders/terrain_vert.vert`/`terrain_frag.frag`](../platform/android/quest/app/src/main/cpp/shaders/terrain_vert.vert) | GLSL, compiled by `build-shaders.sh` | Unlit textured terrain draw with per-vertex RGBA so water can preserve its authoritative corner alpha. |
 
@@ -1435,13 +1435,32 @@ water/model transparency occlusion. `test_terrain_pipeline_depth_compare_is_less
 structurally asserts both compare ops from the checked-in source text (no
 host-testable Vulkan device is available to assert this dynamically).
 
+### Bounded texture upload budget spans multiple frames
+
+`bz_quest_vk_wc3_terrain.c`'s `ensure_texture_uploaded()` caps new texture
+creates to `BZ_QUEST_VK_WC3_TERRAIN_MAX_NEW_TEXTURE_UPLOADS_PER_FRAME` per
+frame, mirroring 5A's model-texture budget. A texture deferred by the budget
+is **not** lost: `bz_quest_wc3_terrain_capture()` re-offers every referenced
+ground/cliff/water texture identity on every call (not just when the terrain
+generation changes), and `ensure_texture_uploaded()`'s own cache-find-first
+check means re-offering an already-uploaded identity is a cheap no-op, so the
+budget drains a large texture set across multiple frames instead of
+permanently dropping anything past the first frame's budget. A texture still
+pending past its first deferral logs once (`log_deferred_once()`, keyed by
+identity, never reset) so a texture stuck pending for a long time stays
+explicitly diagnosable without per-frame log spam. `test_texture_budget_*` in
+`test_bz_quest_wc3_terrain.c` covers >4-texture eventual upload across
+frames, same-generation dedup, create-failure retry, and generation-reset
+eviction, using the same fake-cache harness as the existing hit/miss/eviction
+test.
+
 `test_bz_quest_wc3_terrain.c` host-covers the pure chunk builder's critical
 paths: scale rejection, 32x32 tail-chunk clamping, authoritative quad winding,
 ground splat atlas selection, water opacity, cliff detection/material fallback,
-and stable cache-key generation, plus the blended-pipeline depth-compare
-structural assertion above. The existing descriptor-pool headroom script
-now structurally checks the terrain texture descriptor pool's required
-`capacity + 1` spare slot too.
+stable cache-key generation, the blended-pipeline depth-compare structural
+assertion, and the texture upload budget/retry/dedup/reset scenarios above.
+The existing descriptor-pool headroom script now structurally checks the
+terrain texture descriptor pool's required `capacity + 1` spare slot too.
 
 ## Manifest requirements
 

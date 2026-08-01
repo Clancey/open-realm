@@ -459,6 +459,135 @@ static void test_terrain_pipeline_depth_compare_is_less_or_equal_for_blended_onl
     ASSERT(strstr(text, "depthStencil.depthWriteEnable = blended ? VK_FALSE : VK_TRUE;") != NULL);
 }
 
+/* ------------------------------------------------------------------ */
+/* Regression: PR #21 review defect 2 - texture upload budget starvation */
+/* ------------------------------------------------------------------ */
+
+/* Mirrors the production ensure_texture_uploaded() policy (bz_quest_vk_wc3_terrain.c):
+ * cache_find() first (dedup, no new work for an already-uploaded identity),
+ * then only cache_acquire() (create) while under a per-frame budget. Textures
+ * that miss the budget are simply left un-acquired for this "frame" so a
+ * caller that re-offers the same identity next frame can retry - this is the
+ * exact policy the fix requires the real capture/Vulkan wiring to follow
+ * every frame (not just on a new terrain generation). cache_find() itself is
+ * a private static helper in bz_quest_vk_wc3_terrain.c, so this reimplements
+ * its exact linear-scan-of-occupied-slots logic against the public cache
+ * struct fields rather than duplicating production budget/upload code. */
+static void *find_in_cache(const bzQuestWc3Cache_t *cache, const char *identity) {
+    for (uint32_t i = 0; i < cache->capacity; i++) {
+        if (cache->slots[i].occupied && bz_quest_wc3_identity_equal(cache->slots[i].key.identity, identity))
+            return cache->slots[i].handle;
+    }
+    return NULL;
+}
+
+static bool budgeted_ensure_uploaded(bzQuestWc3Cache_t *cache, const bzQuestWc3CacheKey_t *key, int *budgetRemaining) {
+    if (find_in_cache(cache, key->identity)) return true;
+    if (*budgetRemaining <= 0) return false;
+    void *created = NULL;
+    bool ok = bz_quest_wc3_cache_acquire(cache, key, &created);
+    if (ok) (*budgetRemaining)--;
+    return ok;
+}
+
+static void test_texture_budget_eventually_uploads_more_than_budget_textures_across_frames(void) {
+    bzQuestWc3Cache_t cache;
+    FakeTerrainCache_t fake;
+    memset(&fake, 0, sizeof(fake));
+    /* Capacity must exceed the distinct identity count so nothing evicts
+     * mid-test; this test is about budget pacing, not eviction. */
+    ASSERT(bz_quest_wc3_cache_init(&cache, 8, fake_terrain_create, fake_terrain_destroy, &fake));
+    bzQuestWc3CacheKey_t keys[6];
+    for (int i = 0; i < 6; i++) {
+        char identity[32];
+        snprintf(identity, sizeof(identity), "tex%d.blp", i);
+        keys[i] = cache_key(identity);
+    }
+    /* Frame 1: budget of 4 - only the first 4 distinct textures upload;
+     * textures 4 and 5 are deferred, matching the review's ">4 distinct
+     * textures" scenario and the production BZ_QUEST_VK_WC3_TERRAIN budget. */
+    int budget = 4;
+    int uploadedFrame1 = 0;
+    for (int i = 0; i < 6; i++) uploadedFrame1 += budgeted_ensure_uploaded(&cache, &keys[i], &budget) ? 1 : 0;
+    ASSERT_EQ_INT(uploadedFrame1, 4);
+    ASSERT_EQ_INT(fake.createCalls, 4);
+    /* Frame 2: same identities re-offered (this is the fix - capture must
+     * re-offer every call, not just on a new generation). A fresh budget lets
+     * the previously-deferred textures 4 and 5 finally upload, and the first
+     * 4 are cache hits (dedup - no new create calls, no wasted work). */
+    budget = 4;
+    int uploadedFrame2 = 0;
+    for (int i = 0; i < 6; i++) uploadedFrame2 += budgeted_ensure_uploaded(&cache, &keys[i], &budget) ? 1 : 0;
+    ASSERT_EQ_INT(uploadedFrame2, 6);
+    ASSERT_EQ_INT(fake.createCalls, 6);
+    /* The first 4 identities are dedup hits this frame (cache_find() finds
+     * them before ever calling cache_acquire(), exactly like production's
+     * ensure_texture_uploaded()), so createCalls only grew by the 2 that were
+     * newly created, never re-creating an already-uploaded identity. */
+    bz_quest_wc3_cache_shutdown(&cache);
+}
+
+static void test_texture_budget_same_generation_reoffer_is_a_dedup_no_op(void) {
+    bzQuestWc3Cache_t cache;
+    FakeTerrainCache_t fake;
+    memset(&fake, 0, sizeof(fake));
+    ASSERT(bz_quest_wc3_cache_init(&cache, 4, fake_terrain_create, fake_terrain_destroy, &fake));
+    bzQuestWc3CacheKey_t key = cache_key("Dirt.blp");
+    int budget = 4;
+    ASSERT(budgeted_ensure_uploaded(&cache, &key, &budget));
+    ASSERT_EQ_INT(fake.createCalls, 1);
+    /* Re-offering the same identity within the same generation, repeatedly,
+     * must never re-create - find_in_cache() (mirroring production's
+     * cache_find()) short-circuits before cache_acquire() is ever called
+     * again, so createCalls stays at 1 no matter how many times it's
+     * re-offered. */
+    for (int i = 0; i < 5; i++) {
+        budget = 4;
+        ASSERT(budgeted_ensure_uploaded(&cache, &key, &budget));
+    }
+    ASSERT_EQ_INT(fake.createCalls, 1);
+    bz_quest_wc3_cache_shutdown(&cache);
+}
+
+static void test_texture_budget_create_failure_is_retried_next_frame(void) {
+    bzQuestWc3Cache_t cache;
+    FakeTerrainCache_t fake;
+    memset(&fake, 0, sizeof(fake));
+    ASSERT(bz_quest_wc3_cache_init(&cache, 4, fake_terrain_create, fake_terrain_destroy, &fake));
+    bzQuestWc3CacheKey_t key = cache_key("Corrupt.blp");
+    fake.failNextCreate = true;
+    int budget = 4;
+    ASSERT(!budgeted_ensure_uploaded(&cache, &key, &budget));
+    ASSERT_EQ_INT(fake.createFailures, 1);
+    /* A create failure must not be sticky: re-offering the same identity next
+     * frame (no lingering "already tried" state) retries and succeeds. */
+    budget = 4;
+    ASSERT(budgeted_ensure_uploaded(&cache, &key, &budget));
+    ASSERT_EQ_INT(fake.createCalls, 2);
+}
+
+static void test_texture_budget_generation_reset_evicts_and_allows_fresh_upload(void) {
+    bzQuestWc3Cache_t cache;
+    FakeTerrainCache_t fake;
+    memset(&fake, 0, sizeof(fake));
+    ASSERT(bz_quest_wc3_cache_init(&cache, 4, fake_terrain_create, fake_terrain_destroy, &fake));
+    bzQuestWc3CacheKey_t key = cache_key("Grass.blp");
+    int budget = 4;
+    ASSERT(budgeted_ensure_uploaded(&cache, &key, &budget));
+    ASSERT_EQ_INT(fake.liveCount, 1);
+    /* Map-generation reset: the Vulkan module shuts down its texture cache
+     * (releasing every GPU resource) and re-initializes it fresh, exactly as
+     * bz_quest_vk_wc3_terrain.c does when the terrain identity changes. */
+    bz_quest_wc3_cache_shutdown(&cache);
+    ASSERT_EQ_INT(fake.liveCount, 0);
+    ASSERT(bz_quest_wc3_cache_init(&cache, 4, fake_terrain_create, fake_terrain_destroy, &fake));
+    budget = 4;
+    ASSERT(budgeted_ensure_uploaded(&cache, &key, &budget));
+    ASSERT_EQ_INT(fake.createCalls, 2);
+    ASSERT_EQ_INT(fake.liveCount, 1);
+    bz_quest_wc3_cache_shutdown(&cache);
+}
+
 void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_measure_computes_scale_and_cell_size);
     RUN_TEST(test_measure_rejects_non_square_tiles);
@@ -479,4 +608,8 @@ void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_cache_usage_assumptions_cover_hit_miss_failure_eviction_and_shutdown);
     RUN_TEST(test_terrain_shaders_exist_and_are_listed_in_cmake);
     RUN_TEST(test_terrain_pipeline_depth_compare_is_less_or_equal_for_blended_only);
+    RUN_TEST(test_texture_budget_eventually_uploads_more_than_budget_textures_across_frames);
+    RUN_TEST(test_texture_budget_same_generation_reoffer_is_a_dedup_no_op);
+    RUN_TEST(test_texture_budget_create_failure_is_retried_next_frame);
+    RUN_TEST(test_texture_budget_generation_reset_evicts_and_allows_fresh_upload);
 }
