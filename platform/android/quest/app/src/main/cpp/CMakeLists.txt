@@ -262,8 +262,10 @@ add_library(bz_quest_native SHARED
     bz_quest_vk_wc3_terrain.c
     bz_quest_vk_wc3_hud.c
     bz_quest_input_state.c
+    bz_quest_hand_input.c
     bz_quest_xr_bindings.c
     bz_quest_xr_actions.c
+    bz_quest_xr_hands.c
     bz_quest_vk_wc3_pointer.c
     bz_quest_wav.c
     bz_quest_audio_mixer.c

@@ -22,6 +22,14 @@ static const char *const BZ_QUEST_REQUIRED_INSTANCE_EXTENSIONS[] = {
 #define BZ_QUEST_REQUIRED_INSTANCE_EXTENSION_COUNT \
     (sizeof(BZ_QUEST_REQUIRED_INSTANCE_EXTENSIONS) / sizeof(BZ_QUEST_REQUIRED_INSTANCE_EXTENSIONS[0]))
 
+/* Layer 8: the two OPTIONAL hand-tracking instance extensions - probed the
+ * same way as the required list above, but their absence never fails
+ * startup (see bz_quest_xr.h's bzQuestXrHandCapability_t comment). Each is a
+ * single-element array so bz_quest_check_required_names() (shared with the
+ * required-list check above) can probe it without a second helper. */
+static const char *const BZ_QUEST_HAND_TRACKING_EXT_NAMES[] = {XR_EXT_HAND_TRACKING_EXTENSION_NAME};
+static const char *const BZ_QUEST_HAND_TRACKING_AIM_EXT_NAMES[] = {XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME};
+
 /* Defensive cap on XR_TIMEOUT_EXPIRED retries in bz_quest_xr_wait_swapchain_image()
  * below. XR_TIMEOUT_EXPIRED should never actually occur there since it always
  * passes XR_INFINITE_DURATION, but the OpenXR spec ("Rendering" chapter,
@@ -91,13 +99,39 @@ bool bz_quest_xr_create_instance(void *vm, void *context, bzQuestXr_t *xr) {
     bool haveAll = bz_quest_check_required_names(availableNames, availableCount,
                                                   BZ_QUEST_REQUIRED_INSTANCE_EXTENSIONS,
                                                   BZ_QUEST_REQUIRED_INSTANCE_EXTENSION_COUNT, &missing);
-    free(availableNames);
-    free(available);
     if (!haveAll) {
         BZ_QUEST_LOGE("required OpenXR instance extension not supported by this runtime: %s",
                       missing ? missing : "(unknown)");
+        free(availableNames);
+        free(available);
         return false;
     }
+
+    /* Layer 8: XR_EXT_hand_tracking and XR_FB_hand_tracking_aim are both
+     * OPTIONAL - probed the same way as the required list above, but their
+     * absence never fails startup (see bz_quest_xr.h's bzQuestXrHandCapability_t).
+     * XR_FB_hand_tracking_aim depends on XR_EXT_hand_tracking per the OpenXR
+     * registry (xr.xml: `depends="XR_VERSION_1_0+XR_EXT_hand_tracking"`), so
+     * it is only requested when the base extension is ALSO being enabled
+     * this instance. */
+    const char *unusedMissing = NULL;
+    xr->handCapability.extEnabled =
+        bz_quest_check_required_names(availableNames, availableCount, BZ_QUEST_HAND_TRACKING_EXT_NAMES, 1,
+                                      &unusedMissing);
+    xr->handCapability.aimExtEnabled =
+        xr->handCapability.extEnabled &&
+        bz_quest_check_required_names(availableNames, availableCount, BZ_QUEST_HAND_TRACKING_AIM_EXT_NAMES,
+                                      1, &unusedMissing);
+    free(availableNames);
+    free(available);
+
+    const char *enabledExtensions[BZ_QUEST_REQUIRED_INSTANCE_EXTENSION_COUNT + 2];
+    uint32_t enabledCount = 0;
+    for (uint32_t i = 0; i < BZ_QUEST_REQUIRED_INSTANCE_EXTENSION_COUNT; i++)
+        enabledExtensions[enabledCount++] = BZ_QUEST_REQUIRED_INSTANCE_EXTENSIONS[i];
+    if (xr->handCapability.extEnabled) enabledExtensions[enabledCount++] = XR_EXT_HAND_TRACKING_EXTENSION_NAME;
+    if (xr->handCapability.aimExtEnabled)
+        enabledExtensions[enabledCount++] = XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME;
 
     XrInstanceCreateInfoAndroidKHR androidCreateInfo;
     memset(&androidCreateInfo, 0, sizeof(androidCreateInfo));
@@ -109,8 +143,8 @@ bool bz_quest_xr_create_instance(void *vm, void *context, bzQuestXr_t *xr) {
     memset(&createInfo, 0, sizeof(createInfo));
     createInfo.type = XR_TYPE_INSTANCE_CREATE_INFO;
     createInfo.next = &androidCreateInfo;
-    createInfo.enabledExtensionCount = BZ_QUEST_REQUIRED_INSTANCE_EXTENSION_COUNT;
-    createInfo.enabledExtensionNames = BZ_QUEST_REQUIRED_INSTANCE_EXTENSIONS;
+    createInfo.enabledExtensionCount = enabledCount;
+    createInfo.enabledExtensionNames = enabledExtensions;
     createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
     strncpy(createInfo.applicationInfo.applicationName, "OpenRealmQuest",
             sizeof(createInfo.applicationInfo.applicationName) - 1);
@@ -124,6 +158,9 @@ bool bz_quest_xr_create_instance(void *vm, void *context, bzQuestXr_t *xr) {
         BZ_QUEST_LOGE("xrCreateInstance failed: %d", (int)result);
         return false;
     }
+    BZ_QUEST_LOGI("xrCreateInstance: hand tracking ext=%s, aim ext=%s",
+                  xr->handCapability.extEnabled ? "enabled" : "unavailable",
+                  xr->handCapability.aimExtEnabled ? "enabled" : "unavailable");
 
     XrInstanceProperties props;
     memset(&props, 0, sizeof(props));
@@ -156,15 +193,32 @@ bool bz_quest_xr_get_system(bzQuestXr_t *xr) {
     memset(&passthroughProps, 0, sizeof(passthroughProps));
     passthroughProps.type = XR_TYPE_SYSTEM_PASSTHROUGH_PROPERTIES2_FB;
     props.next = &passthroughProps;
+
+    /* Layer 8: only chain XrSystemHandTrackingPropertiesEXT when the
+     * extension was actually enabled at xrCreateInstance - chaining a
+     * struct for a disabled extension is invalid per the OpenXR spec's
+     * general extensibility rules (a runtime is only obligated to recognize
+     * next-chain structs for enabled extensions). */
+    XrSystemHandTrackingPropertiesEXT handProps;
+    memset(&handProps, 0, sizeof(handProps));
+    if (xr->handCapability.extEnabled) {
+        handProps.type = XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT;
+        passthroughProps.next = &handProps;
+    }
+
     result = xrGetSystemProperties(xr->instance, xr->systemId, &props);
     if (result != XR_SUCCESS) {
         BZ_QUEST_LOGE("xrGetSystemProperties failed: %d", (int)result);
         return false;
     }
     xr->passthroughCapabilities = passthroughProps.capabilities;
-    BZ_QUEST_LOGI("xrGetSystem succeeded: systemName=%s vendorId=%u passthroughCapabilities=0x%llx",
-                  props.systemName, (unsigned)props.vendorId,
-                  (unsigned long long)passthroughProps.capabilities);
+    xr->handCapability.supported = xr->handCapability.extEnabled && handProps.supportsHandTracking;
+    xr->handCapability.aimSupported = xr->handCapability.aimExtEnabled && xr->handCapability.supported;
+    BZ_QUEST_LOGI(
+        "xrGetSystem succeeded: systemName=%s vendorId=%u passthroughCapabilities=0x%llx "
+        "handTrackingSupported=%d handTrackingAimSupported=%d",
+        props.systemName, (unsigned)props.vendorId, (unsigned long long)passthroughProps.capabilities,
+        (int)xr->handCapability.supported, (int)xr->handCapability.aimSupported);
     /* Quest 3/3S MR is a hard requirement for this prototype (see
      * docs/quest-tabletop.md) - a runtime/device without base passthrough
      * capability fails startup instead of silently rendering an opaque
@@ -176,6 +230,10 @@ bool bz_quest_xr_get_system(bzQuestXr_t *xr) {
             (unsigned long long)xr->passthroughCapabilities);
         return false;
     }
+    /* Unlike passthrough above, hand tracking is NEVER a hard requirement -
+     * see bz_quest_xr.h's bzQuestXrHandCapability_t comment and docs/quest-
+     * tabletop.md's "hand support must not be required for startup". A
+     * runtime/device without it simply proceeds Touch-controller-only. */
     return true;
 }
 

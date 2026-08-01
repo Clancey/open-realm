@@ -24,6 +24,7 @@
 #include "bz_quest_wc3_render.h"
 #include "bz_quest_xr.h"
 #include "bz_quest_xr_actions.h"
+#include "bz_quest_xr_hands.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +55,15 @@ typedef struct bzQuestRenderer_s {
     bzQuestInputState_t inputState;
     bzQuestWc3InteractionCapture_t interaction;
     int64_t lastDisplayTime;
+    /* Layer 8: Meta Quest hand tracking. xrHands owns the OpenXR hand-
+     * tracker handles + the EXT-only pinch hysteresis latch; the resulting
+     * per-hand sample is arbitrated against xrActions' Touch sample INSIDE
+     * bz_quest_input_state_update() itself (bz_quest_input_state.h's
+     * bz_quest_input_arbitrate_source()) - this struct adds no separate
+     * hand-specific interaction/pointer state beyond xrHands, since hand
+     * samples are fed through the exact same inputState/wc3Pointer layer 6
+     * already owns. See docs/quest-tabletop.md's "Layer 8". */
+    bzQuestXrHands_t xrHands;
 } bzQuestRenderer_t;
 
 /*
@@ -61,12 +71,16 @@ typedef struct bzQuestRenderer_s {
  * dependency order (loader -> instance -> system -> functions -> Vulkan
  * requirements -> Vulkan instance/device -> blend mode -> views -> session
  * -> space -> swapchains -> render resources/targets -> passthrough
- * create+start -> layer 5A's bz_quest_vk_wc3_create()). `vm`/`context` are
- * android_app->activity->{vm,clazz} (see bz_quest_xr_init_loader()'s
- * comment for why this header stays android_native_app_glue-free). Returns
- * false (with every partially created resource already torn down via
- * bz_quest_renderer_shutdown()) on the first failed step - there is no
- * partial-success state a caller could observe.
+ * create+start -> layer 5A's bz_quest_vk_wc3_create() -> layer 6's
+ * bz_quest_xr_actions_create()/bz_quest_vk_wc3_pointer_create() -> layer 8's
+ * bz_quest_xr_hands_create()). `vm`/`context` are android_app->activity->
+ * {vm,clazz} (see bz_quest_xr_init_loader()'s comment for why this header
+ * stays android_native_app_glue-free). Returns false (with every partially
+ * created resource already torn down via bz_quest_renderer_shutdown()) on
+ * the first failed step - there is no partial-success state a caller could
+ * observe. bz_quest_xr_hands_create() is the one step in this whole chain
+ * that can never itself cause this to return false (hand tracking is
+ * optional - see that function's header comment).
  */
 bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer);
 
@@ -94,8 +108,10 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer);
  * bz_quest_vk_wc3_destroy(), then passthrough, then Vulkan, then OpenXR
  * (mirrors bz_quest_xr_destroy()'s note that an active session must
  * already be stopped - bz_quest_renderer_frame()'s event polling drives
- * that transition before this runs). Safe to call on a
- * partially-initialized renderer. */
+ * that transition before this runs). Layer 8's bz_quest_xr_hands_destroy()
+ * runs alongside layer 6's bz_quest_xr_actions_destroy(), before the
+ * session itself is destroyed. Safe to call on a partially-initialized
+ * renderer. */
 void bz_quest_renderer_shutdown(bzQuestRenderer_t *renderer);
 
 #ifdef __cplusplus

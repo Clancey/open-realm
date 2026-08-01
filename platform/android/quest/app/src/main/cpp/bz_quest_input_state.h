@@ -245,6 +245,59 @@ typedef enum {
     BZ_QUEST_INPUT_PHASE_TARGET_POINT_MODE,/* server target != NONE owns input (gameplay targeting) */
 } bzQuestInputPhase_t;
 
+/* --- Layer 8: controller-vs-hand source arbitration --------------------- *
+ * Deterministic, hysteresis-debounced arbitration between the two possible
+ * per-hand input sources (Touch controller vs. hand tracking) - see
+ * docs/quest-tabletop.md's "Deterministic source arbitration". An enum, not
+ * two booleans (AGENTS.md: "do not use several booleans to represent
+ * mutually exclusive state"), since exactly one source is ever authoritative
+ * for a given hand slot in a given frame. CONTROLLER is the zero/default
+ * value so a freshly bz_quest_input_state_init()'d state (all zeroed) starts
+ * every hand favoring the controller, matching this layer's "Touch remains
+ * preferred" contract even before the very first bz_quest_input_state_update()
+ * call ever runs arbitration. */
+typedef enum {
+    BZ_QUEST_INPUT_SOURCE_CONTROLLER = 0,
+    BZ_QUEST_INPUT_SOURCE_HAND,
+} bzQuestInputSourceKind_t;
+
+/* Debounce window (seconds) a Touch controller must be continuously inactive
+ * before a hand sample is allowed to take over that hand's input slot - see
+ * bz_quest_input_arbitrate_source(). Sized to comfortably absorb a single
+ * dropped-frame tracking blip (even at a low 30 Hz XR frame rate, one frame
+ * is ~33 ms) while still feeling prompt to a real user; unvalidated on real
+ * hardware (see docs/quest-tabletop.md's hardware-only acceptance gates),
+ * trivially tunable. */
+#define BZ_QUEST_HAND_SOURCE_SWITCH_DEBOUNCE_SEC 0.3f
+
+/*
+ * Resolves ONE hand's authoritative input source for this frame, given the
+ * PREVIOUS frame's winning source (`previous`) and this frame's raw
+ * activity. Touch is the default/preferred source and reclaims it the
+ * INSTANT the controller reports active again - no debounce on reclaim,
+ * since the preferred device coming back is never something to
+ * second-guess. A hand sample only becomes authoritative after the
+ * controller has been continuously inactive for
+ * BZ_QUEST_HAND_SOURCE_SWITCH_DEBOUNCE_SEC (so a momentary controller
+ * tracking blip - one dropped frame - never bounces the source to hand and
+ * back), AND the hand is itself active that same frame. Whenever a hand that
+ * was previously authoritative stops being active, arbitration immediately
+ * reports CONTROLLER again (even if the controller is ALSO currently
+ * inactive - that still produces the exact same "no usable sample" outcome
+ * downstream as continuing to report HAND-but-inactive would, and keeps the
+ * enum's steady state identical to the "hand tracking was never enabled"
+ * default every existing Touch-only test/build already relies on - see
+ * bz_quest_input_state_update()'s call site for why this can never regress
+ * controller-only behavior).
+ *
+ * `controllerLossSeconds` is the only persisted state (a debounce timer),
+ * owned by the caller (bzQuestInputState_t) and reset to 0 every time the
+ * controller is active. Pure and stateless beyond that one in/out float.
+ */
+bzQuestInputSourceKind_t bz_quest_input_arbitrate_source(bzQuestInputSourceKind_t previous,
+                                                          bool controllerActive, bool handActive, float dt,
+                                                          float *controllerLossSeconds);
+
 /* Persistent interaction state (survives across frames). Zero-initialize once;
  * bz_quest_input_state_init() sets the board to its default. Everything else
  * is edge latches + idempotent-clear bookkeeping. */
@@ -269,6 +322,13 @@ typedef struct {
     bool leftWasActive, rightWasActive;
     uint64_t lastGeneration;
     uint64_t lastMapEpoch; /* bumps only on a real map-name change (see frame->mapEpoch) */
+    /* Layer 8: per-hand controller-vs-hand source arbitration bookkeeping -
+     * see bzQuestInputSourceKind_t/bz_quest_input_arbitrate_source() above.
+     * `source` is the previous frame's winning source (so a CHANGE can be
+     * detected and cleared exactly once, same idempotent-clear discipline as
+     * the fields above); `controllerLossSeconds` is the debounce timer. */
+    bzQuestInputSourceKind_t source[BZ_QUEST_INPUT_HAND_COUNT];
+    float controllerLossSeconds[BZ_QUEST_INPUT_HAND_COUNT];
 } bzQuestInputState_t;
 
 /* Per-hand raw controller sample for one frame (all in LOCAL tracking space,
@@ -290,7 +350,17 @@ typedef struct {
 typedef struct {
     float dt;                                   /* seconds since last update (clamped internally) */
     bool focused;                               /* XR session focused this frame */
-    bzQuestInputHandSample_t hands[BZ_QUEST_INPUT_HAND_COUNT];
+    bzQuestInputHandSample_t hands[BZ_QUEST_INPUT_HAND_COUNT]; /* Touch-controller sample per hand */
+    /* Layer 8: hand-tracking sample per hand (bz_quest_hand_input.h's
+     * bz_quest_hand_sample_build() output), alongside - never replacing -
+     * `hands` above. bz_quest_input_state_update() arbitrates between the
+     * two per hand (bz_quest_input_arbitrate_source()) before anything else
+     * runs; every hit-test/board/command-mapping code path below is fed
+     * only the single winning bzQuestInputHandSample_t and stays completely
+     * unaware of which source produced it. Zeroed/inactive when hand
+     * tracking is unsupported or this hand's tracker isn't active this
+     * frame - never partially filled. */
+    bzQuestInputHandSample_t handSample[BZ_QUEST_INPUT_HAND_COUNT];
     bool menuDown;                              /* left menu click */
     bzQuestInputWorld_t world;                  /* hit-test world (see above) */
     const uint32_t *selectedIds;                /* current server selection set (for additive select); may be NULL */
@@ -310,6 +380,18 @@ typedef struct {
     bool hasReticle[BZ_QUEST_INPUT_HAND_COUNT];
     float reticle[BZ_QUEST_INPUT_HAND_COUNT][3]; /* composed-space hit point */
     bzQuestInputHitKind_t hitKind[BZ_QUEST_INPUT_HAND_COUNT];
+    /* Layer 8: the TRACKING-space aim ray this hand actually used this
+     * frame - copied from the ARBITRATED bzQuestInputHandSample_t
+     * (controller or hand, whichever bz_quest_input_arbitrate_source()
+     * picked), never the raw pre-arbitration controller-only sample the
+     * caller originally passed into bz_quest_input_state_update(). The
+     * renderer needs this because it has no other way to see the
+     * arbitration result: bz_quest_renderer_process_input() builds the
+     * pointer beam/reticle geometry from this, not from re-reading its own
+     * frame.hands[] (which arbitration never touches, by design - see
+     * bz_quest_input_state_update()). Valid iff `visible[hand]`. */
+    float aimOrigin[BZ_QUEST_INPUT_HAND_COUNT][3];
+    float aimDir[BZ_QUEST_INPUT_HAND_COUNT][3];
 } bzQuestInputFeedback_t;
 
 typedef struct {

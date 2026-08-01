@@ -87,6 +87,24 @@ void bz_quest_mat4_multiply(const float a[16], const float b[16], float out[16])
     }
 }
 
+void bz_quest_quat_forward(float qx, float qy, float qz, float qw, float out[3]) {
+    /* Standard "rotate vector v by unit quaternion q" formula (Rodrigues
+     * form: v' = v + 2w(q_xyz x v) + 2(q_xyz x (q_xyz x v))) applied to the
+     * fixed local-forward vector v=(0,0,-1) - see this function's header
+     * comment for why this is provably the same rotation
+     * bz_quest_pose_to_view_matrix() already applies. */
+    const float vx = 0.0f, vy = 0.0f, vz = -1.0f;
+    const float cx = qy * vz - qz * vy;
+    const float cy = qz * vx - qx * vz;
+    const float cz = qx * vy - qy * vx;
+    const float ccx = qy * cz - qz * cy;
+    const float ccy = qz * cx - qx * cz;
+    const float ccz = qx * cy - qy * cx;
+    out[0] = vx + 2.0f * (qw * cx + ccx);
+    out[1] = vy + 2.0f * (qw * cy + ccy);
+    out[2] = vz + 2.0f * (qw * cz + ccz);
+}
+
 bool bz_quest_select_swapchain_format(const int64_t *runtimeFormats, uint32_t runtimeCount,
                                       const int64_t *preferred, uint32_t preferredCount,
                                       int64_t *outFormat) {

@@ -188,6 +188,31 @@ bzQuestHapticPulse_t bz_quest_haptic_pulse(bool accepted) {
     return p;
 }
 
+/* --------------------------------------------------- source arbitration */
+
+bzQuestInputSourceKind_t bz_quest_input_arbitrate_source(bzQuestInputSourceKind_t previous,
+                                                          bool controllerActive, bool handActive, float dt,
+                                                          float *controllerLossSeconds) {
+    if (controllerActive) {
+        *controllerLossSeconds = 0.0f;
+        return BZ_QUEST_INPUT_SOURCE_CONTROLLER;
+    }
+    if (dt > 0.0f) *controllerLossSeconds += dt;
+    if (previous == BZ_QUEST_INPUT_SOURCE_HAND) {
+        /* Already handed off to a hand: stay there as long as the hand
+         * itself is still active - no re-debounce for an already-completed
+         * handoff, only for a FRESH controller->hand handoff below. Falling
+         * straight back to CONTROLLER (not a third "none" state) the moment
+         * the hand goes inactive keeps the enum's steady state identical to
+         * the plain "hand tracking unsupported" default - see this
+         * function's header comment. */
+        return handActive ? BZ_QUEST_INPUT_SOURCE_HAND : BZ_QUEST_INPUT_SOURCE_CONTROLLER;
+    }
+    if (*controllerLossSeconds >= BZ_QUEST_HAND_SOURCE_SWITCH_DEBOUNCE_SEC && handActive)
+        return BZ_QUEST_INPUT_SOURCE_HAND;
+    return BZ_QUEST_INPUT_SOURCE_CONTROLLER; /* still within the debounce grace window, or no hand available */
+}
+
 /* ------------------------------------------------------------- lifecycle */
 
 void bz_quest_input_state_init(bzQuestInputState_t *state) {
@@ -394,6 +419,12 @@ static bool bz_hand_hit(const bzQuestInputState_t *state, const bzQuestInputFram
     fb->visible[hand] = H->active && H->aimValid;
     fb->hasReticle[hand] = false;
     fb->hitKind[hand] = BZ_QUEST_INPUT_HIT_NONE;
+    /* Layer 8: always mirror the (possibly arbitrated) sample's tracking-
+     * space aim ray into the output, even when !visible - see
+     * bzQuestInputFeedback_t's header comment for why the renderer reads
+     * this instead of its own frame.hands[]. */
+    memcpy(fb->aimOrigin[hand], H->aimOrigin, sizeof(fb->aimOrigin[hand]));
+    memcpy(fb->aimDir[hand], H->aimDir, sizeof(fb->aimDir[hand]));
     memset(hit, 0, sizeof(*hit));
     if (!fb->visible[hand]) return false;
 
@@ -417,6 +448,25 @@ void bz_quest_input_state_update(bzQuestInputState_t *state, const bzQuestInputF
     memset(out, 0, sizeof(*out));
     out->command.type = BZ_QUEST_INPUT_CMD_NONE;
 
+    /* Layer 8: resolve controller-vs-hand source arbitration per hand into a
+     * local frame copy BEFORE anything else reads frame->hands[] - see
+     * docs/quest-tabletop.md's "Deterministic source arbitration". Every
+     * line below this point is unchanged from layers 6/7 and stays
+     * completely unaware of which source produced the winning
+     * bzQuestInputHandSample_t: it always reads `frame->hands[h]`, which
+     * from here on IS the arbitrated sample (controller OR hand), never the
+     * raw controller-only sample the caller originally passed in. */
+    bzQuestInputFrame_t resolved = *frame;
+    bzQuestInputSourceKind_t newSource[BZ_QUEST_INPUT_HAND_COUNT];
+    for (int h = 0; h < BZ_QUEST_INPUT_HAND_COUNT; ++h) {
+        newSource[h] = bz_quest_input_arbitrate_source(state->source[h], frame->hands[h].active,
+                                                       frame->handSample[h].active, frame->dt,
+                                                       &state->controllerLossSeconds[h]);
+        if (newSource[h] == BZ_QUEST_INPUT_SOURCE_HAND) resolved.hands[h] = frame->handSample[h];
+        /* else CONTROLLER: resolved.hands[h] already == frame->hands[h] via the struct copy above. */
+    }
+    frame = &resolved;
+
     const bool leftActive = frame->hands[BZ_QUEST_INPUT_HAND_LEFT].active;
     const bool rightActive = frame->hands[BZ_QUEST_INPUT_HAND_RIGHT].active;
 
@@ -428,12 +478,22 @@ void bz_quest_input_state_update(bzQuestInputState_t *state, const bzQuestInputF
         state->rightWasActive = rightActive;
         state->lastGeneration = frame->world.generation;
         state->lastMapEpoch = frame->mapEpoch;
+        state->source[BZ_QUEST_INPUT_HAND_LEFT] = newSource[BZ_QUEST_INPUT_HAND_LEFT];
+        state->source[BZ_QUEST_INPUT_HAND_RIGHT] = newSource[BZ_QUEST_INPUT_HAND_RIGHT];
     } else {
         bool clear = false, resetBoard = false;
         if (state->wasFocused && !frame->focused) clear = true;               /* focus loss */
-        if (state->leftWasActive && !leftActive) clear = true;                /* left controller loss */
-        if (state->rightWasActive && !rightActive) clear = true;             /* right controller loss */
+        if (state->leftWasActive && !leftActive) clear = true;                /* left controller/hand loss */
+        if (state->rightWasActive && !rightActive) clear = true;             /* right controller/hand loss */
         if (frame->mapEpoch != state->lastMapEpoch) { clear = true; resetBoard = true; } /* map reload */
+        /* Layer 8: a hand<->controller source switch for either hand clears
+         * once too, even on a frame where `leftActive`/`rightActive` happen
+         * to stay continuously true across the handoff (e.g. the losing
+         * source drops the exact same frame the other becomes available) -
+         * relying on the active-loss checks above alone would miss that
+         * case, letting a stale edge/drag/target survive the switch. */
+        if (state->source[BZ_QUEST_INPUT_HAND_LEFT] != newSource[BZ_QUEST_INPUT_HAND_LEFT]) clear = true;
+        if (state->source[BZ_QUEST_INPUT_HAND_RIGHT] != newSource[BZ_QUEST_INPUT_HAND_RIGHT]) clear = true;
         if (clear) {
             bz_quest_input_state_clear(state, resetBoard);
             out->clearedThisFrame = true;
@@ -443,6 +503,8 @@ void bz_quest_input_state_update(bzQuestInputState_t *state, const bzQuestInputF
         state->rightWasActive = rightActive;
         state->lastGeneration = frame->world.generation;
         state->lastMapEpoch = frame->mapEpoch;
+        state->source[BZ_QUEST_INPUT_HAND_LEFT] = newSource[BZ_QUEST_INPUT_HAND_LEFT];
+        state->source[BZ_QUEST_INPUT_HAND_RIGHT] = newSource[BZ_QUEST_INPUT_HAND_RIGHT];
     }
 
     /* Advance all edge latches every frame so an inactive controller can never

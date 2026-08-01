@@ -148,6 +148,51 @@ static void test_mat4_multiply_translation_then_scale(void) {
     ASSERT_EQ_FLOAT(combined[14], 0.0f, 0.0001f);
 }
 
+static void test_quat_forward_identity(void) {
+    /* Identity quaternion: forward stays -Z, unchanged. */
+    float out[3];
+    bz_quest_quat_forward(0.0f, 0.0f, 0.0f, 1.0f, out);
+    ASSERT_EQ_FLOAT(out[0], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[1], 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[2], -1.0f, 0.0001f);
+}
+
+static void test_quat_forward_yaw_90(void) {
+    /* 90-degree rotation about Y: q = (0, sin45, 0, cos45). Rotating -Z by a
+     * +90-degree yaw should point at -X (right-handed Y-up convention). */
+    const float s = 0.70710678f;
+    float out[3];
+    bz_quest_quat_forward(0.0f, s, 0.0f, s, out);
+    ASSERT_EQ_FLOAT(out[0], -1.0f, 0.001f);
+    ASSERT_EQ_FLOAT(out[1], 0.0f, 0.001f);
+    ASSERT_EQ_FLOAT(out[2], 0.0f, 0.001f);
+}
+
+static void test_quat_forward_matches_view_matrix_rotation_column(void) {
+    /* Cross-check against bz_quest_pose_to_view_matrix()'s rotation matrix
+     * (see this function's header comment): for any quaternion, out must
+     * equal the negation of that matrix's local-Z column, stored at indices
+     * 2/6/10 (view[col*4+row] with row=2 across columns 0..2) - the same
+     * rotation, two call sites, verified numerically before writing this
+     * assertion (not just derived on paper). */
+    const float qx = 0.18257419f, qy = 0.36514837f, qz = 0.54772256f, qw = 0.73029674f; /* unit quat */
+    float viewMatrix[16];
+    ASSERT(bz_quest_pose_to_view_matrix(0.0f, 0.0f, 0.0f, qx, qy, qz, qw, viewMatrix));
+    float forward[3];
+    bz_quest_quat_forward(qx, qy, qz, qw, forward);
+    ASSERT_EQ_FLOAT(forward[0], -viewMatrix[2], 0.001f);
+    ASSERT_EQ_FLOAT(forward[1], -viewMatrix[6], 0.001f);
+    ASSERT_EQ_FLOAT(forward[2], -viewMatrix[10], 0.001f);
+}
+
+static void test_quat_forward_stays_unit_length(void) {
+    const float qx = 0.18257419f, qy = 0.36514837f, qz = 0.54772256f, qw = 0.73029674f;
+    float out[3];
+    bz_quest_quat_forward(qx, qy, qz, qw, out);
+    const float lenSq = out[0] * out[0] + out[1] * out[1] + out[2] * out[2];
+    ASSERT_EQ_FLOAT(lenSq, 1.0f, 0.001f);
+}
+
 static void test_select_swapchain_format_prefers_order(void) {
     const int64_t runtime[] = { 99, 43, 37 }; /* order as the runtime enumerated them */
     const int64_t preferred[] = { 43, 37 };   /* our preference order */
@@ -266,6 +311,10 @@ void run_bz_quest_pure_tests(void) {
     RUN_TEST(test_pose_to_view_matrix_rejects_non_unit_quaternion);
     RUN_TEST(test_mat4_multiply_identity);
     RUN_TEST(test_mat4_multiply_translation_then_scale);
+    RUN_TEST(test_quat_forward_identity);
+    RUN_TEST(test_quat_forward_yaw_90);
+    RUN_TEST(test_quat_forward_matches_view_matrix_rotation_column);
+    RUN_TEST(test_quat_forward_stays_unit_length);
     RUN_TEST(test_select_swapchain_format_prefers_order);
     RUN_TEST(test_select_swapchain_format_none_supported);
     RUN_TEST(test_check_required_names_all_present);

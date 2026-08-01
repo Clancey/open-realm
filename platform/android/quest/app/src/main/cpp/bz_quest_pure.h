@@ -60,6 +60,28 @@ bool bz_quest_pose_to_view_matrix(float eyeX, float eyeY, float eyeZ, float qx, 
 void bz_quest_mat4_multiply(const float a[16], const float b[16], float out[16]);
 
 /*
+ * Rotates the canonical local -Z "forward" basis vector by quaternion
+ * (qx,qy,qz,qw) and writes the resulting world-space direction to `out` -
+ * every OpenXR pose this renderer treats as an aim direction (controller
+ * aim pose, XR_FB_hand_tracking_aim's aimPose) shares this same "-Z is
+ * forward" convention. Provably the same rotation
+ * bz_quest_pose_to_view_matrix()'s rotation matrix encodes (out equals the
+ * negation of that matrix's third column for v=(0,0,-1) - verified by hand
+ * expansion, see docs/quest-tabletop.md), so this is not a second,
+ * independently-trusted quaternion convention. Does not require a unit
+ * quaternion precondition check like bz_quest_pose_to_view_matrix() - a
+ * slightly denormalized input still yields a direction of near-unit length,
+ * which is all an aim ray needs (unlike a view matrix, where a non-unit
+ * rotation would visibly skew the whole scene).
+ *
+ * Pulled out as a single shared implementation (AGENTS.md's DRY rule) so
+ * bz_quest_xr_actions.c's controller aim ray and bz_quest_xr_hands.c's
+ * XR_FB_hand_tracking_aim ray both compute this identically instead of
+ * maintaining two copies of the same quaternion-vector rotation.
+ */
+void bz_quest_quat_forward(float qx, float qy, float qz, float qw, float out[3]);
+
+/*
  * Picks the first runtime-supported format (in caller-supplied preference
  * order) from `preferred`/`preferredCount` that also appears in
  * `runtimeFormats`/`runtimeCount` (as returned by

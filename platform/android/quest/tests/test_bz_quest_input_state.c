@@ -858,6 +858,363 @@ static void test_generation_bump_alone_does_not_clear(void) {
     ASSERT(!out.clearedThisFrame);
 }
 
+/* ---------------------------------------------- layer 8: source arbitration
+ * (bz_quest_input_arbitrate_source() unit tests, then full bz_quest_input_state_update()
+ * integration tests proving hand samples flow through the SAME hit-test/
+ * board/command-mapping code the Touch path already uses). */
+
+static void test_arbitrate_controller_active_always_wins(void) {
+    float loss = 0.9f; /* even with a large stale accumulator, controller wins instantly */
+    bzQuestInputSourceKind_t r =
+        bz_quest_input_arbitrate_source(BZ_QUEST_INPUT_SOURCE_HAND, true, true, 0.1f, &loss);
+    ASSERT_EQ_INT(r, BZ_QUEST_INPUT_SOURCE_CONTROLLER);
+    ASSERT_EQ_FLOAT(loss, 0.0f, 0.0001f); /* reset on every active-controller frame */
+}
+
+static void test_arbitrate_debounces_before_handoff(void) {
+    float loss = 0.0f;
+    bzQuestInputSourceKind_t src = BZ_QUEST_INPUT_SOURCE_CONTROLLER;
+    /* Two short frames of controller loss (well under the debounce window)
+     * with an active hand available must still favor CONTROLLER. */
+    src = bz_quest_input_arbitrate_source(src, false, true, 0.05f, &loss);
+    ASSERT_EQ_INT(src, BZ_QUEST_INPUT_SOURCE_CONTROLLER);
+    src = bz_quest_input_arbitrate_source(src, false, true, 0.05f, &loss);
+    ASSERT_EQ_INT(src, BZ_QUEST_INPUT_SOURCE_CONTROLLER);
+    ASSERT(loss < BZ_QUEST_HAND_SOURCE_SWITCH_DEBOUNCE_SEC);
+}
+
+static void test_arbitrate_hands_off_after_debounce_elapses(void) {
+    float loss = 0.0f;
+    bzQuestInputSourceKind_t src = BZ_QUEST_INPUT_SOURCE_CONTROLLER;
+    /* Accumulate well past the debounce window across several real frames
+     * (not one artificially large dt) with the hand active throughout. */
+    for (int i = 0; i < 4; ++i) src = bz_quest_input_arbitrate_source(src, false, true, 0.1f, &loss);
+    ASSERT(loss >= BZ_QUEST_HAND_SOURCE_SWITCH_DEBOUNCE_SEC);
+    ASSERT_EQ_INT(src, BZ_QUEST_INPUT_SOURCE_HAND);
+}
+
+static void test_arbitrate_no_handoff_without_active_hand(void) {
+    float loss = 0.0f;
+    bzQuestInputSourceKind_t src = BZ_QUEST_INPUT_SOURCE_CONTROLLER;
+    /* Controller AND hand both inactive, well past the debounce window:
+     * nothing to hand off to, so arbitration keeps reporting CONTROLLER
+     * (its sample is simply inactive - see this function's header comment). */
+    for (int i = 0; i < 4; ++i) src = bz_quest_input_arbitrate_source(src, false, false, 0.1f, &loss);
+    ASSERT(loss >= BZ_QUEST_HAND_SOURCE_SWITCH_DEBOUNCE_SEC);
+    ASSERT_EQ_INT(src, BZ_QUEST_INPUT_SOURCE_CONTROLLER);
+}
+
+static void test_arbitrate_reclaims_controller_instantly_from_hand(void) {
+    /* Once on HAND, the controller becoming active again wins THAT SAME
+     * FRAME - no debounce on reclaim. */
+    float loss = 1.0f; /* well past the debounce - irrelevant once controller is active */
+    bzQuestInputSourceKind_t r =
+        bz_quest_input_arbitrate_source(BZ_QUEST_INPUT_SOURCE_HAND, true, true, 0.1f, &loss);
+    ASSERT_EQ_INT(r, BZ_QUEST_INPUT_SOURCE_CONTROLLER);
+}
+
+static void test_arbitrate_falls_back_when_hand_goes_inactive(void) {
+    /* Once on HAND, the hand itself going inactive falls back to CONTROLLER
+     * immediately (even though the controller is ALSO still inactive) -
+     * never a third "none" state, matching this function's header comment. */
+    float loss = 1.0f;
+    bzQuestInputSourceKind_t r =
+        bz_quest_input_arbitrate_source(BZ_QUEST_INPUT_SOURCE_HAND, false, false, 0.1f, &loss);
+    ASSERT_EQ_INT(r, BZ_QUEST_INPUT_SOURCE_CONTROLLER);
+}
+
+static void test_arbitrate_stays_on_hand_without_redebounce(void) {
+    /* Once handed off, staying on HAND across further frames needs no
+     * additional debounce - only the initial controller->hand handoff does. */
+    float loss = 1.0f;
+    bzQuestInputSourceKind_t src = BZ_QUEST_INPUT_SOURCE_HAND;
+    for (int i = 0; i < 3; ++i) src = bz_quest_input_arbitrate_source(src, false, true, 0.01f, &loss);
+    ASSERT_EQ_INT(src, BZ_QUEST_INPUT_SOURCE_HAND);
+}
+
+/* Builds a hand-tracking sample aiming down -Z (mirrors base_frame()'s right-
+ * hand controller aim direction) with the given press state - drives
+ * frame.handSample[] in the integration tests below. */
+static void hand_sample_aim_neg_z(bzQuestInputHandSample_t *h, bool selectDown, bool squeezeDown) {
+    memset(h, 0, sizeof(*h));
+    h->active = true;
+    h->aimValid = true;
+    h->aimDir[2] = -1.0f;
+    h->selectDown = selectDown;
+    h->squeezeDown = squeezeDown;
+}
+
+static void test_hand_source_selects_entity_when_controller_inactive(void) {
+    /* Right controller never active this whole test; the right hand takes
+     * over (after the debounce elapses) and its pinch selects an entity via
+     * the EXACT SAME hit-test/command-mapping path controllers use. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputEntity_t ent = {88, 0.0f, 0.0f, -2.0f, 0.5f, 1.0f, 2.0f};
+    bzQuestInputFrame_t f;
+    memset(&f, 0, sizeof(f));
+    f.dt = 0.1f;
+    f.focused = true;
+    f.mapEpoch = 1;
+    make_world(&f.world, NULL, &ent, 1, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    hand_sample_aim_neg_z(&f.handSample[BZ_QUEST_INPUT_HAND_RIGHT], false, false);
+
+    bzQuestInputOutput_t out;
+    /* Four frames of controller-inactive + hand-active to clear the
+     * debounce window (0.1s * 4 = 0.4s > 0.3s). */
+    for (int i = 0; i < 4; ++i) bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!out.hasCommand); /* not pressed yet */
+
+    /* Fresh pinch press now that the hand is authoritative. */
+    f.handSample[BZ_QUEST_INPUT_HAND_RIGHT].selectDown = true;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(out.hasCommand);
+    ASSERT_EQ_INT(out.command.type, BZ_QUEST_INPUT_CMD_SELECT);
+    ASSERT_EQ_INT((int)out.command.selectIds[0], 88);
+}
+
+static void test_hand_source_no_takeover_while_controller_active(void) {
+    /* Controller active AND a hand also active+pinching this same frame:
+     * the controller must remain authoritative (Touch preferred), so the
+     * hand's press must NOT drive the command - only the controller's own
+     * (unpressed) trigger state matters. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputEntity_t ent = {5, 0.0f, 0.0f, -2.0f, 0.5f, 0.0f, 0.0f};
+    bzQuestInputFrame_t f;
+    base_frame(&f); /* right controller active, aimValid, selectDown=false */
+    make_world(&f.world, NULL, &ent, 1, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    hand_sample_aim_neg_z(&f.handSample[BZ_QUEST_INPUT_HAND_RIGHT], /*selectDown=*/true, false);
+
+    bzQuestInputOutput_t out;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!out.hasCommand); /* controller (unpressed) wins, hand's press is not consulted */
+}
+
+static void test_source_switch_clears_exactly_once(void) {
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputFrame_t f;
+    memset(&f, 0, sizeof(f));
+    f.dt = 0.1f;
+    f.focused = true;
+    f.mapEpoch = 1;
+    make_world(&f.world, NULL, NULL, 0, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    f.hands[BZ_QUEST_INPUT_HAND_RIGHT].active = true; /* controller active baseline */
+    f.hands[BZ_QUEST_INPUT_HAND_RIGHT].aimValid = true;
+    f.hands[BZ_QUEST_INPUT_HAND_RIGHT].aimDir[2] = -1.0f;
+    hand_sample_aim_neg_z(&f.handSample[BZ_QUEST_INPUT_HAND_RIGHT], false, false);
+
+    bzQuestInputOutput_t out;
+    bz_quest_input_state_update(&s, &f, &out); /* baseline: source=CONTROLLER */
+    ASSERT(!out.clearedThisFrame);
+
+    /* Controller drops; hand is active. dt=0.1 per call, debounce=0.3s, so
+     * the switch to HAND lands on the THIRD controller-inactive call
+     * (0.1+0.1+0.1 >= 0.3) - verified against bz_quest_input_arbitrate_source()
+     * directly (test_arbitrate_hands_off_after_debounce_elapses above) before
+     * writing this exact call count. */
+    f.hands[BZ_QUEST_INPUT_HAND_RIGHT].active = false;
+    bz_quest_input_state_update(&s, &f, &out); /* 1st inactive frame: loss=0.1 */
+    ASSERT(out.clearedThisFrame); /* active-loss clear (unrelated to source) fires here */
+    bz_quest_input_state_update(&s, &f, &out); /* 2nd inactive frame: loss=0.2 */
+    ASSERT(!out.clearedThisFrame);
+    bz_quest_input_state_update(&s, &f, &out); /* 3rd inactive frame: loss>=0.3, source switches to HAND */
+    ASSERT(out.clearedThisFrame);
+    /* Further frames on HAND: no additional clear. */
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!out.clearedThisFrame);
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!out.clearedThisFrame);
+}
+
+static void test_source_switch_requires_fresh_edge_no_repeat_while_held(void) {
+    /* After the controller->hand switch, a hand sample that is ALREADY
+     * pressed on the very frame it becomes authoritative reads as a FRESH
+     * rising edge (the switch's clear reset the latch to "not pressed") and
+     * DOES fire exactly once - identical to this file's existing
+     * test_focus_reconnect_map_reset_with_left_grip_held_never_posts
+     * precedent ("re-anchors (new rising edge)") - never a repeat while
+     * held afterward. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputEntity_t ent = {9, 0.0f, 0.0f, -2.0f, 0.5f, 0.0f, 0.0f};
+    bzQuestInputFrame_t f;
+    memset(&f, 0, sizeof(f));
+    f.dt = 0.1f;
+    f.focused = true;
+    f.mapEpoch = 1;
+    make_world(&f.world, NULL, &ent, 1, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    hand_sample_aim_neg_z(&f.handSample[BZ_QUEST_INPUT_HAND_RIGHT], /*selectDown=*/true, false);
+    /* controller inactive from the start (never populated) */
+
+    bzQuestInputOutput_t out;
+    for (int i = 0; i < 2; ++i) bz_quest_input_state_update(&s, &f, &out); /* still within debounce */
+    ASSERT(!out.hasCommand);
+    bz_quest_input_state_update(&s, &f, &out); /* 3rd call: debounce elapses; hand already "pressed" */
+    ASSERT(out.hasCommand);
+    ASSERT_EQ_INT(out.command.type, BZ_QUEST_INPUT_CMD_SELECT);
+    bz_quest_input_state_update(&s, &f, &out); /* still held -> no repeat */
+    ASSERT(!out.hasCommand);
+}
+
+static void test_source_switch_clears_board_drag(void) {
+    /* A left-hand-sourced board-pan drag in progress must be dropped
+     * (panDragging reset) the instant the controller reclaims that hand's
+     * slot - no stale drag anchor should survive the switch. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputFrame_t f;
+    memset(&f, 0, sizeof(f));
+    f.dt = 1.0f / 72.0f;
+    f.focused = true;
+    f.mapEpoch = 1;
+    make_world(&f.world, NULL, NULL, 0, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    /* Left hand drives a grip-drag from the start (controller inactive). */
+    bzQuestInputHandSample_t *L = &f.handSample[BZ_QUEST_INPUT_HAND_LEFT];
+    memset(L, 0, sizeof(*L));
+    L->active = true;
+    L->squeezeDown = true;
+    L->gripPos[0] = 1.0f;
+
+    bzQuestInputOutput_t out;
+    /* Cross the debounce window so the left hand becomes authoritative and
+     * anchors a drag. */
+    for (int i = 0; i < 25; ++i) bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(s.panDragging);
+
+    /* Left controller reclaims instantly. */
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].active = true;
+    f.hands[BZ_QUEST_INPUT_HAND_LEFT].squeezeDown = false;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(!s.panDragging); /* dropped by the switch's clear, not carried over from the hand */
+}
+
+static void test_hand_drives_board_pan_via_middle_pinch_grip(void) {
+    /* FB-aim-tier hand semantics: a left-hand middle-pinch (squeezeDown,
+     * the evidence-backed second pinch) with the wrist joint as the grip-pose
+     * analog drives board pan through the EXACT SAME bz_update_board() logic
+     * a physical left controller grip-drag already uses. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputFrame_t f;
+    memset(&f, 0, sizeof(f));
+    f.dt = 0.1f;
+    f.focused = true;
+    f.mapEpoch = 1;
+    make_world(&f.world, NULL, NULL, 0, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    bzQuestInputHandSample_t *L = &f.handSample[BZ_QUEST_INPUT_HAND_LEFT];
+    memset(L, 0, sizeof(*L));
+    L->active = true;
+    L->squeezeDown = true;
+    L->gripPos[0] = 1.0f;
+
+    bzQuestInputOutput_t out;
+    for (int i = 0; i < 4; ++i) bz_quest_input_state_update(&s, &f, &out); /* clear debounce, anchor */
+    ASSERT_EQ_FLOAT(s.board.tx, 0.0f, 0.0001f); /* anchor frame alone must not move the board */
+
+    L->gripPos[0] = 1.6f; /* drag +0.6 on X */
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT_EQ_FLOAT(s.board.tx, 0.6f, 0.0001f);
+    ASSERT_EQ_INT(s.phase, BZ_QUEST_INPUT_PHASE_BOARD_MANIPULATE);
+}
+
+static void test_hand_only_frame_cannot_rotate_zoom_or_height_board(void) {
+    /* Thumbstick has no hand-tracking analog (bzQuestInputHandSample_t built
+     * from bz_quest_hand_sample_build() always reports thumbstick={0,0}) -
+     * board yaw/zoom/height must stay exactly at default even with both
+     * hands fully hand-tracked and active. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    bzQuestInputFrame_t f;
+    memset(&f, 0, sizeof(f));
+    f.dt = 0.1f;
+    f.focused = true;
+    f.mapEpoch = 1;
+    make_world(&f.world, NULL, NULL, 0, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    hand_sample_aim_neg_z(&f.handSample[BZ_QUEST_INPUT_HAND_LEFT], false, false);
+    hand_sample_aim_neg_z(&f.handSample[BZ_QUEST_INPUT_HAND_RIGHT], false, false);
+
+    bzQuestInputOutput_t out;
+    for (int i = 0; i < 4; ++i) bz_quest_input_state_update(&s, &f, &out);
+    ASSERT_EQ_FLOAT(s.board.yaw, 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(s.board.scale, 1.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(s.board.ty, BZ_QUEST_BOARD_DEFAULT_TY, 0.0001f);
+}
+
+static void test_hand_reaches_hud_cancel_without_secondary_button(void) {
+    /* Cancel has no hand-tracking secondary-button analog, but remains
+     * reachable via the SAME HUD-cancel-region hit-test path a controller's
+     * trigger already uses - selectDown (pinch) aimed at the cancel slot. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestHudFrame_t frame;
+    build_hud_fixture(&frame, BZ_QUEST_HUD_TARGET_POINT, false, 11);
+    uint32_t cancelIdx = frame.hitRegionCount;
+    for (uint32_t i = 0; i < frame.hitRegionCount; ++i)
+        if (frame.hitRegions[i].action.semantic == BZ_QUEST_HUD_SEMANTIC_CANCEL) cancelIdx = i;
+    ASSERT(cancelIdx < frame.hitRegionCount);
+
+    bzQuestInputFrame_t f;
+    memset(&f, 0, sizeof(f));
+    f.dt = 0.1f;
+    f.focused = true;
+    f.mapEpoch = 1;
+    make_world(&f.world, &frame, NULL, 0, BZ_QUEST_HUD_TARGET_POINT);
+    bzQuestInputHandSample_t *R = &f.handSample[BZ_QUEST_INPUT_HAND_RIGHT];
+    memset(R, 0, sizeof(*R));
+    R->active = true;
+    R->aimValid = true;
+    ray_at_region(&frame, cancelIdx, R->aimOrigin, R->aimDir);
+    /* secondaryDown intentionally left false throughout - hands never set it. */
+
+    bzQuestInputOutput_t out;
+    for (int i = 0; i < 4; ++i) bz_quest_input_state_update(&s, &f, &out); /* clear debounce */
+    ASSERT(!out.hasCommand);
+    R->selectDown = true; /* fresh pinch aimed at the cancel slot */
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(out.hasCommand);
+    ASSERT_EQ_INT(out.command.type, BZ_QUEST_INPUT_CMD_CANCEL);
+    ASSERT(!R->secondaryDown); /* reachable without ever needing this field */
+}
+
+static void test_controller_only_frame_unaffected_by_arbitration(void) {
+    /* An explicit regression guard for "controller fallback unchanged":
+     * with handSample[] fully zeroed (as every pre-layer-8 caller/test
+     * leaves it), a controller-only frame behaves identically to the
+     * pre-arbitration behavior - selects an entity via the right trigger,
+     * exactly like test_update_select_entity_on_trigger. */
+    bzQuestInputState_t s;
+    bz_quest_input_state_init(&s);
+    identity_board(&s);
+    bzQuestInputEntity_t ent = {55, 0.0f, 0.0f, -2.0f, 0.5f, 11.0f, 22.0f};
+    bzQuestInputFrame_t f;
+    base_frame(&f);
+    make_world(&f.world, NULL, &ent, 1, BZ_QUEST_HUD_TARGET_NONE);
+    f.world.generation = 1;
+    bzQuestInputOutput_t out;
+    bz_quest_input_state_update(&s, &f, &out); /* baseline, trigger up */
+    f.hands[BZ_QUEST_INPUT_HAND_RIGHT].selectDown = true;
+    bz_quest_input_state_update(&s, &f, &out);
+    ASSERT(out.hasCommand);
+    ASSERT_EQ_INT(out.command.type, BZ_QUEST_INPUT_CMD_SELECT);
+    ASSERT_EQ_INT((int)out.command.selectIds[0], 55);
+}
+
 /* -------------------------------------------------------------- haptics */
 
 static void test_haptic_accept_reject_distinct(void) {
@@ -920,6 +1277,22 @@ void run_bz_quest_input_state_tests(void) {
     RUN_TEST(test_controller_loss_clears_once);
     RUN_TEST(test_map_reload_clears_and_resets_board);
     RUN_TEST(test_generation_bump_alone_does_not_clear);
+    RUN_TEST(test_arbitrate_controller_active_always_wins);
+    RUN_TEST(test_arbitrate_debounces_before_handoff);
+    RUN_TEST(test_arbitrate_hands_off_after_debounce_elapses);
+    RUN_TEST(test_arbitrate_no_handoff_without_active_hand);
+    RUN_TEST(test_arbitrate_reclaims_controller_instantly_from_hand);
+    RUN_TEST(test_arbitrate_falls_back_when_hand_goes_inactive);
+    RUN_TEST(test_arbitrate_stays_on_hand_without_redebounce);
+    RUN_TEST(test_hand_source_selects_entity_when_controller_inactive);
+    RUN_TEST(test_hand_source_no_takeover_while_controller_active);
+    RUN_TEST(test_source_switch_clears_exactly_once);
+    RUN_TEST(test_source_switch_requires_fresh_edge_no_repeat_while_held);
+    RUN_TEST(test_source_switch_clears_board_drag);
+    RUN_TEST(test_hand_drives_board_pan_via_middle_pinch_grip);
+    RUN_TEST(test_hand_only_frame_cannot_rotate_zoom_or_height_board);
+    RUN_TEST(test_hand_reaches_hud_cancel_without_secondary_button);
+    RUN_TEST(test_controller_only_frame_unaffected_by_arbitration);
     RUN_TEST(test_haptic_accept_reject_distinct);
     RUN_TEST(test_command_table_reaches_every_type);
 }

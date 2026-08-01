@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E/6/7
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E/6/7/8
 
-This document tracks layers 5A/5B/5C/5D/5E/6/7 of a stacked Meta Quest port:
+This document tracks layers 5A/5B/5C/5D/5E/6/7/8 of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -79,7 +79,7 @@ This document tracks layers 5A/5B/5C/5D/5E/6/7 of a stacked Meta Quest port:
   below for full scope, the action map, the state machine, the ray-hit
   priority list, the command-mapping table (incl. the documented target-entity
   ABI gap), and the board-transform clamp ranges.
-- **Layer 7 (this layer, `clancey-quest-data-staging-audio`)**: adds the
+- **Layer 7 (`clancey-quest-data-staging-audio`)**: adds the
   reproducible developer workflow that stages a user's own local Warcraft
   III ROC/TFT archives onto the device via `run-as`
   (`platform/android/quest/scripts/stage-wc3-data.sh`), and a real Android
@@ -94,17 +94,36 @@ This document tracks layers 5A/5B/5C/5D/5E/6/7 of a stacked Meta Quest port:
   below for full scope, the staging safety/idempotency design, the ROC/TFT
   archive rules (and the one documented runtime `-tft` gap), and the AAudio
   parser/mixer/lifecycle design.
+- **Layer 8 (this layer, `clancey-add-quest-hand-tracking`)**: adds
+  native Meta Quest **hand-tracking** input parity alongside (never
+  replacing) layer 6's Touch controllers: optional, explicitly-negotiated
+  `XR_EXT_hand_tracking` + `XR_FB_hand_tracking_aim` OpenXR capability
+  (`bz_quest_xr.h`/`.c`'s `bzQuestXrHandCapability_t`), one `XrHandTrackerEXT`
+  per hand with strict session-scoped lifecycle (`bz_quest_xr_hands.h`/`.c`),
+  a pure hand-gesture builder that turns raw joints or Meta's standardized
+  aim/pinch state into the SAME per-hand sample type the Touch path already
+  produces (`bz_quest_hand_input.h`/`.c`), and deterministic,
+  hysteresis-debounced controller-vs-hand source arbitration folded directly
+  into the existing layer-6 state machine (`bz_quest_input_state.h`/`.c`'s
+  `bz_quest_input_arbitrate_source()`). No parallel command mapper, no hand
+  mesh rendering, no widened bridge/transport ABI. See
+  "[Layer 8: Meta Quest hand tracking](#layer-8-meta-quest-hand-tracking-bz_quest_xr_handsc-bz_quest_hand_inputc-bz_quest_input_statec)"
+  below for the exact extension matrix, capability-negotiation contract,
+  gesture/arbitration state machine, and the honest Quest-vs-visionOS
+  differences.
 
 **These layers now render fog of war, per-entity selection markers, and a
 status/command-card HUD, (layer 6) read Touch controllers to select
 units, activate command-card buttons, issue smart/target orders, cancel, and
-pan/rotate/zoom the board, and (layer 7) can stage a developer's own local
+pan/rotate/zoom the board, (layer 7) can stage a developer's own local
 Warcraft III data onto the device and play its non-spatial audio through
-AAudio — all posted through the authoritative typed tabletop transport, or
-(audio) dequeued from its existing bounded audio queue. They still do not
-render particles/effects, do not track hands, and do not implement
-multiplayer, Store asset delivery, the Meta Audio SDK, or Platform
-services.**
+AAudio, and (layer 8) can read Quest hand tracking as a second, arbitrated
+input source for the exact same select/smart/cancel/board-pan commands when
+Touch controllers are unsupported/inactive — all posted through the
+authoritative typed tabletop transport, or (audio) dequeued from its
+existing bounded audio queue. They still do not render particles/effects,
+do not render a hand mesh, and do not implement multiplayer, Store asset
+delivery, the Meta Audio SDK, or Platform services.**
 See
 [Current limitations](#current-limitations) and
 `bz_quest_host.c`'s compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by
@@ -118,7 +137,14 @@ OpenXR Touch-controller input layer; `BZ_QUEST_ENABLE_AUDIO` is the seam
 `#error` if ever turned off); `BZ_QUEST_ENABLE_DATA_STAGING` remains
 permanently `#error`-gated at its default `0` — data staging is an external
 ADB dev workflow, not an in-app runtime feature, so no real "on" value for
-this seam will ever exist.
+this seam will ever exist. **Layer 8 adds no new compile-time seam at all**
+— hand-tracking capability is negotiated at OpenXR runtime (instance-
+extension enumeration + system-property query), never at compile time, so
+`bz_quest_xr_hands_create()`/`_sync()` are always built and simply no-op into
+"Touch-only" on a runtime/device/account without the capability - see
+"[Layer 8](#layer-8-meta-quest-hand-tracking-bz_quest_xr_handsc-bz_quest_hand_inputc-bz_quest_input_statec)"'s
+"Capability negotiation" below.
+
 
 ## Architecture boundary
 
@@ -432,14 +458,15 @@ test`, none of which need Gradle/NDK/Quest hardware:
 
 | Module | Test file | What it proves |
 |---|---|---|
-| `bz_quest_pure.c` | `tests/test_bz_quest_pure.c` | Projection/view-matrix math, format/extension/passthrough-capability selection (unchanged from layer 3). |
+| `bz_quest_pure.c` | `tests/test_bz_quest_pure.c` | Projection/view-matrix math, format/extension/passthrough-capability selection (unchanged from layer 3), plus (layer 8) `bz_quest_quat_forward()` - the shared aim-ray quaternion rotation controllers and hand tracking both use, cross-checked against `bz_quest_pose_to_view_matrix()`'s own rotation matrix. |
 | `bz_quest_scene.c` | `tests/test_bz_quest_scene.c` | Procedural test-scene generator (unchanged from layer 3). |
 | `bz_quest_data.c` | `tests/test_bz_quest_data.c` | Default-dir construction, override read/validate (normal + every documented rejection: relative path, disallowed characters, oversized, empty), full resolve fallback order, edition detection (`bz_quest_data_detect_edition()`: ROC-only, TFT-over-ROC, case-insensitive `War3x` match, non-`.mpq` false positives ignored, missing-directory/NULL-arg rejection), and argv construction (normal + `-tft` emission/ordering + undersized-buffer/NULL-arg error paths) — 32 tests, pure, real temp dirs via `mkdtemp()`. |
 | `bz_quest_frame.c` | `tests/test_bz_quest_frame.c` | Reset value, `bz_quest_frame_from_values()` field copy/truncation/ABI-mismatch detection, and every `bz_quest_frame_should_log()` cache-hit/cache-miss branch (identical frame never logs; status/lifecycle-state/lifecycle-error changes each log; a bare `generation` advance — in *any* status, including `OK` — never logs, including across ~190 simulated consecutive engine frames, guarding against the per-frame-log regression fixed in PR #19's review pass) — 15 tests, pure, no I/O. |
 | `bz_quest_wc3_fog.c` | `tests/test_bz_quest_wc3_fog.c` | Three-state fog classification, row-major cell indexing, world<->cell conversion (including rectangular/non-chunk-multiple grids), 0/128/255 texture packing with and without row padding, content-based dirty-check hit/miss, per-axis selection-marker matrix/tint generation (with and without the shared world transform), independent per-axis nonpositive-scale rejection, and zero-dimension rejection paths. |
 | `bz_quest_wc3_render.c` (world transform) | `tests/test_bz_quest_wc3_world_transform.c` | Cross-subsystem integration for the shared world/tabletop transform: entity-at-terrain-corner/center coordinate match against `bz_quest_wc3_terrain_build_chunk()`'s real vertex output, fog-cell/entity raw-space agreement, selection-marker/entity translation+scale sharing, rectangular bounds + nonzero origin, map-reload producing an independent transform, and a guard against double-applying the transform. |
 | `bz_quest_bridge.c` | `tests/test_bz_quest_bridge.c` | Valid-override start reaches `RUNNING`; missing-data start reaches `FAILED` with the engine's own error surfaced; invalid-override start reaches `FAILED` *before* any `bzTabletopLifecycle_t` exists; a second `start()` on an already-attempted instance is rejected; suspend/resume forward correctly (and are safe no-ops before a start or after a stop); `stop()` is idempotent and safe pre-start; `destroy()` then a fresh `start()` on the same storage succeeds; `is_terminal()` is correct for every bridge state — 10 tests, **linking the real** `bz_tabletop_lifecycle.c`/`common/bz_runtime.c` (not a stub), 67 assertions. |
-| `bz_quest_input_state.c` (layer 6) | `tests/test_bz_quest_input_state.c` | The pure Touch-controller interaction state machine: button edge detection (idle→press→hold→release→idle produces exactly one edge; two cycles produce two; a controller going inactive mid-hold clears the latch without firing a phantom release), deterministic ray-hit priority (HUD action > HUD cancel > HUD disabled/stale/hidden consumed-but-no-command > nearest-entity sphere > terrain plane > no-hit; boundary hits exactly on a region edge; entity-vs-terrain precedence), world↔composed coordinate inversion round-trip (forward `bz_quest_wc3_world_transform_point` then the new inverse, plus the degenerate no-bounds passthrough), board transform compose/inverse round-trip and scale/translate/pitch clamping at both ends, pan/rotate/zoom math, target/cancel transitions incl. the `ENTITY`/`ENTITY_OR_POINT` ABI-gap decision (target-point at the entity's ground origin), command-mapping-table completeness (every command type reachable, queue-full/stale-generation rejection paths surface a rejected haptic and leave no latched state), and idempotent transient-clear on focus-loss/controller-loss/generation-bump/map-epoch-change (clears once on entry, never re-fires while the condition persists). |
+| `bz_quest_input_state.c` (layer 6, extended layer 8) | `tests/test_bz_quest_input_state.c` | The pure Touch-controller interaction state machine: button edge detection (idle→press→hold→release→idle produces exactly one edge; two cycles produce two; a controller going inactive mid-hold clears the latch without firing a phantom release), deterministic ray-hit priority (HUD action > HUD cancel > HUD disabled/stale/hidden consumed-but-no-command > nearest-entity sphere > terrain plane > no-hit; boundary hits exactly on a region edge; entity-vs-terrain precedence), world↔composed coordinate inversion round-trip (forward `bz_quest_wc3_world_transform_point` then the new inverse, plus the degenerate no-bounds passthrough), board transform compose/inverse round-trip and scale/translate/pitch clamping at both ends, pan/rotate/zoom math, target/cancel transitions incl. the `ENTITY`/`ENTITY_OR_POINT` ABI-gap decision (target-point at the entity's ground origin), command-mapping-table completeness (every command type reachable, queue-full/stale-generation rejection paths surface a rejected haptic and leave no latched state), and idempotent transient-clear on focus-loss/controller-loss/generation-bump/map-epoch-change (clears once on entry, never re-fires while the condition persists); **layer 8 adds** `bz_quest_input_arbitrate_source()`'s controller-vs-hand state machine (instant reclaim, debounced handoff with real per-frame `dt` accumulation, no-handoff/fallback/no-redebounce paths) plus full `bz_quest_input_state_update()` integration coverage (hand-sourced select/smart-entity/board-pan, controller-preferred-while-active, exactly-once clear-on-switch with the precise float-accumulation boundary verified, fresh-edge-then-no-repeat across a switch, board-drag dropped by a switch, hands unable to rotate/zoom/height the board, cancel reachable via a hand pinch without a secondary button, and an explicit controller-only regression guard) - 16 new tests, every pre-existing layer 6/7 test in this file passes completely unmodified. |
+| `bz_quest_hand_input.c` (layer 8) | `tests/test_bz_quest_hand_input.c` | The pure hand-tracking gesture builder: both hands independently; capability NONE/EXT_ONLY/FB_AIM; tracker active/inactive; each of the four tracked joints individually valid/invalid; a degenerate (zero-length) ray-direction rejection; the FB-aim tier trusting the runtime's index/middle `*Pinching` status bits directly (never re-deriving from strength), aim-invalid producing no output, aim pose passthrough; the EXT-only tier's joint-position-only ray basis, pinch engage/release/no-chatter hysteresis at and around both thresholds, thumb-validity gating, and `squeezeDown` always false; tracker loss/reacquisition requiring a fresh ENGAGE crossing (never resuming from mid-hysteresis); and the intentionally-always-zero unsupported fields (`primaryDown`/`secondaryDown`/`thumbstick`) - 22 tests. |
 | `bz_quest_xr_bindings.c` (layer 6) | `tests/test_bz_quest_xr_bindings.c` | The pure OpenXR binding tables: both profile path strings are legal OpenXR paths; every action/component path is lowercase-legal (no spaces/uppercase, no leading/trailing/double slash); `simple_controller` is a strict subset of `touch_controller` (same aim/grip/select/menu/haptic semantic actions bound, thumbstick/squeeze/face-buttons only on Touch); the reserved Oculus/system button is never bound; menu is left-hand-only; face buttons differ by hand (X/Y left, A/B right); no duplicate component path per side; and the path validator rejects malformed inputs. |
 | `bz_quest_wav.c` (layer 7) | `tests/test_bz_quest_wav.c` | The pure RIFF/WAVE parser: valid mono/stereo, 8-bit/16-bit PCM parses; every documented rejection (bad RIFF/WAVE magic, missing `fmt `/`data` chunk, `data` before `fmt `, non-PCM `audioFormat`, unsupported channel count/bit depth, `blockAlign`/`byteRate` inconsistent with the header's own fields, zero/oversized/out-of-bounds/misaligned `data` chunk size, truncated chunk header); odd-sized-chunk padding is honored when walking past a non-`fmt `/`data` chunk — 19 tests. |
 | `bz_quest_audio_mixer.c` (layer 7) | `tests/test_bz_quest_audio_mixer.c` | The bounded RT-safe voice pool + format conversion: `init` zeroes every slot; `convert` widens 8-bit to 16-bit, duplicates mono to stereo, resamples up/down deterministically (exact expected sample values, not just "some output"), rejects a zero target rate and an oversized computed output-frame count without allocating; `submit`/`render`/`reap` full lifecycle (submit into the first free slot, render mixes/clamps/advances cursor, a voice reaching its end goes inactive mid-`render` — not a separate step — and is only freed by a later `reap`); pool-full rejection when all `BZ_QUEST_AUDIO_MAX_VOICES` slots are active; two overlapping voices mix (sum, not overwrite) and clip-saturate at the int16 boundary instead of wrapping — 14 tests. |
@@ -3228,6 +3255,541 @@ only when their value actually changes since the last log, never once per
 | Spatial/positional audio (Meta XR Audio SDK) | **Out of scope** — every voice plays as flat, non-positional stereo; this is an honest prototype limitation, not a bug |
 | Exclusive sharing mode / low-latency performance mode | **Out of scope** — `AAUDIO_SHARING_MODE_SHARED` / `AAUDIO_PERFORMANCE_MODE_NONE` (the balanced default) only |
 
+## Layer 8: Meta Quest hand tracking (`bz_quest_xr_hands.c`, `bz_quest_hand_input.c`, `bz_quest_input_state.c`)
+
+Layer 8 adds native Meta Quest **hand-tracking input parity** alongside
+(never replacing) layer 6's Touch controllers: the same select/smart-entity/
+smart-point/cancel/board-pan commands, reachable via a pinch gesture and a
+tracked-joint- or Meta-standardized-aim-pose-derived ray instead of a
+physical controller, with Touch remaining the preferred source whenever it
+is actually tracked. It is entirely **optional and additive** — every
+existing layer-6/7 behavior, test, and build target is unchanged, and a
+runtime/device/account without hand tracking behaves identically to before
+this layer existed.
+
+### Module map and ownership
+
+| File | Kind | Owns |
+|---|---|---|
+| `bz_quest_hand_input.h`/`.c` | **Pure** (plain `cc`, no OpenXR link) | `bzQuestHandCapability_t` (NONE/EXT_ONLY/FB_AIM), the plain-POD joint/aim-sample structs, the EXT-only pinch-distance hysteresis latch, and `bz_quest_hand_sample_build()` — the one function that turns either representation into a `bzQuestInputHandSample_t`, the SAME type layer 6's Touch path already produces. No `Xr*` type appears anywhere in this file (verified structurally — see "Tests and build wiring" below). |
+| `bz_quest_xr_hands.h`/`.c` | Impure (owns `XrHandTrackerEXT`) | The two hand trackers (`XR_HAND_JOINT_SET_DEFAULT_EXT`), the three resolved `XR_EXT_hand_tracking` function pointers, the once-per-frame focus-gated `xrLocateHandJointsEXT` call (chaining `XrHandTrackingAimStateFB` when negotiated), and the EXT-only pinch hysteresis latch's *storage* (the pure module owns the *logic*). Mirrors `bz_quest_xr_actions.c`'s exact discipline, except every function here is optional/never-fatal. |
+| `bz_quest_xr.h`/`.c` (extended) | Impure | `bzQuestXrHandCapability_t` — the negotiated capability (extension-enabled + system-supported, for both `XR_EXT_hand_tracking` and `XR_FB_hand_tracking_aim`), decided once at `bz_quest_xr_create_instance()`/`_get_system()` time, alongside the pre-existing `passthroughCapabilities`. |
+| `bz_quest_input_state.h`/`.c` (extended) | **Pure** | `bzQuestInputSourceKind_t` (CONTROLLER/HAND) and `bz_quest_input_arbitrate_source()` — the deterministic, hysteresis-debounced per-hand source arbitration folded into the top of `bz_quest_input_state_update()`, plus the two small `bzQuestInputFrame_t`/`bzQuestInputState_t` fields (`handSample[]`, `source[]`/`controllerLossSeconds[]`) that carry it. Every hit-test/board/command-mapping line below the arbitration step is **completely unchanged** from layer 6/7 and stays unaware of which source produced the sample it reads. |
+| `bz_quest_renderer.c` (extended) | Impure | Creates `xrHands` after the session (mirroring `xrActions`), calls `bz_quest_xr_hands_sync()` right after `bz_quest_xr_actions_sync()` into the SAME `bzQuestInputFrame_t`, and destroys it before the session/instance in `bz_quest_renderer_shutdown()`. Adds no new pointer/HUD rendering code — see "Rendering" below. |
+
+The pure/impure split mirrors layer 6's `bz_quest_xr_bindings.h` (pure
+tables) vs. `bz_quest_xr_actions.c` (impure `XrAction`/`XrSpace` owner)
+discipline exactly: no `XrHandTrackerEXT`/`XrHandJointLocationEXT`/
+`XrHandTrackingAimStateFB` ever appears in a host-testable header.
+
+### Capability negotiation (explicit, optional, never fatal)
+
+Unlike `XR_KHR_android_create_instance`/`XR_KHR_vulkan_enable2`/
+`XR_FB_passthrough` (hard startup requirements — see "OpenXR session
+lifecycle" above), hand tracking is negotiated at **two** independent,
+always-optional gates, both probed the same way the three required
+extensions are checked (`bz_quest_check_required_names()`), but neither ever
+fails `bz_quest_xr_create_instance()`/`_get_system()`:
+
+| Extension | Number/depends (OpenXR registry `xr.xml`) | What it adds | Gate |
+|---|---|---|---|
+| `XR_EXT_hand_tracking` | `number="52"`, no dependency beyond core 1.0 | `XrHandTrackerEXT`, `xrCreateHandTrackerEXT`/`xrDestroyHandTrackerEXT`/`xrLocateHandJointsEXT`, `XrHandJointLocationEXT[26]` (`XR_HAND_JOINT_SET_DEFAULT_EXT`), `XrSystemHandTrackingPropertiesEXT.supportsHandTracking` | Probed in `xrEnumerateInstanceExtensionProperties`; if present, enabled at `xrCreateInstance` and `xr->handCapability.extEnabled=true`. Final `xr->handCapability.supported` additionally requires the chained `XrSystemHandTrackingPropertiesEXT.supportsHandTracking==true` from `bz_quest_xr_get_system()`. |
+| `XR_FB_hand_tracking_aim` | `number="112"`, `depends="XR_VERSION_1_0+XR_EXT_hand_tracking"` | `XrHandTrackingAimStateFB` (chained onto `XrHandJointLocationsEXT.next` at locate time) — a standardized `aimPose` + `status` bitmask (`COMPUTED_BIT_FB`, `VALID_BIT_FB`, `INDEX_PINCHING_BIT_FB`, `MIDDLE_PINCHING_BIT_FB`, plus reserved `RING`/`LITTLE`/`SYSTEM_GESTURE`/`DOMINANT_HAND`/`MENU_PRESSED` bits this layer does not consume — see "Unsupported hand semantics" below). Adds **no new function** — only the struct. | Only probed/enabled when `extEnabled` is ALSO true (its declared dependency); final `xr->handCapability.aimSupported` additionally requires `xr->handCapability.supported`. |
+
+Both extension names, the exact struct/enum layout, and the `depends=`
+relationship above were verified directly against the **bundled
+`org.khronos.openxr:openxr_loader_for_android:1.1.49`** AAR (the exact
+Prefab `headers` module `find_package(OpenXR CONFIG)` resolves — see
+"Prerequisites" above): `openxr.h`'s `XR_HAND_JOINT_COUNT_EXT`/
+`XrHandJointEXT`/`XrHandTrackerCreateInfoEXT`/`XrHandJointLocationsEXT`/
+`XrHandTrackingAimStateFB`/`XrHandTrackingAimFlagsFB` declarations, and the
+canonical machine-readable `xr.xml` registry's `<extension>` elements for
+`XR_EXT_hand_tracking`/`XR_FB_hand_tracking_aim` (both fetched from
+`KhronosGroup/OpenXR-SDK-Source`, the same repo `docs/quest-tabletop.md`'s
+"Related documents" already cites for the loader).
+
+A failed per-hand `xrCreateHandTrackerEXT` (e.g. a transient runtime error)
+disables only that hand (tracker left `XR_NULL_HANDLE`, logged once); a
+failed proc-pointer resolution (the extension enumerated but the runtime's
+own advertised functions do not resolve — a genuine runtime defect) disables
+hand tracking entirely for the session, logged once. **Neither ever fails
+renderer init** — `bz_quest_xr_hands_create()` always returns `true`.
+`test-quest-hand-tracking-layout.sh` structurally asserts this "never
+returns false on missing capability" contract (see "Tests and build
+wiring" below).
+
+**Android manifest gate.** Independent of the OpenXR extension mechanics
+above, Quest's OS/runtime broker will not enumerate hand-tracking devices to
+**any** app — VrApi or OpenXR — lacking
+`<uses-permission android:name="com.oculus.permission.HAND_TRACKING" />` and
+`<uses-feature android:name="oculus.software.handtracking" />` in its
+manifest (verified against Meta's hand-tracking guidance,
+<https://developers.meta.com/horizon/documentation/native/android/mobile-hand-tracking/>,
+"Add Flag to Android Manifest to Enable Hand Tracking": *"Apps that do not
+specify these flags will not see hand devices enumerated"*). This project's
+`AndroidManifest.xml` declares both, with the `uses-feature`'s
+`android:required` explicitly `"false"` (unlike the mandatory
+`android.hardware.vr.headtracking` feature above it) — this app's
+Touch-controller path must keep working, and the app must not be filtered
+from a device/account lacking hand tracking, matching this layer's "hand
+support must not be required for startup" contract. No other hand-tracking
+manifest hint (e.g. the VrApi-only `com.oculus.handtracking.frequency`/
+`.version` meta-data tuning knobs some Meta samples set) was added — this
+project has no evidence they apply to the OpenXR path at all, and the task
+scope is "only what is demonstrably necessary".
+
+### OpenXR lifecycle integration (adds to, never duplicates, `bz_quest_xr.c`/`bz_quest_xr_actions.c`)
+
+- `bz_quest_xr_hands_create()` is called once from `bz_quest_renderer_init()`
+  **after** `bz_quest_xr_actions_create()` (both need the session created by
+  `bz_quest_xr_create_session()`). No-ops (every tracker left
+  `XR_NULL_HANDLE`) when `!xr->handCapability.supported`.
+- `bz_quest_xr_hands_sync()` is called once per frame from
+  `bz_quest_renderer_process_input()`, immediately after
+  `bz_quest_xr_actions_sync()`, into the **same** `bzQuestInputFrame_t` —
+  mirroring that function's exact focus/session-running gate
+  (`xr->sessionRunning && xr->sessionState == XR_SESSION_STATE_FOCUSED`):
+  when not focused, every `frame->handSample[]` entry is left zeroed/
+  inactive and `xrLocateHandJointsEXT` is never called (undefined/wasteful
+  while unfocused, per the same OpenXR spec reasoning layer 6 already
+  documents for `xrSyncActions`). When focused, it locates each active
+  hand's joints (+ chained `XrHandTrackingAimStateFB` when negotiated) at
+  the frame's predicted display time against `xr->appSpace` — the exact
+  same `XrTime`/reference space `bz_quest_xr_actions_sync()` already uses
+  for controller poses and `bz_quest_xr_locate_views()` uses for the eye
+  views.
+- Every joint/aim read honors its own validity bits
+  (`XR_SPACE_LOCATION_POSITION_VALID_BIT` per joint,
+  `COMPUTED_BIT_FB|VALID_BIT_FB` for the aim struct) before being trusted —
+  an untracked/invalid joint or aim state is never treated as usable data,
+  mirroring `bz_quest_xr_actions.c`'s `bz_quest_xr_locate_pose()` convention
+  exactly (same bit, same "both must be set" check).
+- `bz_quest_xr_hands_destroy()` destroys both trackers
+  (`XR_NULL_HANDLE`-guarded), called from `bz_quest_renderer_shutdown()`
+  alongside `bz_quest_xr_actions_destroy()`, **before** the session/instance
+  are torn down by `bz_quest_xr_destroy()` — this exact ordering requirement
+  is structurally enforced (see "Tests and build wiring" below; a
+  deliberately-injected reversal was proven to fail that check, then
+  reverted — see this repo's PR description).
+
+### Pure hand sample/gesture representation (`bz_quest_hand_input.h`)
+
+`bz_quest_hand_sample_build()` turns one hand's raw data into exactly the
+same `bzQuestInputHandSample_t` layer 6 already defines (`active`,
+`aimValid`, `aimOrigin`/`aimDir`, `gripPos`, `selectDown`, `squeezeDown`,
+`primaryDown`, `secondaryDown`, `thumbstick`) — **no new sample type, no
+parallel command mapper**. Two tiers, chosen once per session by the
+negotiated capability (never re-decided per frame):
+
+- **`BZ_QUEST_HAND_CAPABILITY_FB_AIM`** (preferred, when
+  `XR_FB_hand_tracking_aim` was negotiated): `aimOrigin`/`aimDir` come
+  directly from `XrHandTrackingAimStateFB.aimPose` (position + the local
+  −Z-forward direction, via the shared `bz_quest_quat_forward()` pure
+  helper — see below); `selectDown`/`squeezeDown` come directly from the
+  runtime's own `INDEX_PINCHING_BIT_FB`/`MIDDLE_PINCHING_BIT_FB` status
+  bits, never re-derived from a distance/strength. This matches Meta's own
+  documented guidance for the API-equivalent VrApi hand-tracking surface
+  (<https://developers.meta.com/horizon/documentation/native/android/mobile-hand-tracking/>,
+  "Pinches": *"actual triggering of a pinch event should be based on the
+  `ovrInputStateHandStatus_<finger>Pinching` bit being set... [not] the
+  `PinchStrength` field"*) — the OpenXR `XR_FB_hand_tracking_aim` bits are
+  the same underlying system-level pinch detector's status output.
+  `squeezeDown` from the **middle**-finger pinch bit is this layer's one
+  evidence-backed second pinch/grab (see "Command mapping" below) — it
+  exists because the extension itself exposes a dedicated bit for it, not
+  because this layer invented a gesture.
+- **`BZ_QUEST_HAND_CAPABILITY_EXT_ONLY`** (fallback, base extension only):
+  no aim pose or pinch bit exists at this tier, so:
+  - **Ray basis**: origin = the index fingertip
+    (`XR_HAND_JOINT_INDEX_TIP_EXT`) position; direction = the normalized
+    vector from the index metacarpal (`XR_HAND_JOINT_INDEX_METACARPAL_EXT`)
+    to the index fingertip — the finger's own, long-baseline (~8-10 cm)
+    pointing direction. This is grounded **only in tracked joint
+    positions**, deliberately never a joint's orientation quaternion: the
+    OpenXR hand-joint orientation-axis convention lives only in the spec's
+    prose "Convention of Hand Joints" section, which this environment could
+    not fetch/verify (no internet access to the ratified prose spec beyond
+    the machine-readable registry/header — see AGENTS.md's "never guess"
+    rule, which applies equally to a new piece of geometry, not just a bug
+    fix). Grounding the ray in two real joint *positions* instead needs no
+    unverified convention and is still "a stable ray basis grounded in
+    tracked joint poses" per this layer's task contract.
+  - **Pinch**: the thumb-tip/index-tip Euclidean distance, with an explicit
+    engage/release hysteresis band (`BZ_QUEST_HAND_PINCH_ENGAGE_M`=2.5 cm /
+    `BZ_QUEST_HAND_PINCH_RELEASE_M`=3.5 cm) so a fingertip gap sitting
+    between the two thresholds can never chatter `selectDown` frame to
+    frame — the same shape of hysteresis this layer's source arbitration
+    debounce uses (see below). **Unvalidated on real hardware** (no
+    physical Quest available — see "Hardware-only acceptance gates"), a
+    deliberately bounded, documented, trivially-tunable estimate, exactly
+    like this project's existing haptic-pulse/board-rate constants already
+    are.
+  - **`squeezeDown` is ALWAYS false** at this tier — no second pinch/grab
+    signal exists without `XR_FB_hand_tracking_aim`'s dedicated bit, and
+    this layer does not invent a middle-finger (or any other) distance
+    threshold to approximate one; see "Unsupported hand semantics" below.
+  - `gripPos` (the board-pan grip-pose analog) is always the wrist joint
+    (`XR_HAND_JOINT_WRIST_EXT`) position, at **either** capability tier —
+    the closest tracked point to where a physical controller actually sits
+    in the hand, and the only joint this module reads purely for its
+    position-as-a-rigid-anchor property (used for delta-drag, never for a
+    direction).
+- **`BZ_QUEST_HAND_CAPABILITY_NONE`**: `out` is fully zeroed/inactive —
+  no hand tracking this session at all.
+
+`bz_quest_hand_sample_build()` is **frame-critical**: it allocates nothing,
+locks nothing, does no file I/O, calls no bridge/transport API, and calls no
+logging function, since it runs once per hand every frame on the XR render
+thread — structurally guarded by
+`test-quest-hand-tracking-layout.sh` (mirroring
+`test-quest-audio-rt-callback-safety.sh`'s technique for the AAudio
+callback).
+
+`bz_quest_quat_forward()` (the shared −Z-forward quaternion rotation) was
+extracted from `bz_quest_xr_actions.c`'s previously-private
+`bz_quest_xr_quat_forward()` into `bz_quest_pure.h`/`.c` so both the
+controller aim ray and this layer's `XR_FB_hand_tracking_aim` ray share one
+tested implementation (AGENTS.md's DRY rule) — proven identical to the
+pre-existing rotation via `bz_quest_pose_to_view_matrix()`'s own rotation
+matrix (see `test_bz_quest_pure.c`'s
+`test_quat_forward_matches_view_matrix_rotation_column`).
+
+### Deterministic source arbitration (`bz_quest_input_state.h`'s `bzQuestInputSourceKind_t`)
+
+Per-hand, per-frame, an enum — never two booleans (AGENTS.md) — decides
+which sample (`frame->hands[h]`, the Touch controller, or
+`frame->handSample[h]`, the hand-tracking gesture) is authoritative:
+
+```
+                 controllerActive
+                        │
+        ┌───────────────┴────────────────┐
+       true                             false
+        │                                 │
+   CONTROLLER                    accumulate controllerLossSeconds
+  (loss reset to 0)                       │
+                              ┌───────────┴────────────┐
+                        was HAND already?          was CONTROLLER
+                          │        │                    │
+                      handActive  !handActive     loss>=DEBOUNCE(0.3s)
+                          │            │            &&  handActive?
+                        HAND      CONTROLLER          │        │
+                                                     true     false
+                                                      │          │
+                                                    HAND     CONTROLLER
+```
+
+- **Touch reclaims instantly** — the instant `controllerActive` is true
+  again, arbitration reports `CONTROLLER` with **no debounce**: the
+  preferred device coming back is never second-guessed.
+- **Hand takeover is debounced** (`BZ_QUEST_HAND_SOURCE_SWITCH_DEBOUNCE_SEC`
+  = 0.3 s, ~22 frames at 72 Hz): a hand sample only becomes authoritative
+  once the controller has been **continuously** inactive for the whole
+  window — a single dropped-frame controller tracking blip can never bounce
+  the source to hand and back. Unvalidated on real hardware, a deliberately
+  bounded, documented, trivially-tunable constant (see
+  `test_bz_quest_input_state.c`'s `test_arbitrate_debounces_before_handoff`/
+  `test_arbitrate_hands_off_after_debounce_elapses`, which prove the exact
+  boundary with real per-frame `dt` accumulation, not one artificial large
+  step).
+- **Losing the hand falls back to CONTROLLER immediately** (never a third
+  "none" state) — the enum's steady state then matches exactly what a
+  build with hand tracking disabled entirely already had, which is *why*
+  every one of layers 6/7's pre-existing tests keeps passing unmodified
+  with this layer stacked on top (`frame->handSample[]` defaults to fully
+  zeroed/inactive in every caller that never populates it, so arbitration
+  can never produce `HAND` there at all — see
+  `test_controller_only_frame_unaffected_by_arbitration`).
+- **A source change for either hand clears exactly once** — folded into the
+  SAME idempotent-clear check layer 6 already runs for focus loss/
+  controller loss/map reload
+  (`bz_quest_input_state_update()`'s `if (state->source[h] != newSource[h])
+  clear = true`), independent of whether `active` itself happens to blip
+  false in between (it does not always — see
+  `test_source_switch_clears_exactly_once`). This resets every edge latch
+  and the board-pan drag anchor exactly once on the switch frame
+  (`test_source_switch_clears_board_drag`), never re-fires while the new
+  source persists, and — per the SAME "reset, then the next observed
+  transition is a fresh press" rule this codebase's existing controller
+  reconnect test already establishes
+  (`test_focus_reconnect_map_reset_with_left_grip_held_never_posts`'s
+  "re-anchors (new rising edge)") — a hand sample that is *already* pressed
+  the very frame it becomes authoritative correctly fires once, then never
+  repeats while held (`test_source_switch_requires_fresh_edge_no_repeat_while_held`).
+- Arbitration happens **once, at the very top** of
+  `bz_quest_input_state_update()`, into a local `bzQuestInputFrame_t`
+  copy — every hit-test/board-manipulation/command-mapping line below is
+  byte-for-byte unchanged from layer 6/7 and never inspects which source
+  won.
+
+### Command mapping (reuses layer 6's table unchanged — no parallel state machine)
+
+| Hand gesture | Maps to (same as controller) | Capability required |
+|---|---|---|
+| Index pinch (`selectDown`) | Select / smart-point / target-point / HUD button / HUD cancel — exactly `bz_quest_input_state.c`'s existing `kTargetTable` | Either tier |
+| Middle pinch (`squeezeDown`, right hand) | Smart-entity order (mirrors right controller grip) | `FB_AIM` only |
+| Middle pinch + wrist-position drag (`squeezeDown`+`gripPos`, left hand) | Board pan (mirrors left controller grip-drag) — reuses `bz_update_board()` unchanged | `FB_AIM` only |
+| — (no hand analog) | Cancel via secondary button, board yaw/zoom/height (thumbstick), menu-reset | Neither — see below |
+
+**HUD/entity/terrain hit-test priority is completely unchanged** — a hand
+sample flows through the exact same `bz_quest_input_hit_test()` (HUD >
+disabled-consumed > nearest entity > terrain > none) layer 6 already proved,
+since arbitration hands it an identical `bzQuestInputHandSample_t` shape
+regardless of source (`test_hand_source_selects_entity_when_controller_inactive`,
+`test_hand_reaches_hud_cancel_without_secondary_button`).
+
+**Unsupported hand semantics (intentional, not bugs):**
+
+- **Cancel without a secondary button.** Hand tracking has no B/Y-button
+  analog, but cancel remains fully reachable: the HUD's own synthetic
+  Cancel region is hit-tested and selected via `selectDown` exactly like
+  any other HUD button (`BZ_QUEST_INPUT_HIT_HUD_CANCEL` →
+  `BZ_QUEST_INPUT_CMD_CANCEL`) — `secondaryDown` simply always stays false
+  for a hand sample, and the redundant hardware-button shortcut just never
+  fires for hands (proven directly by
+  `test_hand_reaches_hud_cancel_without_secondary_button`).
+- **Board rotate/zoom/height (thumbstick-driven) is controller-only.**
+  OpenXR hand-tracking joints provide poses only, no 2-axis analog-stick
+  equivalent — `bzQuestInputHandSample_t.thumbstick` is always `{0,0}` for
+  a hand sample (`test_hand_only_frame_cannot_rotate_zoom_or_height_board`
+  proves this holds even with both hands fully hand-tracked and active).
+  Left-hand grip-drag PAN, by contrast, has a natural hand equivalent
+  (`squeezeDown`+`gripPos`, see the table above) and IS reachable at the
+  `FB_AIM` tier.
+- **Menu-reset (left menu click) is controller-only.**
+  `XR_HAND_TRACKING_AIM_MENU_PRESSED_BIT_FB` exists in the OpenXR registry,
+  but this layer deliberately does **not** wire it to the board-reset
+  action: its precise trigger semantics are not described anywhere this
+  environment could verify (only the bit's name, not ratified prose), and
+  it sits immediately adjacent to the reserved
+  `XR_HAND_TRACKING_AIM_SYSTEM_GESTURE_BIT_FB` in the same status mask —
+  mirroring this project's existing "reserved-button rule" (the Oculus/
+  system button is never bound on controllers either), the conservative,
+  evidence-respecting choice is to leave it unmapped rather than guess.
+  Menu-reset remains reachable via the left Touch controller.
+- **A second pinch/grab is EXT-only-tier absent, not invented.** With only
+  `XR_EXT_hand_tracking` negotiated, there is no dedicated second-pinch
+  signal at all — this layer does not approximate one via a middle-finger
+  distance threshold of its own (which would be indistinguishable from
+  "inventing a gesture" the task explicitly forbids); `squeezeDown` simply
+  stays false, and smart-entity/board-pan remain controller-only at that
+  capability level.
+- **No hand mesh.** Neither `XR_MSFT_hand_tracking_mesh` nor
+  `XR_FB_hand_tracking_mesh` is referenced anywhere in this layer — out of
+  scope per the task contract ("do not add hand mesh rendering unless
+  required"), structurally guarded (see below).
+
+### Rendering (reuses layer 6's pointer/reticle unchanged)
+
+This layer adds **no new shader, no new Vulkan pipeline, and no new
+renderer module.** `bz_quest_vk_wc3_pointer.c` (layer 6) already draws a
+per-hand ray + hit-kind-tinted reticle from `bzQuestInputFeedback_t`; the
+only change is where that struct's per-hand aim ray now comes from.
+Previously the renderer re-read its own `frame.hands[h]` (the raw,
+pre-arbitration Touch sample) to build the beam/reticle geometry — a latent
+bug this layer's own implementation surfaced and fixed: once arbitration
+can legitimately swap in a hand's sample, re-reading the controller-only
+copy would show the ray frozen at the (possibly inactive) controller's last
+pose instead of following the hand. `bzQuestInputFeedback_t` now also
+carries the **arbitrated** `aimOrigin`/`aimDir` per hand (populated by the
+same `bz_hand_hit()` that already computes `visible`/`hitKind`/`reticle`
+from the resolved sample), and `bz_quest_renderer_process_input()` reads
+those instead of `frame.hands[]` directly — this is the one minimal,
+hand-specific addition to feedback state the task's "reuse existing
+pointer/HUD rendering" scope permits, not a new rendering path. The
+reticle's hit-kind tint (amber HUD, green entity, cyan terrain, dim
+no-hit) is unchanged and applies identically regardless of source.
+
+### Quest-vs-visionOS differences (intentional, documented, not gaps)
+
+- **visionOS's direct/indirect pinch model does not fully carry over.**
+  visionOS's `TabletopControls.swift` distinguishes a *direct* pinch (hand
+  reaching into a UI element's hit volume) from an *indirect* pinch (a
+  pinch performed anywhere, aimed via gaze/hand ray at a distant target) —
+  RealityKit provides both natively. OpenXR's `XR_FB_hand_tracking_aim`
+  gives Quest an **indirect-only** model: one synthesized aim ray + pinch
+  bits, with no separate "am I reaching into this element" signal. This
+  layer therefore only implements the indirect-equivalent path (ray +
+  pinch, exactly like a controller trigger), and does not attempt to
+  fabricate a direct/proximity pinch Quest's OpenXR surface cannot prove —
+  matching this project's "match visionOS ... only where Quest can prove
+  parity" contract.
+- **No hand mesh/skeleton visualization**, unlike some visionOS reference
+  hand-presence UIs — out of scope for this layer, and this project's
+  in-game HUD/board rendering never needed one for controllers either.
+- **Second pinch/grab exists on Quest (middle-finger bit) but not on
+  visionOS's ARKit hand-tracking surface** (which exposes only a single
+  index-pinch-equivalent chirality gesture) — Quest's `FB_AIM` tier is
+  therefore *more* capable here, not less; this asymmetry is called out
+  explicitly rather than silently matched or silently ignored.
+
+### Supported vs. unsupported behavior
+
+| Behavior | Status |
+|---|---|
+| Index pinch → select/smart-point/target-point/HUD button/HUD cancel, both hands, either capability tier | Supported |
+| Middle pinch → smart-entity (right) / board-pan (left, with wrist-position drag) | Supported — `XR_FB_hand_tracking_aim` only |
+| Deterministic Touch-preferred, hysteresis-debounced source arbitration per hand | Supported |
+| HUD > entity > terrain hit-test priority, identical regardless of source | Supported |
+| Ray/reticle visualization for hand-sourced input, reusing layer 6's pointer pipeline | Supported |
+| Board yaw/zoom/height (thumbstick), menu-reset | **Controller-only** — no reliable hand-tracking analog exists (see "Unsupported hand semantics") |
+| Cancel via a dedicated hand gesture | **Not needed** — reachable via the HUD's own Cancel region instead |
+| A second pinch/grab without `XR_FB_hand_tracking_aim` | **Not implemented** — no evidence-backed signal exists at the EXT-only tier; not approximated |
+| Hand mesh/skeleton rendering | **Out of scope** for this layer |
+| Direct (proximity) pinch, matching visionOS's dual pinch model | **Not implemented** — OpenXR's `XR_FB_hand_tracking_aim` exposes only an indirect-equivalent ray+pinch model |
+
+### Tests and build wiring
+
+- `platform/android/quest/tests/test_bz_quest_hand_input.c` — the pure
+  gesture-builder suite (22 tests): both hands independently, capability
+  NONE/EXT_ONLY/FB_AIM, tracker active/inactive, every joint individually
+  valid/invalid (including a degenerate zero-length ray-direction
+  rejection), the FB-aim path (index/middle pinch bits used directly, aim
+  pose passthrough, aim-invalid producing no output), the EXT-only path
+  (ray basis from real joint positions, pinch engage/release/no-chatter
+  hysteresis at and around both thresholds, thumb-validity gating,
+  `squeezeDown` always false), tracker loss/reacquisition requiring a fresh
+  ENGAGE crossing (never resuming from a mid-hysteresis gap), and the
+  intentionally-zero unsupported fields (`primaryDown`/`secondaryDown`/
+  `thumbstick`).
+- `platform/android/quest/tests/test_bz_quest_input_state.c` — extended
+  with 16 new arbitration/integration tests: the `bz_quest_input_arbitrate_source()`
+  state machine directly (instant controller reclaim, debounced handoff
+  with real per-frame `dt` accumulation, no handoff without an active hand,
+  falling back from HAND when the hand itself drops, no re-debounce once
+  already on HAND), then full `bz_quest_input_state_update()` integration:
+  a hand pinch selecting an entity once the controller is inactive long
+  enough, the controller winning even when a hand is simultaneously
+  pressed, exactly-once clearing on a source switch (with the precise
+  float-accumulation boundary verified, not assumed), a fresh-edge-fires-
+  once-then-no-repeat switch, a board-pan drag dropped by a switch, a hand
+  driving board-pan via middle-pinch+wrist-drag, hands unable to
+  rotate/zoom/height the board, cancel reachable via a hand pinch at the
+  HUD's Cancel region without ever touching `secondaryDown`, and an
+  explicit "controller-only frame behaves exactly as before" regression
+  guard. **All pre-existing layer 6/7 tests in this file pass completely
+  unmodified** — every one leaves `frame.handSample[]` at its zeroed
+  default, so arbitration can only ever resolve to `CONTROLLER` there (see
+  "Deterministic source arbitration" above for why this is provably true,
+  not merely observed).
+- `platform/android/quest/tests/test_bz_quest_pure.c` — 4 new tests for the
+  extracted `bz_quest_quat_forward()` helper (identity, a 90° yaw case
+  cross-checked by hand, a cross-check against
+  `bz_quest_pose_to_view_matrix()`'s own rotation matrix at a non-trivial
+  quaternion, and a unit-length invariant).
+- All of the above run under `make test-quest-host-tests` — **5243/5243
+  assertions pass** (up from the base branch's 5107/5107 — 136 new
+  assertions across 42 new test functions), see "What was verified this
+  session" below for the exact command output.
+- `platform/android/quest/scripts/test-quest-hand-tracking-layout.sh` (wired
+  into `make test`/`make quest` as `test-quest-hand-tracking-layout`)
+  structurally guards: the CMakeLists.txt source list; that both extension
+  names are probed and the aim extension is only ever gated alongside the
+  base extension (never standalone); that `bz_quest_xr_hands_create()`'s
+  unsupported-capability path returns `true` (never fails startup); that
+  `xrCreateHandTrackerEXT`/`xrDestroyHandTrackerEXT` are present, paired,
+  and `XR_NULL_HANDLE`-guarded; that `xrLocateHandJointsEXT` is called
+  exactly once, gated on the same focus/session-running check the action
+  module uses; that `bz_quest_hand_sample_build()`'s body contains no
+  allocation/lock/log/file/bridge call (mirroring
+  `test-quest-audio-rt-callback-safety.sh`'s technique for the real-time
+  audio callback); that the renderer wires create/sync/destroy and destroys
+  hand trackers strictly before the OpenXR session/instance; that no
+  hand-mesh extension/type is referenced anywhere; and that the manifest
+  declares the permission/feature with the feature marked optional. Two
+  violations were deliberately injected and confirmed caught by this
+  script during development, then reverted (a forbidden `malloc()` inside
+  the frame-critical gesture builder, and a reversed hand-tracker/session
+  teardown order) — see this repository's PR description for the exact
+  evidence.
+- `CMakeLists.txt`'s `bz_quest_native` source list includes the two new
+  `.c` files (`bz_quest_hand_input.c`, `bz_quest_xr_hands.c`). No new
+  compile-time `BZ_QUEST_ENABLE_*` seam was added — see "Capability
+  negotiation" above for why.
+
+### Acceptance gates
+
+This layer's **pure** logic (gesture builder, source arbitration, command
+mapping reuse) is fully host-verified by the tests above. The **impure**
+OpenXR hand-tracking glue was compiled/linked for the real arm64-v8a target
+via the project's Gradle/CMake build and checked by
+`quest-verify-native-lib`, but was **not** run on a physical device — see
+"Hardware-only acceptance gates" below, which now also lists every
+hand-tracking-specific item that requires real Quest 3/3S hardware+OS-level
+hand tracking to actually confirm.
+
+### Troubleshooting
+
+- **Hand rays never appear on-device.** Check, in order: (1) the Quest
+  OS-level "Hands and Controllers" setting has hand tracking enabled for
+  this app/account (a manifest-only requirement cannot force this); (2)
+  logcat for `"XR_EXT_hand_tracking not supported this session"` (capability
+  negotiation failed — either the manifest permission/feature is missing,
+  the runtime doesn't advertise the extension, or the system genuinely
+  reports no support); (3) that at least one controller is actually
+  inactive/put-down long enough (0.3 s) for arbitration to hand off — while
+  a controller is tracked, hands are correctly never consulted.
+- **Ray direction looks wrong at the EXT-only tier.** This tier's ray
+  direction is the index-metacarpal→index-tip vector, not a joint
+  orientation — check the physical index finger's own pointing direction,
+  not the palm's facing direction; these can visibly differ when the
+  finger is curled.
+- **Middle-pinch smart-entity/board-pan never triggers.** Confirm
+  `XR_FB_hand_tracking_aim` is actually negotiated (logcat: `"hand tracking
+  enabled (XR_FB_hand_tracking_aim)"` vs. `"... (XR_EXT_hand_tracking
+  only)"`) — this gesture is intentionally EXT-only-tier absent, not a bug.
+- **A hand ray flickers on/off rapidly.** Expected at the very edge of the
+  hand-tracking camera's field of view or under poor lighting — the
+  `isActive`/joint-validity bits are read as-is every frame, with no
+  additional smoothing beyond the documented pinch-distance and
+  source-switch hysteresis bands (see "Deterministic source arbitration").
+
+### Exact on-device acceptance procedure (requires a connected Quest 3/3S)
+
+```sh
+# 1. Build + install (see "Build/run/log commands" above for env setup).
+make quest-assemble-debug
+adb install -r platform/android/quest/app/build/outputs/apk/debug/app-debug.apk
+# 2. Confirm the device/account has hand tracking enabled in Quest OS
+#    settings (Settings > Movement Tracking > Hands and Controllers), then
+#    launch and tail this app's log tag.
+adb shell am start -n <package>/android.app.NativeActivity
+adb logcat -s bz_quest_native:V
+# 3. With a real map loaded, verify by hand (each is hardware-only, unproven here):
+#    - logcat shows "hand tracking enabled (...)" once at startup, never
+#      per-frame, and shows which capability tier (EXT-only vs FB aim);
+#    - putting BOTH controllers down: after a brief (~0.3s) pause, both hand
+#      rays appear, tinted/behaving identically to the controller rays they
+#      replaced (amber HUD, green entity, cyan terrain, dim no-hit);
+#    - an index pinch aimed at a unit selects it (a LATER-frame selection
+#      marker, never instant/local); aimed at empty terrain issues a
+#      smart-point order; aimed at a command-card button posts its action;
+#      aimed at the HUD Cancel region cancels - all with no B/Y button;
+#    - (if XR_FB_hand_tracking_aim is active - check logcat) a right-hand
+#      middle pinch over a unit issues a smart-entity order; a left-hand
+#      middle pinch + physical hand drag pans the board (grip-drag feel,
+#      not a controller trigger feel);
+#    - board rotate/zoom/height (right/left thumbstick equivalents) do NOT
+#      respond to any hand gesture - picking a controller back up restores
+#      them instantly;
+#    - picking a controller back up INSTANTLY reclaims that hand's ray (no
+#      debounce), with no phantom command fired from whatever the hand was
+#      doing the instant before;
+#    - removing the headset (focus loss) and putting it back on resumes
+#      cleanly with no stuck/latched hand-sourced command;
+#    - capture a bounded logcat window (e.g. `adb logcat -d -s
+#      bz_quest_native:V | tail -500`) across a hand-tracking session and
+#      confirm no per-frame hand-tracking log line appears - only the
+#      one-time "hand tracking enabled"/capability-unavailable line and any
+#      once-logged xrLocateHandJointsEXT failure.
+```
+
+**No physical Meta Quest device was available in this development
+environment** — every item in this procedure is written from the OpenXR
+1.1.49 registry/headers, Meta's own hand-tracking guidance, and this
+layer's own pure-logic test evidence, not from having run it. Do not report
+any of it as confirmed until checked on real hardware.
+
 ## Manifest requirements
 
 Unchanged from layer 2: `AndroidManifest.xml`'s NativeActivity metadata,
@@ -3235,7 +3797,14 @@ Unchanged from layer 2: `AndroidManifest.xml`'s NativeActivity metadata,
 `uses-feature` were verified against Meta's mobile-native manifest guidance
 (<https://developers.meta.com/horizon/documentation/native/android/mobile-native-manifest/>).
 No `horizonos:uses-horizonos-sdk` element (Spatial SDK panel-app specific,
-not applicable to a plain OpenXR NativeActivity app).
+not applicable to a plain OpenXR NativeActivity app). **New this layer**:
+`com.oculus.permission.HAND_TRACKING` and the optional
+(`android:required="false"`) `oculus.software.handtracking` `uses-feature`
+were verified against Meta's hand-tracking guidance
+(<https://developers.meta.com/horizon/documentation/native/android/mobile-hand-tracking/>)
+— see "[Layer 8](#layer-8-meta-quest-hand-tracking-bz_quest_xr_handsc-bz_quest_hand_inputc-bz_quest_input_statec)"'s
+"Capability negotiation" above for the full citation and why `required` is
+explicitly `false` here.
 
 ## Package/app identifiers
 
@@ -3251,10 +3820,12 @@ compile-time `#error`-guarded seam in `bz_quest_host.c`
 ever grows a real in-app meaning, instead of a silent stub reporting fake
 success. `BZ_QUEST_ENABLE_VULKAN_RENDERER`, `BZ_QUEST_ENABLE_ENGINE_START`,
 `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS`, `BZ_QUEST_ENABLE_WC3_RENDERER`,
-`BZ_QUEST_ENABLE_INPUT`, and (new this layer) `BZ_QUEST_ENABLE_AUDIO` are
-now all hard-required to `1` (a `#error` fires if a build tries to set any
-of them to `0`) since the Warcraft renderer, procedural renderer, tabletop
-bridge, OpenXR Touch input, and AAudio output are no longer optional:
+`BZ_QUEST_ENABLE_INPUT`, and `BZ_QUEST_ENABLE_AUDIO` are all hard-required to
+`1` (a `#error` fires if a build tries to set any of them to `0`) since the
+Warcraft renderer, procedural renderer, tabletop bridge, OpenXR Touch input,
+and AAudio output are no longer optional. **Layer 8 (hand tracking) adds no
+new compile-time seam at all** — see its "Capability negotiation" section
+above for why runtime OpenXR negotiation replaces a compile-time gate here:
 
 - Touch-controller input (layer 6) and AAudio output (layer 7) are now both
   present. War3 MPQ data staging is provided as a developer-time ADB script
@@ -3263,6 +3834,15 @@ bridge, OpenXR Touch input, and AAudio output are no longer optional:
   rather than an in-app feature — this is a deliberate design choice (the
   user's own purchased game data is never bundled/copied by this project),
   not a gap.
+- **Hand tracking (layer 8) is now present, alongside Touch controllers,
+  never replacing them.** Optional `XR_EXT_hand_tracking`/
+  `XR_FB_hand_tracking_aim` capability negotiation, per-hand
+  `XrHandTrackerEXT` lifecycle, the pure gesture builder, and deterministic
+  Touch-preferred source arbitration are all implemented and fully
+  host-tested (see [Layer 8](#layer-8-meta-quest-hand-tracking-bz_quest_xr_handsc-bz_quest_hand_inputc-bz_quest_input_statec)
+  above) — but no physical Quest device was available to confirm any of it
+  actually tracks/pinches/arbitrates correctly against a real hand; a hand
+  mesh/skeleton is intentionally never rendered.
 - **Staged TFT archives are now mounted at runtime.** `bz_quest_data_build_argv()`
   emits the `"-tft"` dash-flag when `bz_quest_data_detect_edition()` finds a
   `War3x*.mpq` in the resolved directory, so `fs_expansion` is `1` before
@@ -3432,6 +4012,43 @@ against a real device:
     from the WAVE spec and tested against synthetic fixture bytes built to
     match those rules, not against a real extracted Warcraft III `.wav`
     file (none was available in this environment).
+- **New this layer (8)** — none of the following was verified against a
+  real Meta Quest device or a real human hand; **do not report any of these
+  as confirmed** until checked on real Quest 3/3S hardware with hand
+  tracking enabled (see "Exact on-device acceptance procedure" in
+  [Layer 8](#layer-8-meta-quest-hand-tracking-bz_quest_xr_handsc-bz_quest_hand_inputc-bz_quest_input_statec)
+  above):
+  - Whether `xrCreateHandTrackerEXT`/`xrLocateHandJointsEXT` actually
+    succeed and return plausible joint data against a real Quest 3/3S
+    OpenXR runtime with hand tracking enabled at the OS level — only
+    compile-time/syntax-verified against the extracted OpenXR AAR headers
+    (and against the real NDK/Vulkan headers via a syntax-only cross-
+    compile) on this machine, never executed against a runtime.
+  - Whether `XR_FB_hand_tracking_aim` is actually negotiated/populated by a
+    real Quest 3/3S runtime, and whether its `aimPose`/pinch bits feel
+    accurate and responsive to a real human hand — this session could not
+    determine which capability tier a real device would even reach.
+  - Whether the EXT-only fallback's joint-position-only ray basis and
+    pinch-distance thresholds (`BZ_QUEST_HAND_PINCH_ENGAGE_M`/`_RELEASE_M`)
+    feel natural/accurate against a real hand — these are documented,
+    bounded estimates verified only against synthetic fixture geometry in
+    `test_bz_quest_hand_input.c`, never against real hand-tracking camera
+    output.
+  - Whether the 0.3 s controller-vs-hand source-arbitration debounce
+    (`BZ_QUEST_HAND_SOURCE_SWITCH_DEBOUNCE_SEC`) feels responsive/correct
+    in practice (avoids visible oscillation without feeling sluggish when
+    setting a controller down) — only proven not to oscillate against
+    synthetic per-frame `dt` sequences on the host.
+  - Whether a real controller-to-hand or hand-to-controller handoff, mid-
+    gameplay, ever produces a visually/functionally surprising result (a
+    ray jump, a missed press, a double-fire) that the pure state machine's
+    test suite did not anticipate — only the documented, tested transitions
+    were exercised.
+  - Whether removing/wearing the headset (focus loss/regain) while hands
+    (not controllers) are the active source behaves identically to the
+    already-verified controller focus-loss/regain path — the underlying
+    clear mechanism is shared and host-tested, but the full real Android/
+    OpenXR event sequence with hands active was never exercised on-device.
 
 ### Hardware/data-only acceptance procedure
 
@@ -3826,6 +4443,96 @@ three, in new commits on the same branch (no history rewritten):
   hardware after a real `adb`-transferred stage remains a hardware/data
   acceptance item — see "Hardware/data-only acceptance procedure" above.
 
+### What *was* verified this session (layer 8)
+
+- `platform/android/quest/tests/test_bz_quest_hand_input.c` (22 tests) and
+  the 16 new arbitration/integration tests appended to
+  `test_bz_quest_input_state.c`, plus 4 new `bz_quest_quat_forward()` tests
+  in `test_bz_quest_pure.c`, were iterated to green against real, by-hand-
+  computed expected values (not assumed) — including two of this session's
+  own mistakes caught with independent evidence rather than guessed at: an
+  initial (wrong) assumption about which `bz_quest_pose_to_view_matrix()`
+  output indices correspond to the shared quaternion-forward rotation was
+  caught and corrected via a standalone Python cross-check *before* that
+  test was ever run for the first time; and an initial (wrong) assumption
+  about which controller-inactive frame the 0.3 s/0.1 s-per-frame source-
+  switch debounce accumulator actually crosses its threshold on was caught
+  by a genuine failing `make test-quest-host-tests` run, root-caused with a
+  standalone float-accumulation check (not guessed), then fixed and
+  re-verified green.
+- `make test-quest-host-tests` passes at **5243/5243** assertions (up from
+  the base branch's 5107/5107 — 136 new assertions across 42 new test
+  functions, zero regressions in any pre-existing test).
+- Every impure new/modified file (`bz_quest_xr.c`, `bz_quest_xr_hands.c`,
+  `bz_quest_hand_input.c`, `bz_quest_xr_actions.c`, `bz_quest_renderer.c`)
+  was syntax-checked with the real NDK 27.2.12479018 `clang`
+  (`--target=aarch64-linux-android29 -fsyntax-only`) against the real,
+  extracted `openxr_loader_for_android:1.1.49` AAR headers and the NDK's
+  own bundled Vulkan headers, with zero errors, before attempting the full
+  Gradle build.
+- A real arm64-v8a Gradle/CMake `assembleDebug` (Temurin JDK 17,
+  `ANDROID_HOME`/NDK 27.2.12479018 exactly as documented in
+  "Prerequisites") reports **`BUILD SUCCESSFUL`**, compiling every new/
+  modified Quest `.c` file for the first time under the real toolchain with
+  no warnings/errors beyond this project's existing baseline.
+- `scripts/verify-native-lib.sh` passes against the built APK:
+  **`verified quest arm64-v8a native library:
+  lib/arm64-v8a/libbz_quest_native.so`**. Manual `llvm-readelf -d`
+  inspection of the extracted `.so` confirms the `DT_NEEDED` set is
+  **byte-for-byte unchanged** from before this layer
+  (`libopenxr_loader.so`, `libvulkan.so`, `libaaudio.so`, `libandroid.so`,
+  `liblog.so`, `libz.so`, `libm.so`, `libdl.so`, `libc.so`) — no new shared-
+  library dependency was introduced, confirming the hand-tracking functions
+  are resolved purely via the pre-existing `xrGetInstanceProcAddr`
+  mechanism (confirmed present as an undefined dynamic symbol via
+  `llvm-nm -D --undefined-only`), never a new direct link dependency.
+- The new `test-quest-hand-tracking-layout.sh` structural guard was proven
+  to actually catch a real defect twice, in two separate deliberate
+  injection/revert cycles during this session: (1) a `malloc()` call
+  injected into `bz_quest_hand_sample_build()`'s body was initially **missed**
+  by a first draft of the script's function-body-extraction logic (which
+  anchored on the bare substring "bz_quest_hand_sample_build(" and matched
+  this very file's own header-comment prose mention of the function name
+  before its real definition) — the extraction was fixed to anchor on a
+  line actually starting the declaration, re-verified to catch the same
+  injected `malloc()`, then the injection was reverted and the script
+  re-confirmed clean; (2) a deliberately reversed hand-tracker/session
+  teardown order in `bz_quest_renderer_shutdown()` was caught immediately,
+  then reverted and re-confirmed clean. Separately, and organically (not a
+  deliberate test of the guard), this same script caught a **real,
+  unintentional bug** in this session's first draft of
+  `bz_quest_renderer_shutdown()`: `bz_quest_xr_hands_destroy()` was never
+  called at all — fixed immediately upon the guard's first real run.
+- `make test-quest-source-sync`, `test-quest-wc3-descriptor-pool-headroom`,
+  `test-quest-wc3-bone-palette-layout`, `test-quest-wc3-fog-selection-layout`,
+  `test-quest-wc3-hud-layout`, `test-quest-wc3-pointer-layout`,
+  `test-quest-hand-tracking-layout`, and `test-quest-audio-rt-callback-safety`
+  all pass with no regressions.
+- `make test-quest-bridge` passes at **95/95** assertions, unchanged from
+  the base branch (this layer does not touch `bz_quest_bridge.c`).
+- The full repo-root `make test` passes end-to-end (`EXIT_CODE=0`),
+  covering every WC3/WoW/SC2/tool/Quest suite in the repository with no
+  `FAIL` anywhere, confirmed by redirecting the complete run to a log file
+  and grepping it exhaustively rather than trusting a truncated terminal
+  scrollback.
+- `git diff --cached --check clancey-quest-data-staging-audio` (the full
+  staged changeset, including every new file) reports zero whitespace
+  errors.
+- **Not verified this session** (unavoidable, no hardware available): every
+  item listed under "Hardware-only acceptance gates"' "New this layer (8)"
+  subsection above — no physical Meta Quest device, no real human hand, and
+  therefore no real `xrCreateHandTrackerEXT`/`xrLocateHandJointsEXT` call,
+  no real `XR_FB_hand_tracking_aim` negotiation, and no real pinch/aim/
+  source-switch feel were ever exercised. `make run-sc2
+  ARGS="+com_frame_limit 100"` (an unrelated repository-wide smoke check
+  this task's validation checklist also requires) fails in this environment
+  with "Failed to add data directory: data/StarCraft2" — a pre-existing
+  environment characteristic (no StarCraft II data present at all, exactly
+  like every other "no retail game data in this environment" caveat already
+  documented throughout this file), confirmed unrelated to this layer by
+  `git status` showing zero files touched outside `docs/` and
+  `platform/android/quest/`.
+
 ## Related documents
 
 - [visionos-tabletop.md](visionos-tabletop.md) — the shared
@@ -3913,3 +4620,33 @@ three, in new commits on the same branch (no history rewritten):
   priority callback threads, format/sample-rate query-after-open,
   disconnect/error-callback threading rules, stream close semantics):
   <https://developer.android.com/ndk/guides/audio/aaudio/aaudio>
+- OpenXR API registry (`xr.xml`), the canonical machine-readable source for
+  extension numbers/dependencies/enum-offset math: fetched from
+  <https://raw.githubusercontent.com/KhronosGroup/OpenXR-SDK-Source/main/specification/registry/xr.xml>
+  — `XR_EXT_hand_tracking` (`number="52"`, no dependency), `XR_FB_hand_tracking_aim`
+  (`number="112"`, `depends="XR_VERSION_1_0+XR_EXT_hand_tracking"`), and the
+  `1000000000 + (extnumber-1)*1000 + offset` enum-value formula cited above
+  (verified by hand-computing `XR_TYPE_HAND_TRACKING_AIM_STATE_FB`'s
+  `1000111001` from `number="112"` offset `1`).
+- The bundled `org.khronos.openxr:openxr_loader_for_android:1.1.49`
+  `openxr.h`/`openxr_platform.h` headers (same Maven Central artifact/AAR
+  cited above for the loader) — the primary source for every `Xr*` type/
+  enum/function-pointer this layer's `bz_quest_xr_hands.c` uses
+  (`XrHandTrackerEXT`, `XrHandJointEXT`, `XR_HAND_JOINT_COUNT_EXT=26`,
+  `XrHandTrackerCreateInfoEXT`, `XrHandJointsLocateInfoEXT`,
+  `XrHandJointLocationEXT`/`XrHandJointLocationsEXT`,
+  `XrSystemHandTrackingPropertiesEXT`, `XrHandTrackingAimStateFB`/
+  `XrHandTrackingAimFlagsFB` and its `COMPUTED`/`VALID`/`INDEX_PINCHING`/
+  `MIDDLE_PINCHING`/`SYSTEM_GESTURE`/`DOMINANT_HAND`/`MENU_PRESSED` bits,
+  `xrCreateHandTrackerEXT`/`xrDestroyHandTrackerEXT`/`xrLocateHandJointsEXT`),
+  extracted and inspected directly from the AAR's
+  `prefab/modules/headers/include/openxr/` Prefab module rather than assumed.
+- Meta's hand-tracking guidance (manifest permission/feature requirement;
+  the "trust the runtime's `*Pinching` status bit, not the raw strength"
+  pinch-detection guidance this layer's `FB_AIM` tier follows):
+  <https://developers.meta.com/horizon/documentation/native/android/mobile-hand-tracking/>
+  (VrApi-surfaced documentation — this project links no VrApi code, per
+  AGENTS.md; the manifest gate is an Android/system-level requirement
+  independent of which API subsequently reads the hand data, and the
+  pinch-bit-over-strength guidance reflects the same underlying Quest
+  system-level pinch detector both APIs expose).

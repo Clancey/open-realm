@@ -24,6 +24,16 @@
  * so this seam stays permanently off (an #error fires if a build ever tries
  * to flip it to 1 - see below).
  *
+ * Layer 8 adds Meta Quest HAND TRACKING (bz_quest_xr_hands.h/.c,
+ * bz_quest_hand_input.h/.c) as an addition to the existing
+ * BZ_QUEST_ENABLE_INPUT layer, NOT a new compile-time seam: unlike every
+ * seam below, hand-tracking capability is negotiated at OpenXR runtime
+ * (instance-extension enumeration + system-property query - see
+ * bz_quest_xr.h's bzQuestXrHandCapability_t), never at compile time, so
+ * there is nothing here for an #error gate to guard - the same always-built
+ * bz_quest_xr_hands_create()/_sync() simply no-op into "Touch-only" on a
+ * runtime/device/account without it. See docs/quest-tabletop.md's "Layer 8".
+ *
  * Each seam below is a real compile-time gate: flipping one on without also
  * providing its implementation fails the build with a clear #error instead
  * of silently linking a no-op stub or reporting fake success. A later layer

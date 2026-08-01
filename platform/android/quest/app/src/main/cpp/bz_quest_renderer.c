@@ -90,6 +90,11 @@ bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer
     if (!bz_quest_vk_wc3_pointer_create(vk, &renderer->wc3Pointer)) goto fail;
     bz_quest_input_state_init(&renderer->inputState);
 
+    /* Layer 8: optional hand tracking (needs session, created above) - see
+     * bz_quest_xr_hands_create()'s header comment for why this can never
+     * itself cause renderer init to fail. */
+    if (!bz_quest_xr_hands_create(xr, &renderer->xrHands)) goto fail;
+
     BZ_QUEST_LOGI("renderer init complete");
     return true;
 
@@ -149,11 +154,13 @@ static void bz_quest_renderer_pointer_tint(bzQuestInputHitKind_t kind, float out
  * shows where the controller points. */
 #define BZ_QUEST_RENDERER_POINTER_FALLBACK_LEN 2.5f
 
-/* Layer 6 per-frame input: capture the interaction world, read the Touch
- * actions at `displayTime`, run the pure state machine, post the decided
- * command + haptic, and build this frame's ray/reticle geometry (in tracking
- * space) plus the board model matrix folded into the world view*projection.
- * Runs once per frame (not per eye). */
+/* Layer 6 (+layer 8) per-frame input: capture the interaction world, read
+ * the Touch actions AND the optional hand-tracking samples at `displayTime`,
+ * run the pure state machine (which arbitrates controller-vs-hand per hand
+ * before anything else), post the decided command + haptic, and build this
+ * frame's ray/reticle geometry (in tracking space) plus the board model
+ * matrix folded into the world view*projection. Runs once per frame (not per
+ * eye). */
 static void bz_quest_renderer_process_input(bzQuestRenderer_t *renderer, XrTime displayTime,
                                             float outBoardMatrix[16]) {
     bzQuestXr_t *xr = &renderer->xr;
@@ -167,6 +174,13 @@ static void bz_quest_renderer_process_input(bzQuestRenderer_t *renderer, XrTime 
     renderer->lastDisplayTime = displayTime;
 
     bz_quest_xr_actions_sync(xr, &renderer->xrActions, displayTime, &frame);
+    /* Layer 8: optional hand-tracking sample per hand, alongside the Touch
+     * sample above - bz_quest_input_state_update() arbitrates between the
+     * two per hand (see bz_quest_input_state.h's bz_quest_input_arbitrate_source()).
+     * A no-op (leaves frame.handSample[] zeroed/inactive) whenever hand
+     * tracking is unsupported or this session isn't focused - see
+     * bz_quest_xr_hands_sync()'s header comment. */
+    bz_quest_xr_hands_sync(xr, &renderer->xrHands, displayTime, &frame);
 
     frame.world.hudFrame = bz_quest_vk_wc3_hud_has_frame(&renderer->wc3Hud)
                                ? bz_quest_vk_wc3_hud_frame(&renderer->wc3Hud)
@@ -198,14 +212,20 @@ static void bz_quest_renderer_process_input(bzQuestRenderer_t *renderer, XrTime 
 
     /* Build ray/reticle geometry in tracking space: reticle points come out of
      * the pure hit-test in COMPOSED space, so map them back into tracking
-     * space with the SAME board transform the board geometry uses. */
+     * space with the SAME board transform the board geometry uses. Layer 8:
+     * the aim origin/dir come from out.feedback (the ARBITRATED sample -
+     * controller or hand, whichever bz_quest_input_arbitrate_source() picked
+     * this frame), never from re-reading frame.hands[] directly - that array
+     * is this function's own pre-arbitration Touch sample and is never
+     * touched by bz_quest_input_state_update()'s internal arbitration (which
+     * operates on its own private copy) - see bzQuestInputFeedback_t's
+     * header comment. */
     bzQuestVkWc3PointerHand_t hands[BZ_QUEST_INPUT_HAND_COUNT];
     memset(hands, 0, sizeof(hands));
     for (int h = 0; h < BZ_QUEST_INPUT_HAND_COUNT; ++h) {
-        const bzQuestInputHandSample_t *sample = &frame.hands[h];
-        hands[h].visible = out.feedback.visible[h] && sample->aimValid;
+        hands[h].visible = out.feedback.visible[h];
         if (!hands[h].visible) continue;
-        memcpy(hands[h].rayStart, sample->aimOrigin, sizeof(hands[h].rayStart));
+        memcpy(hands[h].rayStart, out.feedback.aimOrigin[h], sizeof(hands[h].rayStart));
         if (out.feedback.hasReticle[h]) {
             float tracking[3];
             bz_quest_board_transform_apply_point(&renderer->inputState.board, out.feedback.reticle[h],
@@ -215,8 +235,8 @@ static void bz_quest_renderer_process_input(bzQuestRenderer_t *renderer, XrTime 
             hands[h].hasReticle = true;
         } else {
             for (int k = 0; k < 3; ++k)
-                hands[h].rayEnd[k] =
-                    sample->aimOrigin[k] + sample->aimDir[k] * BZ_QUEST_RENDERER_POINTER_FALLBACK_LEN;
+                hands[h].rayEnd[k] = out.feedback.aimOrigin[h][k] +
+                                     out.feedback.aimDir[h][k] * BZ_QUEST_RENDERER_POINTER_FALLBACK_LEN;
             hands[h].hasReticle = false;
         }
         bz_quest_renderer_pointer_tint(out.feedback.hitKind[h], hands[h].tint);
@@ -506,10 +526,13 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
 void bz_quest_renderer_shutdown(bzQuestRenderer_t *renderer) {
     /* Layer 6 first: clear any latched interaction state exactly once, then
      * release the ray pipeline and the OpenXR action set (before the session
-     * is destroyed by bz_quest_xr_destroy() below). */
+     * is destroyed by bz_quest_xr_destroy() below). Layer 8's hand trackers
+     * are destroyed alongside, same ordering requirement (before the
+     * session/instance). */
     bz_quest_input_state_clear(&renderer->inputState, /*resetBoard=*/true);
     bz_quest_vk_wc3_pointer_destroy(&renderer->wc3Pointer);
     bz_quest_xr_actions_destroy(&renderer->xr, &renderer->xrActions);
+    bz_quest_xr_hands_destroy(&renderer->xrHands);
     bz_quest_vk_wc3_hud_destroy(&renderer->wc3Hud);
     bz_quest_vk_wc3_fog_destroy(&renderer->wc3Fog);
     bz_quest_vk_wc3_terrain_destroy(&renderer->wc3Terrain);

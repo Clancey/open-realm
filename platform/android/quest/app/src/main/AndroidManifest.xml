@@ -3,10 +3,13 @@
     Meta Quest tabletop native shell manifest — Layer 2 sideloaded debug
     prototype. Settings verified against Meta's documented mobile-native
     manifest guidance (developers.meta.com/horizon/documentation/native/
-    android/mobile-native-manifest/, content last_updated 2026-05-28) — see
-    docs/quest-tabletop.md for the full citation and what must be rechecked
-    before any wider (store) distribution, which has additional submission
-    manifest requirements this file does not attempt to satisfy.
+    android/mobile-native-manifest/, content last_updated 2026-05-28) and, for
+    the layer-8 hand-tracking permission/feature flag, Meta's hand-tracking
+    guidance (developers.meta.com/horizon/documentation/native/android/
+    mobile-hand-tracking/) — see docs/quest-tabletop.md for the full citation
+    and what must be rechecked before any wider (store) distribution, which
+    has additional submission manifest requirements this file does not
+    attempt to satisfy.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     android:installLocation="auto">
@@ -24,6 +27,23 @@
         android:name="android.hardware.vr.headtracking"
         android:version="1"
         android:required="true" />
+
+    <!-- Layer 8: OPTIONAL Meta Quest hand tracking. Per Meta's hand-tracking
+         guidance (developers.meta.com/horizon/documentation/native/android/
+         mobile-hand-tracking/, "Add Flag to Android Manifest to Enable Hand
+         Tracking" - see docs/quest-tabletop.md for the full citation),
+         Quest's OS/runtime broker will not enumerate hand-tracking devices
+         to ANY app - VrApi or OpenXR - lacking both of these, regardless of
+         which OpenXR extensions the app itself enables. android:required
+         is explicitly "false" (unlike headtracking above): this app's
+         Touch-controller path must keep working, and must not be filtered
+         from, on a device/account without hand tracking - see
+         docs/quest-tabletop.md's "hand support must not be required for
+         startup". -->
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <uses-feature
+        android:name="oculus.software.handtracking"
+        android:required="false" />
 
     <application
         android:allowBackup="false"

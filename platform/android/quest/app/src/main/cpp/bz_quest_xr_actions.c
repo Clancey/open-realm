@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "bz_quest_log.h"
+#include "bz_quest_pure.h"
 
 /* Upper bound on suggested bindings per profile: every action, both hands. */
 #define BZ_QUEST_XR_MAX_BINDINGS (BZ_QUEST_XR_ACTION_COUNT * BZ_QUEST_XR_SIDE_COUNT)
@@ -23,22 +24,6 @@ static XrActionType bz_quest_xr_action_type_to_openxr(bzQuestXrActionType_t type
     case BZ_QUEST_XR_ACTION_TYPE_VIBRATION: return XR_ACTION_TYPE_VIBRATION_OUTPUT;
     default: return XR_ACTION_TYPE_BOOLEAN_INPUT;
     }
-}
-
-/* Rotate the -Z "forward" basis vector by a controller-pose quaternion:
- * v' = v + 2*qw*(qxyz x v) + 2*(qxyz x (qxyz x v)), with v = (0,0,-1). This is
- * the aim ray direction the reticle/hit-test shoots along. */
-static void bz_quest_xr_quat_forward(const XrQuaternionf *q, float out[3]) {
-    const float vx = 0.0f, vy = 0.0f, vz = -1.0f;
-    float cx = q->y * vz - q->z * vy;
-    float cy = q->z * vx - q->x * vz;
-    float cz = q->x * vy - q->y * vx;
-    float ccx = q->y * cz - q->z * cy;
-    float ccy = q->z * cx - q->x * cz;
-    float ccz = q->x * cy - q->y * cx;
-    out[0] = vx + 2.0f * (q->w * cx + ccx);
-    out[1] = vy + 2.0f * (q->w * cy + ccy);
-    out[2] = vz + 2.0f * (q->w * cz + ccz);
 }
 
 /* Creates one XrAction. `leftOnly` restricts subaction paths to the left hand
@@ -225,7 +210,9 @@ static bool bz_quest_xr_locate_pose(bzQuestXr_t *xr, XrSpace space, XrTime time,
     outOrigin[0] = loc.pose.position.x;
     outOrigin[1] = loc.pose.position.y;
     outOrigin[2] = loc.pose.position.z;
-    if (outDir) bz_quest_xr_quat_forward(&loc.pose.orientation, outDir);
+    if (outDir)
+        bz_quest_quat_forward(loc.pose.orientation.x, loc.pose.orientation.y, loc.pose.orientation.z,
+                             loc.pose.orientation.w, outDir);
     return true;
 }
 

@@ -65,6 +65,30 @@ typedef struct bzQuestXrSwapchain_s {
     VkImage images[BZ_QUEST_MAX_SWAPCHAIN_IMAGES];
 } bzQuestXrSwapchain_t;
 
+/*
+ * Layer 8: hand-tracking capability, negotiated ONCE by
+ * bz_quest_xr_create_instance() (extEnabled/aimExtEnabled - was the
+ * extension name actually present in xrEnumerateInstanceExtensionProperties
+ * and requested at xrCreateInstance) and bz_quest_xr_get_system()
+ * (supported/aimSupported - the final usable-capability gates
+ * bz_quest_xr_hands.h's bz_quest_xr_hands_create()/_sync() actually check,
+ * additionally requiring the system to report
+ * XrSystemHandTrackingPropertiesEXT.supportsHandTracking). Both
+ * XR_EXT_hand_tracking and XR_FB_hand_tracking_aim are OPTIONAL - unlike
+ * XR_FB_passthrough, their absence is never a startup failure (see
+ * docs/quest-tabletop.md's "Layer 8" capability-negotiation contract).
+ * `aimSupported` additionally requires `supported`: XR_FB_hand_tracking_aim
+ * depends="XR_VERSION_1_0+XR_EXT_hand_tracking" per the OpenXR registry
+ * (xr.xml), verified against the extracted openxr_loader_for_android 1.1.49
+ * headers - see docs/quest-tabletop.md.
+ */
+typedef struct {
+    bool extEnabled;
+    bool aimExtEnabled;
+    bool supported;
+    bool aimSupported;
+} bzQuestXrHandCapability_t;
+
 typedef struct bzQuestXr_s {
     XrInstance instance;
     XrSystemId systemId;
@@ -73,6 +97,7 @@ typedef struct bzQuestXr_s {
     bzQuestXrFns_t fns;
 
     uint64_t passthroughCapabilities; /* XrSystemPassthroughProperties2FB.capabilities */
+    bzQuestXrHandCapability_t handCapability; /* XR_EXT_hand_tracking / XR_FB_hand_tracking_aim - see above */
 
     XrSessionState sessionState;
     bool sessionRunning;      /* true between xrBeginSession and xrEndSession */
@@ -95,7 +120,13 @@ bool bz_quest_xr_init_loader(void *vm, void *context);
  * XR_KHR_android_create_instance, XR_KHR_vulkan_enable2, and
  * XR_FB_passthrough are all present (hard failure if any are missing - see
  * bz_quest_pure.h's bz_quest_check_required_names(), which this calls), and
- * creates `xr->instance` with exactly those three enabled.
+ * creates `xr->instance` with those three enabled.
+ *
+ * Layer 8: ALSO probes (never hard-fails on absence) XR_EXT_hand_tracking
+ * and, only when that succeeds, XR_FB_hand_tracking_aim, recording which
+ * were found into xr->handCapability.extEnabled/aimExtEnabled and enabling
+ * exactly the ones present alongside the three required extensions above -
+ * see bzQuestXrHandCapability_t's comment for the full negotiation contract.
  */
 bool bz_quest_xr_create_instance(void *vm, void *context, bzQuestXr_t *xr);
 
@@ -104,7 +135,14 @@ bool bz_quest_xr_create_instance(void *vm, void *context, bzQuestXr_t *xr);
  * populate xr->passthroughCapabilities. Hard-fails if the runtime doesn't
  * report XR_PASSTHROUGH_CAPABILITY_BIT_FB - this layer's Quest 3/3S MR
  * prototype has no non-passthrough fallback path (see
- * docs/quest-tabletop.md and bz_quest_pure.h's bz_quest_passthrough_capable()). */
+ * docs/quest-tabletop.md and bz_quest_pure.h's bz_quest_passthrough_capable()).
+ *
+ * Layer 8: when xr->handCapability.extEnabled, ALSO chains
+ * XrSystemHandTrackingPropertiesEXT onto the same query (never chained when
+ * the extension was not enabled - chaining a struct for a disabled
+ * extension is invalid per the OpenXR spec's extensibility rules) and
+ * populates xr->handCapability.supported/aimSupported. Absence is logged
+ * once, never a hard failure - see bzQuestXrHandCapability_t's comment. */
 bool bz_quest_xr_get_system(bzQuestXr_t *xr);
 
 /* Resolves every extension function pointer in xr->fns via

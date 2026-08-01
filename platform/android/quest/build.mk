@@ -59,6 +59,15 @@ test-quest-wc3-hud-layout:
 test-quest-wc3-pointer-layout:
 	@$(BZ_QUEST_DIR)/scripts/test-wc3-pointer-layout.sh
 
+# Structural (no-NDK/no-device) check of layer 8's Meta Quest hand-tracking
+# capability negotiation, tracker create/destroy lifecycle, frame-critical
+# RT-safety of the pure gesture builder, renderer wiring, and manifest
+# permission/feature flags - see
+# platform/android/quest/scripts/test-quest-hand-tracking-layout.sh.
+.PHONY: test-quest-hand-tracking-layout
+test-quest-hand-tracking-layout:
+	@$(BZ_QUEST_DIR)/scripts/test-quest-hand-tracking-layout.sh
+
 # Structural (no-NDK/no-device) check that the AAudio real-time data
 # callback and the mixer render function it calls never allocate, lock,
 # log, touch files, or call bridge APIs - see
@@ -93,6 +102,7 @@ test-quest-host-tests:
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wc3_hud.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_input_state.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_xr_bindings.c \
+		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_hand_input.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wav.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_audio_mixer.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_audio_lifecycle.c \
@@ -109,6 +119,7 @@ test-quest-host-tests:
 		$(BZ_QUEST_CPP_DIR)/bz_quest_wc3_hud.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_input_state.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_xr_bindings.c \
+		$(BZ_QUEST_CPP_DIR)/bz_quest_hand_input.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_wav.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_audio_mixer.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_audio_lifecycle.c \
@@ -141,7 +152,7 @@ $(eval $(call test_schema,test-quest-bridge,test-assets $(SHARED_LIB) $(SHEET_LI
 test-quest-stage-wc3-data:
 	@$(BZ_QUEST_DIR)/scripts/test-stage-wc3-data.sh
 
-test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-audio-rt-callback-safety test-quest-host-tests test-quest-bridge test-quest-stage-wc3-data
+test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-host-tests test-quest-bridge test-quest-stage-wc3-data
 
 # Assembles the unsigned arm64-v8a debug APK via the project's own Gradle
 # wrapper. Requires an installed Android SDK/NDK (see docs/quest-tabletop.md)
@@ -207,4 +218,4 @@ quest-log:
 # hardware: source-list sync plus a full Gradle/CMake build and native
 # library verification.
 .PHONY: quest
-quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-audio-rt-callback-safety test-quest-stage-wc3-data quest-verify-native-lib
+quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-stage-wc3-data quest-verify-native-lib
