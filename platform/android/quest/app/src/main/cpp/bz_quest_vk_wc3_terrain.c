@@ -27,10 +27,19 @@ static uint32_t s_blendedDrawCount;
 static char s_loggedRangeIdentity[BZ_QUEST_WC3_TERRAIN_MAX_KEY];
 
 /* Bounded log-once set for "texture upload deferred by this frame's budget"
- * diagnostics: logged exactly once per identity the first time it is deferred,
- * never again for that same identity (whether it later uploads successfully or
- * keeps getting deferred), so a texture stuck pending across many frames stays
- * explicitly diagnosable without per-frame log spam. */
+ * diagnostics: logged exactly once per identity per terrain GENERATION (not
+ * once ever), never again for that same identity within the same generation
+ * (whether it later uploads successfully or keeps getting deferred), so a
+ * texture stuck pending across many frames stays explicitly diagnosable
+ * without per-frame log spam. Capacity is sized for one generation's worth of
+ * distinct referenced textures (ground+cliff+water); reset_deferred_log()
+ * MUST run on every generation swap (reset_generation_caches()) and on
+ * teardown (bz_quest_vk_wc3_terrain_destroy()) - otherwise stale identities
+ * from earlier maps never clear, eventually filling this bounded set so a
+ * brand-new deferred identity on a LATER map can no longer be recorded (only
+ * ever-true log-every-frame remains for it), while an identity STRING reused
+ * across maps (e.g. the same texture path) stays wrongly suppressed by an
+ * earlier generation's already-logged entry. */
 enum { BZ_QUEST_VK_WC3_TERRAIN_MAX_LOGGED_DEFERRED = BZ_QUEST_WC3_TERRAIN_MAX_GROUND_TYPES +
                                                       BZ_QUEST_WC3_TERRAIN_MAX_CLIFF_TYPES + 1 };
 static char s_loggedDeferredIdentity[BZ_QUEST_VK_WC3_TERRAIN_MAX_LOGGED_DEFERRED][BZ_QUEST_WC3_MAX_IDENTITY];
@@ -45,6 +54,8 @@ static bool log_deferred_once(const char *identity) {
     }
     return true;
 }
+
+static void reset_deferred_log(void) { s_loggedDeferredCount = 0; }
 
 static bool find_memory_type(VkPhysicalDevice physicalDevice, uint32_t typeBits,
                              VkMemoryPropertyFlags required, uint32_t *outIndex) {
@@ -515,6 +526,7 @@ static bool reset_generation_caches(bzQuestVkWc3Terrain_t *vkTerrain) {
     }
     bz_quest_wc3_cache_shutdown(&vkTerrain->chunkCache);
     bz_quest_wc3_cache_shutdown(&vkTerrain->textureCache);
+    reset_deferred_log();
     return init_caches(vkTerrain);
 }
 
@@ -1021,6 +1033,7 @@ void bz_quest_vk_wc3_terrain_destroy(bzQuestVkWc3Terrain_t *vkTerrain) {
     if (vkTerrain->vk && vkTerrain->vk->device != VK_NULL_HANDLE) vkDeviceWaitIdle(vkTerrain->vk->device);
     bz_quest_wc3_cache_shutdown(&vkTerrain->chunkCache);
     bz_quest_wc3_cache_shutdown(&vkTerrain->textureCache);
+    reset_deferred_log();
     if (vkTerrain->uploadCommandBuffer != VK_NULL_HANDLE)
         vkFreeCommandBuffers(vkTerrain->vk->device, vkTerrain->vk->commandPool, 1, &vkTerrain->uploadCommandBuffer);
     if (vkTerrain->stagingBuffer != VK_NULL_HANDLE) vkDestroyBuffer(vkTerrain->vk->device, vkTerrain->stagingBuffer, NULL);

@@ -657,6 +657,130 @@ static void test_repack_texture_tight_rejects_null_or_zero_dimension_arguments(v
                  BZ_QUEST_WC3_TERRAIN_ERR_INVALID_ARGUMENT);
 }
 
+/* ------------------------------------------------------------------ */
+/* Regression: PR #21 re-review defect 1 - deferred-log leaks across maps */
+/* ------------------------------------------------------------------ */
+
+/* Structural regression: bz_quest_vk_wc3_terrain.c's bounded "deferred upload"
+ * log-once set (s_loggedDeferredIdentity/s_loggedDeferredCount) MUST be
+ * cleared by reset_deferred_log() on every generation swap
+ * (reset_generation_caches()) and on module teardown
+ * (bz_quest_vk_wc3_terrain_destroy()), or entries accumulate across map
+ * reloads forever: eventually filling the bounded set so a brand-new
+ * deferred identity on a LATER map can never be recorded (permanent
+ * log-every-frame spam for it), while an identity STRING reused across maps
+ * stays wrongly suppressed by an earlier generation's stale entry. Can't run
+ * on host without a real VkDevice, so this asserts on the checked-in source
+ * text, mirroring the existing depth-compare structural test above. */
+static void test_deferred_log_is_reset_on_generation_swap_and_teardown(void) {
+    const char *path = "platform/android/quest/app/src/main/cpp/bz_quest_vk_wc3_terrain.c";
+    FILE *f = fopen(path, "r");
+    ASSERT_NOT_NULL(f);
+    if (!f) return;
+    char text[65536];
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    text[n] = '\0';
+    fclose(f);
+    ASSERT(strstr(text, "static void reset_deferred_log(void) { s_loggedDeferredCount = 0; }") != NULL);
+    const char *resetFn = strstr(text, "static bool reset_generation_caches(");
+    ASSERT_NOT_NULL(resetFn);
+    if (resetFn) ASSERT(strstr(resetFn, "reset_deferred_log();") != NULL &&
+                        strstr(resetFn, "reset_deferred_log();") < strstr(resetFn, "return init_caches"));
+    const char *destroyFn = strstr(text, "void bz_quest_vk_wc3_terrain_destroy(");
+    ASSERT_NOT_NULL(destroyFn);
+    if (destroyFn) ASSERT(strstr(destroyFn, "reset_deferred_log();") != NULL);
+}
+
+/* Mirrors bz_quest_vk_wc3_terrain.c's log_deferred_once()/reset_deferred_log()
+ * exactly: a bounded set that returns true the first time an identity is
+ * seen, false on every later lookup of that same identity, until a reset
+ * clears the whole set (simulating a new terrain generation or teardown).
+ * log_deferred_once() itself is file-static/non-exported (and depends on
+ * BZ_QUEST_VK_WC3_TERRAIN_MAX_LOGGED_DEFERRED, also file-private), so this
+ * reimplements the identical bounded log-once-with-reset algorithm against a
+ * small local capacity to prove the *policy* (not the production symbol). */
+enum { DEFERRED_LOG_TEST_CAPACITY = 4 };
+typedef struct {
+    char identities[DEFERRED_LOG_TEST_CAPACITY][32];
+    uint32_t count;
+} DeferredLogSet_t;
+
+static bool deferred_log_once(DeferredLogSet_t *set, const char *identity) {
+    for (uint32_t i = 0; i < set->count; i++)
+        if (strcmp(set->identities[i], identity) == 0) return false;
+    if (set->count < DEFERRED_LOG_TEST_CAPACITY) {
+        strncpy(set->identities[set->count], identity, sizeof(set->identities[0]) - 1);
+        set->count++;
+    }
+    return true;
+}
+
+static void deferred_log_reset(DeferredLogSet_t *set) { set->count = 0; }
+
+static void test_deferred_log_once_per_identity_within_a_generation(void) {
+    DeferredLogSet_t set;
+    memset(&set, 0, sizeof(set));
+    ASSERT(deferred_log_once(&set, "a.blp"));
+    ASSERT(!deferred_log_once(&set, "a.blp"));
+    ASSERT(!deferred_log_once(&set, "a.blp"));
+    ASSERT(deferred_log_once(&set, "b.blp"));
+}
+
+static void test_deferred_log_resets_allow_a_reused_identity_to_log_again(void) {
+    /* Same texture path (e.g. a shared BLP) used by two different map
+     * generations must be independently diagnosable in each generation -
+     * without a reset, the second map's deferral would be silently
+     * suppressed by the first map's already-logged entry. */
+    DeferredLogSet_t set;
+    memset(&set, 0, sizeof(set));
+    ASSERT(deferred_log_once(&set, "TerrainArt\\Dirt.blp"));
+    ASSERT(!deferred_log_once(&set, "TerrainArt\\Dirt.blp"));
+    deferred_log_reset(&set);
+    ASSERT(deferred_log_once(&set, "TerrainArt\\Dirt.blp"));
+}
+
+static void test_deferred_log_multiple_generation_resets_do_not_leak_state(void) {
+    DeferredLogSet_t set;
+    memset(&set, 0, sizeof(set));
+    for (int generation = 0; generation < 10; generation++) {
+        char identity[32];
+        snprintf(identity, sizeof(identity), "gen%d.blp", generation);
+        /* A brand-new identity every generation must always log at least
+         * once, proving 10 generations' worth of distinct identities never
+         * silently fail to register because of leftover entries from
+         * earlier generations that were never cleared. */
+        ASSERT(deferred_log_once(&set, identity));
+        ASSERT(!deferred_log_once(&set, identity));
+        deferred_log_reset(&set);
+        ASSERT_EQ_INT((int)set.count, 0);
+    }
+}
+
+static void test_deferred_log_capacity_exhaustion_and_reset_restores_headroom(void) {
+    DeferredLogSet_t set;
+    memset(&set, 0, sizeof(set));
+    for (int i = 0; i < DEFERRED_LOG_TEST_CAPACITY; i++) {
+        char identity[32];
+        snprintf(identity, sizeof(identity), "cap%d.blp", i);
+        ASSERT(deferred_log_once(&set, identity));
+    }
+    ASSERT_EQ_INT((int)set.count, DEFERRED_LOG_TEST_CAPACITY);
+    /* At capacity, an unrecorded identity is never stored, so it (safely,
+     * fail-open) logs every time rather than being silently and permanently
+     * suppressed - this is why reset MUST run at every generation boundary
+     * instead of relying on capacity alone. */
+    ASSERT(deferred_log_once(&set, "overflow.blp"));
+    ASSERT(deferred_log_once(&set, "overflow.blp"));
+    deferred_log_reset(&set);
+    ASSERT_EQ_INT((int)set.count, 0);
+    for (int i = 0; i < DEFERRED_LOG_TEST_CAPACITY; i++) {
+        char identity[32];
+        snprintf(identity, sizeof(identity), "fresh%d.blp", i);
+        ASSERT(deferred_log_once(&set, identity));
+    }
+    ASSERT_EQ_INT((int)set.count, DEFERRED_LOG_TEST_CAPACITY);
+}
+
 void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_measure_computes_scale_and_cell_size);
     RUN_TEST(test_measure_rejects_non_square_tiles);
@@ -686,4 +810,9 @@ void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_repack_texture_tight_rejects_row_stride_shorter_than_width);
     RUN_TEST(test_repack_texture_tight_rejects_undersized_destination);
     RUN_TEST(test_repack_texture_tight_rejects_null_or_zero_dimension_arguments);
+    RUN_TEST(test_deferred_log_is_reset_on_generation_swap_and_teardown);
+    RUN_TEST(test_deferred_log_once_per_identity_within_a_generation);
+    RUN_TEST(test_deferred_log_resets_allow_a_reused_identity_to_log_again);
+    RUN_TEST(test_deferred_log_multiple_generation_resets_do_not_leak_state);
+    RUN_TEST(test_deferred_log_capacity_exhaustion_and_reset_restores_headroom);
 }
