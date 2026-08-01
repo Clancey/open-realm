@@ -65,6 +65,19 @@ enum {
     BZ_QUEST_VK_WC3_HUD_STAGING_BYTES = BZ_QUEST_HUD_FONT_ATLAS_BYTES,
 };
 
+/* This is the one file that already includes both bz_quest_wc3_hud.h and
+ * bz_quest_wc3_hud_font.h, so it's the only place that can safely enforce
+ * the "safely below BZ_QUEST_HUD_FONT_MAX_GLYPHS_PER_RUN" cross-file
+ * relationship BZ_QUEST_HUD_MAX_STATUS_TEXT's comment promises, without
+ * making either pure module's header include the other (they are
+ * deliberately independent - the font module knows nothing of HUD layout,
+ * and vice versa). If this ever fires, BZ_QUEST_VK_WC3_HUD_MAX_GLYPHS_PER_RUN
+ * (derived above from BZ_QUEST_HUD_MAX_STATUS_TEXT) has grown past what a
+ * single layout_text() call can hold - bump BZ_QUEST_HUD_FONT_MAX_GLYPHS_PER_RUN
+ * accordingly. */
+_Static_assert(BZ_QUEST_VK_WC3_HUD_MAX_GLYPHS_PER_RUN <= BZ_QUEST_HUD_FONT_MAX_GLYPHS_PER_RUN,
+               "BZ_QUEST_VK_WC3_HUD_MAX_GLYPHS_PER_RUN must stay <= BZ_QUEST_HUD_FONT_MAX_GLYPHS_PER_RUN");
+
 typedef struct {
     float pos[3];
     float color[4];

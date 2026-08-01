@@ -2,6 +2,8 @@
  * test_bz_quest_wc3_hud.c - coverage for layer 5E's pure HUD layout/hit-
  * test contract (bz_quest_wc3_hud.h).
  */
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "bz_quest_wc3_hud.h"
@@ -86,6 +88,50 @@ static void test_build_game_result_adds_third_status_line(void) {
     bz_quest_wc3_hud_build(&in, &frame);
     ASSERT_EQ_INT((int)frame.textCount, 3);
     ASSERT(strcmp(frame.texts[2].text, "VICTORY") == 0);
+}
+
+/* --- Status/resource text capacity (PR #24 review defect 1) ------------- */
+
+static void test_build_max_value_resources_render_complete_untruncated(void) {
+    bzQuestHudInput_t in = make_input_with_player();
+    in.player.gold = UINT32_MAX;
+    in.player.lumber = UINT32_MAX;
+    in.player.foodUsed = UINT32_MAX;
+    in.player.foodCap = UINT32_MAX;
+    in.player.heroTokens = UINT32_MAX;
+    bzQuestHudFrame_t frame;
+    bz_quest_wc3_hud_build(&in, &frame);
+    ASSERT(frame.statusTextTruncated == false);
+    char expected[BZ_QUEST_HUD_MAX_STATUS_TEXT];
+    snprintf(expected, sizeof(expected), "Gold:%u Lumber:%u Food:%u/%u Tokens:%u", UINT32_MAX, UINT32_MAX,
+             UINT32_MAX, UINT32_MAX, UINT32_MAX);
+    ASSERT(strcmp(frame.texts[1].text, expected) == 0);
+    /* Each field must appear with its full value, never a shortened
+     * prefix (e.g. "Gold:4" instead of "Gold:4294967295") - this is the
+     * exact defect the review found: a too-small buffer silently changed
+     * displayed numeric values. */
+    ASSERT(strstr(frame.texts[1].text, "Gold:4294967295") != NULL);
+    ASSERT(strstr(frame.texts[1].text, "Lumber:4294967295") != NULL);
+    ASSERT(strstr(frame.texts[1].text, "Food:4294967295/4294967295") != NULL);
+    ASSERT(strstr(frame.texts[1].text, "Tokens:4294967295") != NULL);
+}
+
+static void test_build_max_selected_count_and_long_name_render_complete(void) {
+    bzQuestHudInput_t in = make_input_with_player();
+    /* BZ_QUEST_HUD_MAX_NAME=32, so 31 visible chars is the longest name
+     * bz_quest_wc3_hud_build() can ever see (already NUL-bounded upstream -
+     * see bzQuestHudInput_t.player.name). */
+    strncpy(in.player.name, "ThisIsAVeryLongPlayerNameXXXXXX", sizeof(in.player.name) - 1);
+    in.player.name[sizeof(in.player.name) - 1] = '\0';
+    in.selectedCount = UINT32_MAX;
+    bzQuestHudFrame_t frame;
+    bz_quest_wc3_hud_build(&in, &frame);
+    ASSERT(frame.statusTextTruncated == false);
+    char expected[BZ_QUEST_HUD_MAX_STATUS_TEXT];
+    snprintf(expected, sizeof(expected), "%s  Selected:%u", in.player.name, UINT32_MAX);
+    ASSERT(strcmp(frame.texts[0].text, expected) == 0);
+    ASSERT(strstr(frame.texts[0].text, "Selected:4294967295") != NULL);
+    ASSERT(strstr(frame.texts[0].text, in.player.name) != NULL);
 }
 
 static void test_build_command_card_absent_when_not_present(void) {
@@ -374,6 +420,8 @@ void run_bz_quest_wc3_hud_tests(void) {
     RUN_TEST(test_build_with_no_player_shows_loading_status_only);
     RUN_TEST(test_build_with_player_no_selection_shows_resources_and_zero_selected);
     RUN_TEST(test_build_game_result_adds_third_status_line);
+    RUN_TEST(test_build_max_value_resources_render_complete_untruncated);
+    RUN_TEST(test_build_max_selected_count_and_long_name_render_complete);
     RUN_TEST(test_build_command_card_absent_when_not_present);
     RUN_TEST(test_build_command_card_absent_when_not_visible_or_not_valid);
     RUN_TEST(test_build_sorts_buttons_row_major_by_grid_y_then_x);

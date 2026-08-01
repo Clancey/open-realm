@@ -94,7 +94,28 @@ enum {
     BZ_QUEST_HUD_MAX_ACTION_CODE = 32,  /* bounded local copy - real WC3 action codes are short alnum tokens */
     BZ_QUEST_HUD_MAX_TOOLTIP = 24,      /* bounded label text sized to fit one fixed-width button cell, no wrapping */
     BZ_QUEST_HUD_MAX_NAME = 32,
-    BZ_QUEST_HUD_MAX_STATUS_TEXT = 40,
+    /* Sized to hold the LONGEST authoritative status/resource line WITHOUT
+     * truncation, not an arbitrary round number - see bz_quest_wc3_hud.c's
+     * _Static_asserts next to the two snprintf() call sites that compute
+     * this exactly: the resource line ("Gold:%u Lumber:%u Food:%u/%u
+     * Tokens:%u") needs 28 literal chars + 5 * 10-digit UINT32_MAX fields =
+     * 78, and the name/selected line ("%s  Selected:%u") needs
+     * (BZ_QUEST_HUD_MAX_NAME-1) + 11 literal chars + a 10-digit count = 52.
+     * 88 leaves headroom above the 78-char worst case while staying well
+     * below bz_quest_wc3_hud_font.h's BZ_QUEST_HUD_FONT_MAX_GLYPHS_PER_RUN
+     * (96) once bz_quest_vk_wc3_hud.h's BZ_QUEST_VK_WC3_HUD_MAX_GLYPHS_PER_RUN
+     * derives the glyph cap from this same constant (see that header's
+     * _Static_assert enforcing the "safely below" relationship - this
+     * module never includes the font header itself, see this file's
+     * header comment on module separation, so the cross-check lives where
+     * both constants are already visible). A prior, too-small value here
+     * (40) silently cut the resource line's numeric fields mid-digit
+     * (e.g. "Selected:12" -> "Selected:1"), changing displayed data without
+     * any diagnostic - see bz_quest_wc3_hud_build()'s runtime snprintf-
+     * truncation detection (bzQuestHudFrame_t.statusTextTruncated) for the
+     * belt-and-suspenders runtime check in case a future field grows this
+     * constant out from under these compile-time guarantees again. */
+    BZ_QUEST_HUD_MAX_STATUS_TEXT = 88,
     BZ_QUEST_HUD_GRID_COLUMNS = 4,      /* RealityTabletopView.swift:843's fixed 4-column LazyVGrid */
     BZ_QUEST_HUD_MAX_QUADS = 2 + BZ_QUEST_HUD_MAX_BUTTONS + 1,       /* status bg + command bg + buttons + cancel */
     BZ_QUEST_HUD_MAX_TEXT_RUNS = 3 + BZ_QUEST_HUD_MAX_BUTTONS * 2 + 1, /* status lines + (label+cooldown)/button + cancel label */
@@ -225,6 +246,17 @@ typedef struct {
     bzQuestHudTextRun_t texts[BZ_QUEST_HUD_MAX_TEXT_RUNS];
     uint32_t hitRegionCount;
     bzQuestHudHitRegion_t hitRegions[BZ_QUEST_HUD_MAX_HIT_REGIONS];
+    /* Defensive runtime mirror of BZ_QUEST_HUD_MAX_STATUS_TEXT's compile-
+     * time guarantee (see that constant's comment): set true iff either
+     * status/resource snprintf() actually needed more bytes than the
+     * buffer had, i.e. would have silently dropped/altered displayed
+     * digits. Should never be true given today's field sizes - this is
+     * "detect instead of silently display wrong data", not an expected
+     * runtime state. bz_quest_wc3_hud_build() never logs (pure function -
+     * see this file's header comment); bz_quest_vk_wc3_hud.c's impure
+     * capture_and_upload() is responsible for logging this once if it
+     * ever fires. */
+    bool statusTextTruncated;
 } bzQuestHudFrame_t;
 
 /*

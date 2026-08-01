@@ -4,10 +4,25 @@
 #include "bz_quest_wc3_hud.h"
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "bz_quest_wc3_render.h" /* BZ_QUEST_WC3_WORLD_TARGET_SPAN_F only - no transform/entity types used */
+
+/* Compile-time proof that BZ_QUEST_HUD_MAX_STATUS_TEXT (see its own comment
+ * in bz_quest_wc3_hud.h) actually fits both status/resource snprintf()
+ * calls below at their UINT32_MAX/max-length-name worst case, with the -1
+ * (buffer size vs. max content length) and 10-digit-%u assumption spelled
+ * out rather than a guessed round number. A previous too-small value here
+ * (40) silently cut numeric fields mid-digit - see bzQuestHudFrame_t.
+ * statusTextTruncated for the runtime counterpart of this same guarantee. */
+_Static_assert((BZ_QUEST_HUD_MAX_NAME - 1) + 11 + 10 < BZ_QUEST_HUD_MAX_STATUS_TEXT,
+               "\"%s  Selected:%u\" (name + 11 literal chars + a 10-digit count) must fit "
+               "BZ_QUEST_HUD_MAX_STATUS_TEXT without truncation");
+_Static_assert(28 + 10 * 5 < BZ_QUEST_HUD_MAX_STATUS_TEXT,
+               "\"Gold:%u Lumber:%u Food:%u/%u Tokens:%u\" (28 literal chars + five 10-digit "
+               "UINT32_MAX fields) must fit BZ_QUEST_HUD_MAX_STATUS_TEXT without truncation");
 
 /* --- Local layout constants (panel-local units; the panel transform's
  * right/down vector LENGTHS are the only place a real-world scale is
@@ -43,6 +58,22 @@ static void hud_set_quad(bzQuestHudQuad_t *q, float x, float y, float w, float h
 static void hud_set_text(bzQuestHudTextRun_t *t, float x, float y, float scale, const char *text) {
     t->x = x; t->y = y; t->scale = scale;
     hud_copy_bounded(t->text, sizeof(t->text), text);
+}
+
+/* snprintf() into `line` (capacity `cap`, always BZ_QUEST_HUD_MAX_STATUS_TEXT
+ * in this file's only two callers below) and OR any truncation into
+ * `*truncated` - snprintf's return is the number of bytes that WOULD have
+ * been written were the buffer unbounded, so >= cap means real content was
+ * cut off (never just "used exactly cap-1 bytes", which is `== cap - 1`,
+ * a normal full-but-untruncated line). See BZ_QUEST_HUD_MAX_STATUS_TEXT's
+ * comment for why this should be unreachable today - this is the runtime
+ * half of that compile-time guarantee, not an expected code path. */
+static void hud_snprintf_status(char *line, size_t cap, bool *truncated, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(line, cap, fmt, args);
+    va_end(args);
+    if (n < 0 || (size_t)n >= cap) *truncated = true;
 }
 
 void bz_quest_wc3_hud_panel_transform(bzQuestHudPanelTransform_t *out) {
@@ -127,12 +158,15 @@ void bz_quest_wc3_hud_build(const bzQuestHudInput_t *input, bzQuestHudFrame_t *o
             hud_set_text(t, HUD_MARGIN, textY, HUD_TEXT_SCALE, "No player data");
         } else {
             char line[BZ_QUEST_HUD_MAX_STATUS_TEXT];
-            snprintf(line, sizeof(line), "%s  Selected:%u", input->player.name, input->selectedCount);
+            hud_snprintf_status(line, sizeof(line), &out->statusTextTruncated, "%s  Selected:%u",
+                                 input->player.name, input->selectedCount);
             hud_set_text(&out->texts[out->textCount++], HUD_MARGIN, textY, HUD_TEXT_SCALE, line);
             textY += HUD_STATUS_LINE_H;
 
-            snprintf(line, sizeof(line), "Gold:%u Lumber:%u Food:%u/%u Tokens:%u", input->player.gold,
-                     input->player.lumber, input->player.foodUsed, input->player.foodCap, input->player.heroTokens);
+            hud_snprintf_status(line, sizeof(line), &out->statusTextTruncated,
+                                 "Gold:%u Lumber:%u Food:%u/%u Tokens:%u", input->player.gold,
+                                 input->player.lumber, input->player.foodUsed, input->player.foodCap,
+                                 input->player.heroTokens);
             hud_set_text(&out->texts[out->textCount++], HUD_MARGIN, textY, HUD_TEXT_SCALE, line);
             textY += HUD_STATUS_LINE_H;
 
