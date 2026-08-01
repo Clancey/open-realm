@@ -434,7 +434,7 @@ test`, none of which need Gradle/NDK/Quest hardware:
 |---|---|---|
 | `bz_quest_pure.c` | `tests/test_bz_quest_pure.c` | Projection/view-matrix math, format/extension/passthrough-capability selection (unchanged from layer 3). |
 | `bz_quest_scene.c` | `tests/test_bz_quest_scene.c` | Procedural test-scene generator (unchanged from layer 3). |
-| `bz_quest_data.c` | `tests/test_bz_quest_data.c` | Default-dir construction, override read/validate (normal + every documented rejection: relative path, disallowed characters, oversized, empty), full resolve fallback order, and argv construction (normal + undersized-buffer/NULL-arg error paths) — 22 tests, pure, real temp dirs via `mkdtemp()`. |
+| `bz_quest_data.c` | `tests/test_bz_quest_data.c` | Default-dir construction, override read/validate (normal + every documented rejection: relative path, disallowed characters, oversized, empty), full resolve fallback order, edition detection (`bz_quest_data_detect_edition()`: ROC-only, TFT-over-ROC, case-insensitive `War3x` match, non-`.mpq` false positives ignored, missing-directory/NULL-arg rejection), and argv construction (normal + `-tft` emission/ordering + undersized-buffer/NULL-arg error paths) — 32 tests, pure, real temp dirs via `mkdtemp()`. |
 | `bz_quest_frame.c` | `tests/test_bz_quest_frame.c` | Reset value, `bz_quest_frame_from_values()` field copy/truncation/ABI-mismatch detection, and every `bz_quest_frame_should_log()` cache-hit/cache-miss branch (identical frame never logs; status/lifecycle-state/lifecycle-error changes each log; a bare `generation` advance — in *any* status, including `OK` — never logs, including across ~190 simulated consecutive engine frames, guarding against the per-frame-log regression fixed in PR #19's review pass) — 15 tests, pure, no I/O. |
 | `bz_quest_wc3_fog.c` | `tests/test_bz_quest_wc3_fog.c` | Three-state fog classification, row-major cell indexing, world<->cell conversion (including rectangular/non-chunk-multiple grids), 0/128/255 texture packing with and without row padding, content-based dirty-check hit/miss, per-axis selection-marker matrix/tint generation (with and without the shared world transform), independent per-axis nonpositive-scale rejection, and zero-dimension rejection paths. |
 | `bz_quest_wc3_render.c` (world transform) | `tests/test_bz_quest_wc3_world_transform.c` | Cross-subsystem integration for the shared world/tabletop transform: entity-at-terrain-corner/center coordinate match against `bz_quest_wc3_terrain_build_chunk()`'s real vertex output, fog-cell/entity raw-space agreement, selection-marker/entity translation+scale sharing, rectangular bounds + nonzero origin, map-reload producing an independent transform, and a guard against double-applying the transform. |
@@ -464,15 +464,22 @@ host-test binary table:
 - `make test-quest-stage-wc3-data`
   (`scripts/test-stage-wc3-data.sh`) — a fake `adb`/`run-as`/`pm`/`df`/
   `sha256sum`/`cp` filesystem harness for
-  `scripts/stage-wc3-data.sh` (no real device/NDK/Gradle needed): 14 cases
+  `scripts/stage-wc3-data.sh` (no real device/NDK/Gradle needed): 20 cases
   covering ROC-only, TFT-over-ROC, incomplete-mixed-layout rejection,
   TFT-without-ROC rejection, filenames with spaces/mixed case preserved
   exactly, unchanged-file skip, changed-file atomic replace (temp name +
   rename, no leftovers), device-side corruption detected (prior valid file
   left intact), an interrupted transfer leaving the prior valid file
   intact, no-device/wrong-package/non-debuggable-app/insufficient-space
-  all rejected with an actionable message, and `clean` refusing without
-  `--yes` then safely removing only the resolved app-data subdirectory.
+  all rejected with an actionable message, a near-full device rejected via
+  the transient bounce+stage peak estimate (not just final size) with the
+  prior file preserved, an idempotent re-stage never blocked by that same
+  peak estimate on a near-full device, multiple attached devices without
+  `--serial` rejected, `--serial` routing every adb invocation to the
+  correct device (checked via an invocation log), an unknown `--serial`
+  rejected, an offline `--serial` device rejected, and `clean` refusing
+  without `--yes` then safely removing only the resolved app-data
+  subdirectory.
 - `make test-quest-audio-rt-callback-safety`
   (`scripts/test-quest-audio-rt-callback-safety.sh`) — greps the real
   `bz_quest_audio_data_callback()`/`bz_quest_audio_mixer_render()` function
@@ -1006,17 +1013,54 @@ archives — that check happens inside the engine's own `BZ_RuntimeInit()`
 ### Engine startup argv construction
 
 `bz_quest_data_build_argv()` builds
-`["openwarcraft3-quest", "-data", "<dir>"[, "+map", "<name>"]]` — reusing
-the exact `"-data"`/`"+map"` convention
+`["openwarcraft3-quest", "-data", "<dir>"[, "-tft"][, "+map", "<name>"]]` —
+reusing the exact `"-data"`/`"+map"` convention
 `platform/apple/visionos/tabletop/app/OpenRealmTabletopApp.swift`'s
 `LiveTabletopTransport` already establishes for this same lifecycle core
 (see `common/bz_runtime.h`'s `bzRuntimeArgs_t` and AGENTS.md's "Command
 Conventions": `+` is a process/startup argument here, never an in-engine
 console command) — no second startup-argument scheme was invented for this
 platform. `mapName` is always `NULL` in this layer (see "Current
-limitations" below); the 3-argument form (`-data` only) is what actually
-runs. The whole call uses caller-provided fixed-size storage — no heap
-allocation.
+limitations" below); the 3- or 4-argument form (`-data` [+ `-tft`]) is what
+actually runs. The whole call uses caller-provided fixed-size storage — no
+heap allocation; `BZ_QUEST_DATA_ARGV_MAX` was raised from 5 to 6 to make
+room for `-tft` alongside the existing `"+map" "<name>"` pair.
+
+**Edition detection and the `-tft` dash-flag (layer 7 fix).**
+`bz_quest_data_detect_edition()` re-scans the already-`bz_quest_data_resolve()`d
+directory using the *exact same* signal `FS_AddArchiveScanEntry()`
+(`common/common.c`) uses to decide whether to skip an archive: a `.mpq`
+extension and a case-insensitive `"War3x"` 5-character basename prefix. If
+any such file is present the edition is `BZ_QUEST_DATA_EDITION_TFT`;
+otherwise `BZ_QUEST_DATA_EDITION_ROC`. `bz_quest_bridge_start()` calls this
+right after a successful resolve, defaults to ROC on any detection failure
+(never silently promotes to TFT), and threads the result into
+`bz_quest_data_build_argv()`, which appends the bare dash-flag `"-tft"`
+**before** `"+map"` when (and only when) the edition is TFT.
+
+This must be a plain argv dash-flag, never a late `Cbuf_AddText("fs_expansion
+1")`/`+fs_expansion 1` queued command: `Cvar_ApplyCommandLine()` (which
+parses `-tft`/`-roc` into `fs_expansion`) runs inside `Com_Init()`, which
+completes **before** `BZ_RuntimeInit()` ever calls `FS_AddDataDirectory()` —
+by the time any queued `Cbuf` command would run, the archive scan (and its
+skip-or-mount decision) has already happened. A late toggle would only ever
+affect the *next* `FS_AddDataDirectory()` call, and this bridge makes
+exactly one.
+
+**Expected log evidence.** `bz_quest_bridge_start()` logs
+`bz_quest_bridge_start: resolved data dir '<dir>', edition=roc` or
+`edition=tft` right after detection, before argv construction; when TFT is
+detected, the engine's own `common/common.c` archive-mount log
+(`Added archive '<dir>/War3x.mpq'` — printed once per file, in the
+alphabetical mount-order described below) confirms the flag actually took
+effect, not just that the cvar was set. `test_bz_quest_bridge.c`'s
+`test_tft_over_roc_data_enables_and_mounts_expansion` and
+`test_case_insensitive_war3x_name_still_mounts_via_bridge` assert
+`Cvar_Integer("fs_expansion", -1) == 1` **and** `FS_FileExists()` on a
+marker file packed only inside the synthetic `War3x.mpq` fixture, proving
+genuine mounting rather than cvar-state alone;
+`test_roc_only_data_leaves_expansion_disabled` asserts the inverse
+(`fs_expansion == 0`, marker file absent) for a ROC-only directory.
 
 ### Missing/invalid data behavior
 
@@ -2949,21 +2993,19 @@ override logic itself.
   on-device would achieve nothing and would only make `verify`/manual
   inspection confusing.
 
-**Known runtime limitation, documented honestly:** `bz_quest_data_build_argv()`
-(layer 4) does not currently pass `-tft`/`fs_expansion=1` — only `"-data"
-"<dir>"` (see "Engine startup argv construction" above). This means a
-correctly-staged TFT layout is discoverable-and-correctly-ordered *on
-disk*, but **not yet mounted at runtime** by this build: `fs_expansion`
-defaults to `0`, so `FS_AddArchiveScanEntry` still skips every `War3x*`
-archive regardless of what is staged. This layer's scope is the staging
-*script's* file-layout validation, not runtime argv plumbing, and
-`bz_quest_data.h`/`bz_quest_bridge.c` are a previously-reviewed shared
-layer-4 API this task explicitly says not to alter without concrete
-evidence requiring it — so this gap is deliberately left for a later
-layer to close, mirroring visionOS's own explicit `tft: Bool` → `-tft`
-toggle (`LiveTabletopTransport.swift`/`TabletopAdapter.swift`) as the
-template for that future change. **Do not report TFT audio/visuals as
-working end-to-end until that follow-up lands.**
+**Runtime TFT mounting is now wired end-to-end (previously a known gap,
+now fixed):** the layer 7 follow-up added `bz_quest_data_detect_edition()`
+and threaded its result into `bz_quest_data_build_argv()`'s new `"-tft"`
+dash-flag emission (see "Engine startup argv construction" above for the
+full detection/argv/log-evidence design and why it must be a startup
+dash-flag rather than a late `+fs_expansion 1`). A correctly-staged TFT
+layout is now both discoverable-and-correctly-ordered on disk **and**
+actually mounted at runtime: `fs_expansion` is set to `1` before
+`FS_AddDataDirectory()` runs, so `FS_AddArchiveScanEntry` no longer skips
+`War3x*` archives when TFT was detected. `bz_quest_data.h`/`bz_quest_bridge.c`
+remain the same previously-reviewed layer-4 API surface — only the
+already-planned edition parameter (visible in the header before this fix
+landed) is now actually wired through, no other shared contract changed.
 
 ### Staging safety properties
 
@@ -2997,12 +3039,43 @@ working end-to-end until that follow-up lands.**
   push/copy/verify/atomic-replace sequence — this never assumes a
   previously-staged file is still good without recomputing its hash.
 - **Explicit, distinct failures for every precondition** — no device
-  attached, package not installed, package not debuggable (`run-as`
-  itself fails), and insufficient free space on-device (checked, via
-  `run-as`'s own `df -Pk .`, against the total bytes about to be
-  transferred, **before** any push begins) each produce their own
-  actionable error message and a non-zero exit; none of these fall through
-  to a generic/silent failure.
+  attached, more than one attached device without `--serial`, a `--serial`
+  that matches no attached device, a matched device that is `offline`/
+  `unauthorized`, package not installed, package not debuggable (`run-as`
+  itself fails), and insufficient free space on-device each produce their
+  own actionable error message and a non-zero exit; none of these fall
+  through to a generic/silent failure.
+- **`--serial` is threaded through one choke point.** Every single `adb`
+  invocation the script makes goes through one `adb_()` wrapper that
+  prepends `-s "$serial"` whenever `--serial` was given — there is no
+  second code path that could accidentally issue an un-suffixed call once a
+  serial has been selected. `require_device()` also rejects an ambiguous
+  bare invocation outright: with more than one attached device and no
+  `--serial`, or with a `--serial` that names no attached device, or whose
+  device is `offline`, the script fails before making any push/shell call
+  that could otherwise silently land on the wrong headset.
+  `test-stage-wc3-data.sh`'s fake-adb harness simulates multiple attached
+  devices (a `DEVICES="serial:state ..."` list, each routed to its own
+  per-serial fake device root) and an invocation log to assert every call
+  in a `--serial`-scoped run consistently carries that same serial.
+- **Free-space preflight accounts for the transient bounce+stage peak, not
+  just final archive size.** Each changed file transiently exists as up to
+  three copies at once mid-transfer — the host source, the `/data/local/tmp`
+  bounce copy (freed by the script's own `trap` right after `run-as`'s `cp`
+  succeeds), and the app-private `.stage.$$` temp copy (freed by the
+  atomic `mv` to its final name) — so checking only the sum of final
+  archive sizes can pass a preflight that later fails mid-transfer with no
+  bytes recoverable. `cmd_stage()` instead computes, from each file's
+  already-fetched remote hash, the total bytes that actually need transfer
+  (`transfer_bytes`) and the largest single file among them
+  (`max_transfer_bytes`), and requires `transfer_bytes + max_transfer_bytes`
+  free — a safe (if not always maximally tight) upper bound for the
+  worst-case sequential transient peak. Unchanged (already-verified) files
+  contribute zero bytes to this figure, so a fully-idempotent re-stage
+  never gets blocked by a peak sized for a fresh transfer even on a
+  near-full device; `test-stage-wc3-data.sh` covers both the near-full
+  rejection (with the prior valid file preserved, no `.stage.*` leftover)
+  and the idempotent-not-blocked case.
 
 ### AAudio sink design
 
@@ -3190,15 +3263,14 @@ bridge, OpenXR Touch input, and AAudio output are no longer optional:
   rather than an in-app feature — this is a deliberate design choice (the
   user's own purchased game data is never bundled/copied by this project),
   not a gap.
-- **Staged TFT archives are not yet mounted at runtime.**
-  `bz_quest_data_build_argv()` still only passes `"-data" "<dir>"`, never
-  `-tft`/`fs_expansion=1` — see [Layer 7](#layer-7-warcraft-iii-data-staging--native-aaudio-output)'s
-  "Known runtime limitation" for the full trace through `common/common.c`/
-  `common/cvar.c` and why this was deliberately left for a later layer
-  rather than altering the previously-reviewed layer-4 `bz_quest_data.h`/
-  `bz_quest_bridge.c` API without concrete evidence requiring it. A TFT
-  layout stages and orders correctly on disk; it is not loaded by the
-  engine on this build.
+- **Staged TFT archives are now mounted at runtime.** `bz_quest_data_build_argv()`
+  emits the `"-tft"` dash-flag when `bz_quest_data_detect_edition()` finds a
+  `War3x*.mpq` in the resolved directory, so `fs_expansion` is `1` before
+  `FS_AddDataDirectory()` scans it — see
+  [Layer 7](#layer-7-warcraft-iii-data-staging--native-aaudio-output)'s
+  "Engine startup argv construction" for the detection/argv/log-evidence
+  design and why this must be a startup dash-flag rather than a later
+  `+fs_expansion 1`.
 - **Spatial/positional audio (Meta XR Audio SDK) is out of scope for this
   prototype** — every voice plays as flat, non-positional stereo through
   the device's built-in speakers/output route; see [Layer 7](#layer-7-warcraft-iii-data-staging--native-aaudio-output)'s
@@ -3662,6 +3734,97 @@ make quest-clean-wc3-data
   `run-as` transfer, no real AAudio stream open/start, and no real audible
   sound were exercised — do not report any of these as confirmed until
   checked against real hardware and real staged data.
+
+### What *was* verified this session (layer 7 follow-up: TFT-mount fix + staging robustness)
+
+A focused review of the initial layer 7 PR found that staged TFT archives
+were never actually mounted at runtime (`bz_quest_data_build_argv()` never
+emitted `-tft`) plus two staging test-coverage/robustness gaps
+(`--serial`/multi-device handling, and the free-space preflight not
+accounting for the transient bounce+stage peak). This follow-up closed all
+three, in new commits on the same branch (no history rewritten):
+
+- Added `bz_quest_data_detect_edition()` (re-scans the resolved data
+  directory using the exact same `.mpq` + case-insensitive `"War3x"`-prefix
+  signal `FS_AddArchiveScanEntry()` uses) and threaded its result through
+  `bz_quest_data_build_argv()`'s new `"-tft"` dash-flag emission —
+  confirmed by `git blame`/reading `common/common.c`'s
+  `FS_AddArchiveScanEntry()`/`Cvar_ApplyCommandLine()` ordering that a
+  startup dash-flag (not a late `+fs_expansion 1`) is required, since
+  `Cvar_ApplyCommandLine()` runs inside `Com_Init()`, which completes
+  before `BZ_RuntimeInit()`'s one `FS_AddDataDirectory()` call.
+  `BZ_QUEST_DATA_ARGV_MAX` was raised 5→6 to hold the extra flag.
+- `test_bz_quest_data.c` gained 10 new pure-host tests (ROC never emits
+  `-tft`, TFT emits it before `+map` in the right position, undersized-
+  buffer rejection with the flag present, and edition detection's ROC-
+  only/TFT-over-ROC/case-insensitivity/non-`.mpq`-false-positive/missing-
+  directory/NULL-arg paths) — the file's total grew from 22 to 32 tests.
+- `test_bz_quest_bridge.c` gained 3 new **integration** tests that pack
+  real, distinctly-named synthetic MPQ archives at test-runtime via the
+  existing `build/bin/mpqtool`'s `pack` command (one containing a
+  `ROC_MARKER.txt`, one a `TFT_MARKER.txt`), start the real bridge against
+  them, and assert both `Cvar_Integer("fs_expansion", -1)` **and**
+  `FS_FileExists()` on the marker file actually inside the archive —
+  proving genuine archive mounting, not just cvar state. Fixed a resulting
+  test-order fragility (`fs_expansion` is a real process-global cvar that
+  `Cvar_Get()` never resets across `BZ_RuntimeInit()` calls in the same
+  test binary) by adding an explicit `Cvar_Set("fs_expansion", "0")`
+  baseline reset at the start of each new test to remove that ordering
+  dependency — a test-hygiene-only concern, since a real Android process
+  only calls `Com_Init()` once. `test_bz_quest_bridge.c` grew from 10 to 13
+  test functions (95 assertions total, `make test-quest-bridge`); the log
+  line `bz_quest_bridge_start: resolved data dir '...', edition=roc|tft` is
+  now visible in that target's own output as the expected log evidence for
+  this fix.
+- Confirmed (via `git log --oneline -- stage-wc3-data.sh`) that
+  `--serial`/multi-device rejection, unknown-serial rejection, and
+  offline-serial detection were already fully implemented in the original
+  layer 7 commit — this half of the task was a **test-coverage gap**, not
+  a code gap. Extended `test-stage-wc3-data.sh`'s fake-`adb` shim to
+  simulate N attached devices (`DEVICES="serial:state ..."`, each routed to
+  its own per-serial fake device root) and log every invocation's command +
+  selected serial, then added 4 new tests: multiple devices without
+  `--serial` rejected, `--serial` routing every adb call to the correct
+  device (verified via the invocation log, not just the final file
+  layout), an unknown `--serial` rejected, and an offline `--serial`
+  device rejected.
+- Found and fixed a **genuine gap** in the free-space preflight:
+  `cmd_stage()` previously checked only the sum of final archive sizes,
+  but each changed file transiently needs up to 2x its own size at once
+  (the `/data/local/tmp` bounce copy plus the app-private `.stage.$$`
+  copy, freed at different points). Added a `remote_file_hash()` helper
+  (deduplicating a hash lookup previously inlined in `stage_one_file()`)
+  and rewrote the preflight to require
+  `transfer_bytes + max_transfer_bytes` free, where both figures are
+  computed only from files that actually need transfer — so an idempotent
+  re-stage (every file unchanged) correctly requires ~0 extra space and is
+  never blocked even on a near-full device. Added 2 new tests: a near-full
+  device rejected using the peak (not final-size) estimate, with the
+  prior valid file proven byte-identical afterward and no `.stage.*`
+  leftover; and an idempotent re-stage proven **not** blocked by the same
+  near-full space.
+- `test-stage-wc3-data.sh` grew from 14 to 20 tests, all passing
+  (`make test-quest-stage-wc3-data`).
+- Re-ran the full validation suite after all of the above:
+  `make test-quest-host-tests` (5107/5107, up from 5067/5067 — the 10 new
+  `bz_quest_data` tests' assertions), `make test-quest-bridge` (95/95),
+  `make test-quest-stage-wc3-data` (20/20), the full repo-root `make test`
+  (all suites reporting matching `N/N assertions passed`/`tests passed`,
+  no `FAIL`), a real arm64 `assembleDebug` Gradle/CMake build (`BUILD
+  SUCCESSFUL`), `scripts/verify-native-lib.sh` against the built APK, and
+  `git diff --check clancey-quest-touch-controls...HEAD` (no whitespace
+  errors) — all with no regressions. Manual `llvm-readelf -d` inspection
+  of the rebuilt `.so` reconfirmed the same allow-listed `DT_NEEDED` set
+  (`libopenxr_loader.so`, `libvulkan.so`, `libaaudio.so`, `libandroid.so`,
+  `liblog.so`, `libz.so`, `libm.so`, `libdl.so`, `libc.so`) — no new
+  dependency was introduced by this fix.
+- **Not verified this session** (unchanged from the caveats above): no
+  physical Quest device, no real retail Warcraft III data. The TFT-mount
+  *code path* is now proven correct against real synthetic MPQ archives
+  and the real engine, but whether a real retail `War3x.mpq`/
+  `War3xlocal.mpq` pair actually loads and plays correctly on real
+  hardware after a real `adb`-transferred stage remains a hardware/data
+  acceptance item — see "Hardware/data-only acceptance procedure" above.
 
 ## Related documents
 

@@ -250,6 +250,14 @@ resolve_source_layout() {
 
 # --- per-file staging (skip-if-unchanged / atomic replace) ------------------
 
+# Returns (echoes) the sha256 of $1 (a device-relative dest path under the
+# package's own working directory) if it already exists there, or nothing.
+# Extracted so cmd_stage()'s free-space preflight and stage_one_file() share
+# exactly one remote round-trip per file instead of querying it twice.
+remote_file_hash() {
+    run_as "test -f $(sh_quote "$1") && sha256sum -- $(sh_quote "$1") | awk '{print \$1}' || true"
+}
+
 # Streams $1 (local path) to $pkg_root/files/$DATA_SUBDIR/$2 (device-side
 # basename, preserved exactly) via the /data/local/tmp bounce described in
 # this file's header comment, then verifies via a fresh remote sha256sum
@@ -258,15 +266,18 @@ resolve_source_layout() {
 # prior valid file intact" per this layer's task scope: nothing this
 # function does ever removes or overwrites the final destination name
 # except via one `mv` immediately preceded by a successful hash comparison.
+# $3 is the dest file's existing remote sha256 (or empty if absent),
+# already fetched once by cmd_stage()'s free-space preflight - passed in
+# rather than re-queried here to avoid a second identical remote round-trip.
 stage_one_file() {
     local_path=$1
     dest_name=$2
+    existing_hash=$3
     dest_dir="files/$DATA_SUBDIR"
     dest_path="$dest_dir/$dest_name"
     local_hash=$(local_sha256 "$local_path")
     local_bytes=$(local_size "$local_path")
 
-    existing_hash=$(run_as "test -f $(sh_quote "$dest_path") && sha256sum -- $(sh_quote "$dest_path") | awk '{print \$1}' || true")
     if [ "$existing_hash" = "$local_hash" ]; then
         printf '%s: %s unchanged (sha256 %s), skipping transfer\n' "$tool_name" "$dest_name" "$local_hash"
         return 0
@@ -324,15 +335,61 @@ cmd_stage() {
     require_debuggable_run_as
     resolve_pkg_root
 
-    total_bytes=$(( $(local_size "$roc_file") ))
-    [ -n "$tft_main_file" ] && total_bytes=$((total_bytes + $(local_size "$tft_main_file")))
-    [ -n "$tft_locale_file" ] && total_bytes=$((total_bytes + $(local_size "$tft_locale_file")))
-    require_free_space "$total_bytes"
+    # Determine which files actually need transfer (remote hash missing or
+    # mismatched) BEFORE estimating how much *extra* space this run will
+    # transiently need. An already-fully-staged, byte-identical re-run must
+    # not be blocked by a peak estimate sized for a fresh transfer - see
+    # this function's peak-space comment below and docs/quest-tabletop.md's
+    # free-space-preflight write-up.
+    transfer_bytes=0
+    max_transfer_bytes=0
+    roc_dest_name=$(basename "$roc_file")
+    roc_existing_hash=$(remote_file_hash "files/$DATA_SUBDIR/$roc_dest_name")
+    if [ "$roc_existing_hash" != "$(local_sha256 "$roc_file")" ]; then
+        roc_bytes=$(local_size "$roc_file")
+        transfer_bytes=$((transfer_bytes + roc_bytes))
+        [ "$roc_bytes" -gt "$max_transfer_bytes" ] && max_transfer_bytes=$roc_bytes
+    fi
 
-    stage_one_file "$roc_file" "$(basename "$roc_file")"
+    tft_main_existing_hash=""
+    tft_locale_existing_hash=""
     if [ "$layout" = "tft" ]; then
-        stage_one_file "$tft_main_file" "$(basename "$tft_main_file")"
-        stage_one_file "$tft_locale_file" "$(basename "$tft_locale_file")"
+        tft_main_dest_name=$(basename "$tft_main_file")
+        tft_main_existing_hash=$(remote_file_hash "files/$DATA_SUBDIR/$tft_main_dest_name")
+        if [ "$tft_main_existing_hash" != "$(local_sha256 "$tft_main_file")" ]; then
+            tft_main_bytes=$(local_size "$tft_main_file")
+            transfer_bytes=$((transfer_bytes + tft_main_bytes))
+            [ "$tft_main_bytes" -gt "$max_transfer_bytes" ] && max_transfer_bytes=$tft_main_bytes
+        fi
+
+        tft_locale_dest_name=$(basename "$tft_locale_file")
+        tft_locale_existing_hash=$(remote_file_hash "files/$DATA_SUBDIR/$tft_locale_dest_name")
+        if [ "$tft_locale_existing_hash" != "$(local_sha256 "$tft_locale_file")" ]; then
+            tft_locale_bytes=$(local_size "$tft_locale_file")
+            transfer_bytes=$((transfer_bytes + tft_locale_bytes))
+            [ "$tft_locale_bytes" -gt "$max_transfer_bytes" ] && max_transfer_bytes=$tft_locale_bytes
+        fi
+    fi
+
+    # Peak transient requirement: every file that will actually be
+    # transferred needs its own final steady-state bytes on disk, PLUS -
+    # for whichever single file is mid-transfer at any instant (files are
+    # staged strictly one at a time; see stage_one_file()) - ONE extra
+    # duplicate copy. That is because a host->device bounce copy under
+    # $REMOTE_TMP_DIR and this script's own app-private ".stage.$$" copy
+    # transiently coexist with that file's own eventual final bytes during
+    # its own cp+verify window (stage_one_file()'s header comment); the
+    # largest file being transferred produces the worst-case transient
+    # overshoot, so it alone (not the sum of every file's overhead) is
+    # added on top of the total steady-state size. Files whose remote hash
+    # already matches contribute zero bytes here, so a fully idempotent
+    # re-stage on an otherwise near-full device is never falsely blocked.
+    require_free_space $((transfer_bytes + max_transfer_bytes))
+
+    stage_one_file "$roc_file" "$roc_dest_name" "$roc_existing_hash"
+    if [ "$layout" = "tft" ]; then
+        stage_one_file "$tft_main_file" "$tft_main_dest_name" "$tft_main_existing_hash"
+        stage_one_file "$tft_locale_file" "$tft_locale_dest_name" "$tft_locale_existing_hash"
     fi
 
     override_abs="$pkg_root/files/$DATA_SUBDIR"
