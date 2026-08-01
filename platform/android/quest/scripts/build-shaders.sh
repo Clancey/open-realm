@@ -4,7 +4,7 @@
 # Deterministic, from-source shader build: compiles every GLSL source in
 # platform/android/quest/app/src/main/cpp/shaders/*.{vert,frag} to SPIR-V
 # with the NDK's glslc, verifies each output starts with the SPIR-V magic
-# number, and embeds it as a C byte array via bin2c.c so bz_quest_vk.c can
+# number, and embeds it as an aligned C uint32_t word array via bin2c.c so bz_quest_vk.c can
 # #include the result without any Android AAssetManager plumbing (see
 # docs/quest-tabletop.md's "Shader build pipeline"). CMakeLists.txt invokes
 # this script as a custom_command so every `gradle assembleDebug`/`cmake
