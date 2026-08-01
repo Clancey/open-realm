@@ -62,11 +62,12 @@ unzip -p "$APK" "$SO" > "$TMP/lib.so" 2>/dev/null ||
     { echo "missing $SO inside $APK" >&2; exit 1; }
 
 # --- NEEDED (DT_NEEDED) allowlist ------------------------------------------
-# Only the Khronos OpenXR loader (Prefab) and the standard Bionic/NDK system
-# libraries may appear here. Anything else (SDL2, an Apple/ObjC runtime, a
-# desktop GL library, Meta's proprietary VrApi, ...) fails the check.
+# Only the Khronos OpenXR loader (Prefab), the NDK's Vulkan loader stub, and
+# the standard Bionic/NDK system libraries may appear here. Anything else
+# (SDL2, an Apple/ObjC runtime, a desktop GL library, Meta's proprietary
+# VrApi, ...) fails the check.
 "$READELF" -d "$TMP/lib.so" | awk '/NEEDED/ { gsub(/[\[\]]/, "", $NF); print $NF }' | sort -u > "$TMP/needed"
-ALLOWED='^(libopenxr_loader\.so|libandroid\.so|liblog\.so|libz\.so|libm\.so|libdl\.so|libc\.so|libc\+\+_shared\.so)$'
+ALLOWED='^(libopenxr_loader\.so|libvulkan\.so|libandroid\.so|liblog\.so|libz\.so|libm\.so|libdl\.so|libc\.so|libc\+\+_shared\.so)$'
 if grep -Ev "$ALLOWED" "$TMP/needed" > "$TMP/disallowed-needed" 2>/dev/null && [ -s "$TMP/disallowed-needed" ]; then
     echo "disallowed shared library dependency in $SO:" >&2
     cat "$TMP/disallowed-needed" >&2

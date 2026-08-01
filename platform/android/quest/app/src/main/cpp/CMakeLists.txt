@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Meta Quest (Android/NDK) tabletop native shell — Layer 2.
+# Meta Quest (Android/NDK) tabletop native shell — Layer 3.
 #
 # Builds the same headless, platform-neutral Warcraft III engine/game/asset
 # unit the visionOS build links (platform/apple/visionos/build.mk's
@@ -7,13 +7,15 @@
 # BZ_XR_SHEET_SRCS/BZ_XR_SHARED_SRCS) plus the portable tabletop lifecycle
 # host (platform/tabletop/bridge/bz_tabletop_lifecycle.c, which supplies
 # Sys_Quit()) and catalog (platform/bridge/bz_tabletop_catalog.c) into one
-# arm64-v8a NativeActivity .so, alongside a native OpenXR/Android loader
-# init shell (bz_quest_host.c). See docs/quest-tabletop.md.
+# arm64-v8a NativeActivity .so, alongside the real OpenXR/Vulkan/passthrough
+# renderer (bz_quest_xr.c/bz_quest_vk.c/bz_quest_passthrough.c/
+# bz_quest_renderer.c, bz_quest_host.c). See docs/quest-tabletop.md.
 #
-# This layer never starts the engine thread (no BZ_TabletopStart call), does
-# not create a Vulkan renderer/session, and does not consume bridge
-# snapshots/input/audio/data staging - see bz_quest_host.c's compile-time
-# seams for why, and which later layer owns each.
+# This layer still never starts the engine thread (no BZ_TabletopStart
+# call) and does not consume bridge snapshots/input/audio/data staging -
+# see bz_quest_host.c's compile-time seams for why, and which later layer
+# owns each. BZ_QUEST_ENABLE_VULKAN_RENDERER is the one seam this layer
+# implements for real.
 # ---------------------------------------------------------------------------
 cmake_minimum_required(VERSION 3.22)
 project(bz_quest_native C)
@@ -177,6 +179,38 @@ target_include_directories(openwarcraft3-bridge PRIVATE
 # --- Khronos OpenXR Android loader (Gradle/Prefab) --------------------------
 find_package(OpenXR REQUIRED CONFIG)
 
+# --- Vulkan ------------------------------------------------------------------
+# The NDK ships libvulkan.so as a system stub (real driver resolution happens
+# at runtime via the platform's Vulkan loader) - link it like any other NDK
+# system library, no Prefab/find_package needed.
+find_library(BZ_VULKAN_LIB vulkan REQUIRED)
+
+# --- Shader build pipeline ---------------------------------------------------
+# Regenerates bz_quest_shaders_generated.h from platform/android/quest/app/
+# src/main/cpp/shaders/*.{vert,frag} via scripts/build-shaders.sh on every
+# build (see that script's header comment and docs/quest-tabletop.md's
+# "Shader build pipeline" section) - no SPIR-V binary is ever committed to
+# the repo. ANDROID_NDK_HOME is pinned to CMake's own resolved ${ANDROID_NDK}
+# so the script uses the exact same NDK toolchain, not whatever it would
+# otherwise guess from the caller's environment.
+set(BZ_SHADER_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/bz_generated/shaders")
+set(BZ_SHADER_SCRIPT "${BZ_REPO_ROOT}/platform/android/quest/scripts/build-shaders.sh")
+set(BZ_SHADER_GEN_HEADER "${BZ_SHADER_OUT_DIR}/bz_quest_shaders_generated.h")
+file(MAKE_DIRECTORY "${BZ_SHADER_OUT_DIR}")
+add_custom_command(
+    OUTPUT "${BZ_SHADER_GEN_HEADER}"
+    COMMAND "${CMAKE_COMMAND}" -E env "ANDROID_NDK_HOME=${ANDROID_NDK}"
+            "${BZ_SHADER_SCRIPT}" "${BZ_SHADER_OUT_DIR}"
+    DEPENDS
+        "${BZ_SHADER_SCRIPT}"
+        "${BZ_REPO_ROOT}/platform/android/quest/scripts/bin2c.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tabletop_vert.vert"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tabletop_frag.frag"
+    COMMENT "bz_quest: compiling GLSL shaders to SPIR-V and embedding as C headers"
+    VERBATIM
+)
+add_custom_target(bz_quest_shaders DEPENDS "${BZ_SHADER_GEN_HEADER}")
+
 # --- android_native_app_glue -------------------------------------------------
 # Vendored verbatim from the installed NDK (standard NativeActivity/CMake
 # pattern - see the NDK's own native-activity sample); not copied into this
@@ -191,8 +225,19 @@ target_include_directories(bz_native_app_glue PUBLIC
 # --- Native host shell -------------------------------------------------------
 add_library(bz_quest_native SHARED
     bz_quest_host.c
+    bz_quest_pure.c
+    bz_quest_scene.c
+    bz_quest_xr.c
+    bz_quest_vk.c
+    bz_quest_passthrough.c
+    bz_quest_renderer.c
 )
-target_include_directories(bz_quest_native PRIVATE "${BZ_REPO_ROOT}")
+add_dependencies(bz_quest_native bz_quest_shaders)
+target_compile_definitions(bz_quest_native PRIVATE BZ_QUEST_ENABLE_VULKAN_RENDERER=1)
+target_include_directories(bz_quest_native PRIVATE
+    "${BZ_REPO_ROOT}"
+    "${BZ_SHADER_OUT_DIR}"
+)
 target_link_libraries(bz_quest_native PRIVATE
     bz_native_app_glue
     openwarcraft3-bridge
@@ -203,6 +248,7 @@ target_link_libraries(bz_quest_native PRIVATE
     openwarcraft3-engine
     openwarcraft3-shared
     OpenXR::openxr_loader
+    ${BZ_VULKAN_LIB}
     android
     log
     z
