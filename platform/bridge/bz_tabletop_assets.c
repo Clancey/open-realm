@@ -646,8 +646,115 @@ MODEL_INFO_AT(BZ_TTAsset_MaterialInfo, bzTTMaterialInfo_t, material_count, mater
 MODEL_INFO_AT(BZ_TTAsset_MaterialLayerInfo, bzTTMaterialLayerInfo_t, layer_count, layers_offset)
 MODEL_INFO_AT(BZ_TTAsset_ModelTextureInfo, bzTTModelTextureInfo_t, texture_count, textures_offset)
 MODEL_INFO_AT(BZ_TTAsset_SequenceInfo, bzTTSequenceInfo_t, sequence_count, sequences_offset)
-MODEL_INFO_AT(BZ_TTAsset_NodeInfo, bzTTNodeInfo_t, node_count, nodes_offset)
 #undef MODEL_INFO_AT
+
+static const bzTTNodeRecord_t *node_record(const bzTTAsset_t *asset, uint32_t index) {
+    if (!asset || asset->kind != BZ_TTA_ASSET_MODEL || index >= asset->u.model.info.node_count)
+        return NULL;
+    return BZ_TTA_AssetData((bzTTAsset_t *)asset, asset->u.model.nodes_offset +
+                            index * sizeof(bzTTNodeRecord_t), sizeof(bzTTNodeRecord_t));
+}
+
+bool BZ_TTAsset_NodeInfo(const bzTTAsset_t *asset, uint32_t index, bzTTNodeInfo_t *out) {
+    const bzTTNodeRecord_t *record = node_record(asset, index);
+    if (!record || !out) return false;
+    *out = record->info;
+    return true;
+}
+
+bool BZ_TTAsset_GlobalSequenceInfo(const bzTTAsset_t *asset, uint32_t index, uint32_t *out_duration_msec) {
+    const uint32_t *src;
+    if (!asset || asset->kind != BZ_TTA_ASSET_MODEL || !out_duration_msec ||
+        index >= asset->u.model.info.global_sequence_count) return false;
+    src = BZ_TTA_AssetData((bzTTAsset_t *)asset, asset->u.model.global_sequences_offset +
+                           index * sizeof(uint32_t), sizeof(uint32_t));
+    if (!src) return false;
+    *out_duration_msec = *src;
+    return true;
+}
+
+static const bzTTTrackRecord_t *node_track_record(const bzTTAsset_t *asset, uint32_t node_index,
+                                                  bzTTNodeChannel_t channel) {
+    const bzTTNodeRecord_t *record = node_record(asset, node_index);
+    if (!record) return NULL;
+    switch (channel) {
+        case BZ_TTA_NODE_TRANSLATION: return &record->translation;
+        case BZ_TTA_NODE_ROTATION: return &record->rotation;
+        case BZ_TTA_NODE_SCALE: return &record->scale;
+        default: return NULL;
+    }
+}
+
+bool BZ_TTAsset_NodeTrackInfo(const bzTTAsset_t *asset, uint32_t node_index,
+                              bzTTNodeChannel_t channel, bzTTTrackInfo_t *out) {
+    const bzTTTrackRecord_t *track = node_track_record(asset, node_index, channel);
+    if (!track || !out) return false;
+    out->key_count = track->key_count; out->interp = track->interp; out->global_sequence = track->global_sequence;
+    return true;
+}
+
+#define COPY_TRACK_KEYS(NAME, TYPE, CHANNEL) \
+uint32_t NAME(const bzTTAsset_t *asset, uint32_t node_index, TYPE *dst, uint32_t cap) { \
+    const bzTTTrackRecord_t *track = node_track_record(asset, node_index, CHANNEL); \
+    uint32_t n; const void *src; \
+    if (!track || !dst || !cap) return 0; \
+    n = track->key_count < cap ? track->key_count : cap; \
+    if (!n) return 0; \
+    src = BZ_TTA_AssetData((bzTTAsset_t *)asset, track->keys_offset, (size_t)n * sizeof(TYPE)); \
+    if (!src) return 0; \
+    memcpy(dst, src, (size_t)n * sizeof(TYPE)); \
+    return n; \
+}
+COPY_TRACK_KEYS(BZ_TTAsset_CopyNodeTranslationKeys, bzTTVec3Key_t, BZ_TTA_NODE_TRANSLATION)
+COPY_TRACK_KEYS(BZ_TTAsset_CopyNodeRotationKeys, bzTTQuatKey_t, BZ_TTA_NODE_ROTATION)
+COPY_TRACK_KEYS(BZ_TTAsset_CopyNodeScaleKeys, bzTTVec3Key_t, BZ_TTA_NODE_SCALE)
+#undef COPY_TRACK_KEYS
+
+bool BZ_TTAsset_GeosetAnimInfo(const bzTTAsset_t *asset, uint32_t index, bzTTGeosetAnimInfo_t *out) {
+    const bzTTGeosetRecord_t *record = geoset_record(asset, index);
+    if (!record || !out) return false;
+    *out = record->anim;
+    return true;
+}
+
+uint32_t BZ_TTAsset_CopyGeosetAlphaKeys(const bzTTAsset_t *asset, uint32_t index,
+                                       bzTTFloatKey_t *dst, uint32_t cap) {
+    const bzTTGeosetRecord_t *record = geoset_record(asset, index);
+    uint32_t n; const void *src;
+    if (!record || !record->anim.has_alpha_track || !dst || !cap) return 0;
+    n = record->anim.alpha_track.key_count < cap ? record->anim.alpha_track.key_count : cap;
+    if (!n) return 0;
+    src = BZ_TTA_AssetData((bzTTAsset_t *)asset, record->alpha_keys_offset, (size_t)n * sizeof(bzTTFloatKey_t));
+    if (!src) return 0;
+    memcpy(dst, src, (size_t)n * sizeof(bzTTFloatKey_t));
+    return n;
+}
+
+uint32_t BZ_TTAsset_CopyGeosetVertexSkin(const bzTTAsset_t *asset, uint32_t index,
+                                        bzTTVertexSkin_t *dst, uint32_t cap) {
+    const bzTTGeosetRecord_t *record = geoset_record(asset, index);
+    uint32_t n; const void *src;
+    if (!record || !dst || !cap) return 0;
+    n = record->info.vertex_count < cap ? record->info.vertex_count : cap;
+    if (!n) return 0;
+    src = BZ_TTA_AssetData((bzTTAsset_t *)asset, record->skin_offset, (size_t)n * sizeof(bzTTVertexSkin_t));
+    if (!src) return 0;
+    memcpy(dst, src, (size_t)n * sizeof(bzTTVertexSkin_t));
+    return n;
+}
+
+uint32_t BZ_TTAsset_CopyGeosetMatrixPalette(const bzTTAsset_t *asset, uint32_t index,
+                                           uint32_t *dst, uint32_t cap) {
+    const bzTTGeosetRecord_t *record = geoset_record(asset, index);
+    uint32_t n; const void *src;
+    if (!record || !dst || !cap) return 0;
+    n = record->info.matrix_palette_count < cap ? record->info.matrix_palette_count : cap;
+    if (!n) return 0;
+    src = BZ_TTA_AssetData((bzTTAsset_t *)asset, record->palette_offset, (size_t)n * sizeof(uint32_t));
+    if (!src) return 0;
+    memcpy(dst, src, (size_t)n * sizeof(uint32_t));
+    return n;
+}
 
 void BZ_TTA_PublishTerrainFromGame(void) {
     bzTTTerrain_t *terrain = NULL, *old;

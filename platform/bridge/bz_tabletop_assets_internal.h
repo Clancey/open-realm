@@ -3,10 +3,28 @@
 
 #include "bz_tabletop_assets.h"
 
+/* A track's keys live at keys_offset as an array of bzTTVec3Key_t/bzTTQuatKey_t/bzTTFloatKey_t
+ * (element type is implied by which channel/accessor reads it); key_count 0 means "no track". */
+typedef struct {
+    uint32_t key_count;
+    uint32_t interp;
+    uint32_t global_sequence;
+    uint32_t keys_offset;
+} bzTTTrackRecord_t;
+
 typedef struct {
     bzTTGeosetInfo_t info;
     uint32_t vertices_offset, normals_offset, uvs_offset, indices_offset;
+    uint32_t skin_offset; /* array of bzTTVertexSkin_t, count == info.vertex_count (always present) */
+    uint32_t palette_offset; /* array of uint32_t node indices, count == info.matrix_palette_count */
+    bzTTGeosetAnimInfo_t anim;
+    uint32_t alpha_keys_offset; /* array of bzTTFloatKey_t, count == anim.alpha_track.key_count */
 } bzTTGeosetRecord_t;
+
+typedef struct {
+    bzTTNodeInfo_t info;
+    bzTTTrackRecord_t translation, rotation, scale;
+} bzTTNodeRecord_t;
 
 typedef struct {
     uint32_t id;
@@ -33,7 +51,8 @@ struct bzTTAsset {
             uint32_t layers_offset;
             uint32_t textures_offset;
             uint32_t sequences_offset;
-            uint32_t nodes_offset;
+            uint32_t nodes_offset; /* array of bzTTNodeRecord_t (not bzTTNodeInfo_t directly) */
+            uint32_t global_sequences_offset; /* array of uint32_t durations, count = info.global_sequence_count */
         } model;
     } u;
     size_t allocation_size;

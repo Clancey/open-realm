@@ -238,7 +238,8 @@ test-assets: blpgen mdxgen mpqtool mdxtool | $(TESTS_DIR)
 		"quad_sprite TestUI/Textures/checker_8x8.blp $(TESTS_RES_DIR)/TestUI/Models/quad_sprite.mdx" \
 		"panel_sprite TestUI/Textures/solid_white.blp $(TESTS_RES_DIR)/TestUI/Models/panel_sprite.mdx" \
 		"ui_panel TestUI/Textures/solid_white.blp $(TESTS_RES_DIR)/TestUI/Models/ui_panel.mdx" \
-		"anim_pulse TestUI/Textures/alpha_ring_16x16.blp $(TESTS_RES_DIR)/TestUI/Models/anim_pulse.mdx"; do \
+		"anim_pulse TestUI/Textures/alpha_ring_16x16.blp $(TESTS_RES_DIR)/TestUI/Models/anim_pulse.mdx" \
+		"rigged_anim TestUI/Textures/checker_8x8.blp $(TESTS_RES_DIR)/TestUI/Models/rigged_anim.mdx"; do \
 		$(BIN_DIR)/mdxgen$(EXE_EXT) $$model; \
 	done
 	@echo "[test-assets] packing tests.mpq"

@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define BZ_TABLETOP_ASSETS_ABI_VERSION 2u
+#define BZ_TABLETOP_ASSETS_ABI_VERSION 3u
 
 enum {
     BZ_TTA_MAX_IDENTITY = 260, /* MDX texture records carry a fixed 260-byte path */
@@ -24,6 +24,9 @@ enum {
     BZ_TTA_MAX_NODE_NAME = 80,
     BZ_TTA_TERRAIN_CHUNK_TILES = 32,
     BZ_TTA_TEAM_COLOR_NONE = UINT32_MAX,
+    BZ_TTA_NO_GLOBAL_SEQUENCE = UINT32_MAX, /* bzTTTrackInfo_t.global_sequence: track is keyed by entity/sequence time */
+    BZ_TTA_MAX_VERTEX_SKIN_BONES = 4, /* matches classic MDX MAX_SKIN_BONES */
+    BZ_TTA_MAX_MATRIX_PALETTE = 128, /* matches classic MDX MDX_MATRIX_PALETTE (per-geoset bone cap) */
 };
 
 typedef struct bzTTSnapshot bzTTSnapshot_t;
@@ -140,6 +143,7 @@ typedef struct {
     uint32_t sequence_count;
     uint32_t node_count;
     bzTTBounds3_t bounds;
+    uint32_t global_sequence_count; /* appended for ABI v3: GLBS wall-clock-modulo sequences */
 } bzTTModelInfo_t;
 
 typedef struct {
@@ -150,6 +154,11 @@ typedef struct {
     uint32_t material_index;
     uint32_t vertex_group_count;
     bzTTBounds3_t bounds;
+    /* Every geoset always has a resolved skin + matrix palette (>=1 entry), matching
+     * classic MDX R_SetupGeosetVertexBuffer: geosets with no BONE hierarchy still get a
+     * single-entry palette bound to node 0, so unanimated models render identically via
+     * the same skinning path (identity bone matrix) rather than a separate static path. */
+    uint32_t matrix_palette_count; /* appended v3: <= BZ_TTA_MAX_MATRIX_PALETTE */
 } bzTTGeosetInfo_t;
 
 typedef struct {
@@ -194,6 +203,67 @@ typedef struct {
     float initial_rotation_x, initial_rotation_y, initial_rotation_z, initial_rotation_w;
     bzTTVec3_t initial_scale;
 } bzTTNodeInfo_t;
+
+/* Matches classic MDX MODELKEYTRACKTYPE exactly (renderer/r_local.h). Interpolation
+ * runs between the keyframe's value and the following/preceding keyframe's in/out
+ * tangents; NONE holds the left value, LINEAR lerps, HERMITE/BEZIER use the tangents. */
+typedef enum {
+    BZ_TTA_INTERP_NONE = 0,
+    BZ_TTA_INTERP_LINEAR = 1,
+    BZ_TTA_INTERP_HERMITE = 2,
+    BZ_TTA_INTERP_BEZIER = 3,
+} bzTTKeyInterp_t;
+
+typedef enum {
+    BZ_TTA_NODE_TRANSLATION = 0,
+    BZ_TTA_NODE_ROTATION = 1,
+    BZ_TTA_NODE_SCALE = 2,
+} bzTTNodeChannel_t;
+
+typedef struct {
+    float x, y, z, w;
+} bzTTQuat_t;
+
+typedef struct {
+    uint32_t time_msec;
+    bzTTVec3_t value, in_tan, out_tan;
+} bzTTVec3Key_t;
+
+typedef struct {
+    uint32_t time_msec;
+    bzTTQuat_t value, in_tan, out_tan;
+} bzTTQuatKey_t;
+
+typedef struct {
+    uint32_t time_msec;
+    float value, in_tan, out_tan;
+} bzTTFloatKey_t;
+
+/* Describes one node channel's keyframe track without exposing its keys. global_sequence
+ * is BZ_TTA_NO_GLOBAL_SEQUENCE when the track samples entity/sequence time directly, or a
+ * global-sequence-table index whose duration (BZ_TTAsset_GlobalSequenceInfo) must instead be
+ * used to compute a wrapped [0, duration) sample time, matching classic MDX GLBS semantics. */
+typedef struct {
+    uint32_t key_count;
+    uint32_t interp; /* bzTTKeyInterp_t */
+    uint32_t global_sequence;
+} bzTTTrackInfo_t;
+
+typedef struct {
+    bool has_alpha_track;
+    float static_alpha; /* used verbatim when has_alpha_track is false */
+    bzTTTrackInfo_t alpha_track;
+} bzTTGeosetAnimInfo_t;
+
+/* Resolved top-4 vertex skin (mirrors classic mdxVertexSkin_t exactly). bone_index values are
+ * slots into this geoset's own matrix palette (BZ_TTAsset_CopyGeosetMatrixPalette), not raw
+ * MDX object_ids or global node indices — mirrors the desktop renderer's per-geoset palette
+ * indirection exactly (bounded to BZ_TTA_MAX_MATRIX_PALETTE bones regardless of model size).
+ * bone_weight values sum to 255 per vertex. */
+typedef struct {
+    uint8_t bone_index[BZ_TTA_MAX_VERTEX_SKIN_BONES];
+    uint8_t bone_weight[BZ_TTA_MAX_VERTEX_SKIN_BONES];
+} bzTTVertexSkin_t;
 
 typedef struct {
     uint32_t width, height;               /* corner grid dimensions */
@@ -291,6 +361,35 @@ bool BZ_TTAsset_ModelTextureInfo(const bzTTAsset_t *asset, uint32_t index,
                                  bzTTModelTextureInfo_t *out);
 bool BZ_TTAsset_SequenceInfo(const bzTTAsset_t *asset, uint32_t index, bzTTSequenceInfo_t *out);
 bool BZ_TTAsset_NodeInfo(const bzTTAsset_t *asset, uint32_t index, bzTTNodeInfo_t *out);
+
+/* Global sequence durations (msec). Nodes/geoset-anim tracks reference these by index via
+ * bzTTTrackInfo_t.global_sequence; sampling wraps time modulo the returned duration. */
+bool BZ_TTAsset_GlobalSequenceInfo(const bzTTAsset_t *asset, uint32_t index, uint32_t *out_duration_msec);
+
+/* Node animation tracks (translation/scale = vec3 keys, rotation = quaternion keys). Absent
+ * tracks (no KGxx chunk for that node) report key_count 0; callers must fall back to the
+ * node's initial_translation/rotation/scale rest pose, matching classic MDX behavior. */
+bool BZ_TTAsset_NodeTrackInfo(const bzTTAsset_t *asset, uint32_t node_index,
+                              bzTTNodeChannel_t channel, bzTTTrackInfo_t *out);
+uint32_t BZ_TTAsset_CopyNodeTranslationKeys(const bzTTAsset_t *asset, uint32_t node_index,
+                                            bzTTVec3Key_t *dst, uint32_t cap);
+uint32_t BZ_TTAsset_CopyNodeRotationKeys(const bzTTAsset_t *asset, uint32_t node_index,
+                                         bzTTQuatKey_t *dst, uint32_t cap);
+uint32_t BZ_TTAsset_CopyNodeScaleKeys(const bzTTAsset_t *asset, uint32_t node_index,
+                                      bzTTVec3Key_t *dst, uint32_t cap);
+
+/* Geoset dynamic material state: alpha animation (GEOA/KGAO) and resolved vertex skin
+ * (GNDX/MTGC/MATS, already reduced to the top-4-weighted-bone form used for GPU skinning).
+ * The matrix palette lists this geoset's referenced nodes (BZ_TTAsset_NodeInfo indices,
+ * already remapped from raw MDX object_id at decode time); bzTTVertexSkin_t.bone_index
+ * values are slots into this per-geoset array, matching classic MDX indirection. */
+bool BZ_TTAsset_GeosetAnimInfo(const bzTTAsset_t *asset, uint32_t index, bzTTGeosetAnimInfo_t *out);
+uint32_t BZ_TTAsset_CopyGeosetAlphaKeys(const bzTTAsset_t *asset, uint32_t index,
+                                        bzTTFloatKey_t *dst, uint32_t cap);
+uint32_t BZ_TTAsset_CopyGeosetVertexSkin(const bzTTAsset_t *asset, uint32_t index,
+                                         bzTTVertexSkin_t *dst, uint32_t cap);
+uint32_t BZ_TTAsset_CopyGeosetMatrixPalette(const bzTTAsset_t *asset, uint32_t index,
+                                            uint32_t *dst, uint32_t cap);
 
 /* Called on the engine thread after authoritative map state is consistent. */
 void BZ_TTA_PublishTerrainFromGame(void);
