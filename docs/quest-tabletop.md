@@ -275,12 +275,12 @@ literal text, from the exact `BZ_QUEST_LOGI`/`BZ_QUEST_LOGE` call sites in
     lifecycleState=...` line shortly after (the first-ever captured frame,
     `bz_quest_frame_should_log()`'s "status changed from nothing captured
     yet" case — see "Diagnostics: throttled log, never per-frame" below),
-    then **no further** `tabletop frame: ...` lines unless
-    `generation`/`lifecycleState`/`lifecycleError` actually changes (there
-    is no map loaded in this layer, so `generation` still advances once
-    per client frame — see "Snapshot ownership and diagnostics" below —
-    but the throttled-log gate suppresses logging every one of those
-    advances).
+    then **no further** `tabletop frame: ...` lines unless `status`/
+    `lifecycleState`/`lifecycleError` actually changes (there is no map
+    loaded in this layer, so `generation` still advances once per client
+    frame — see "Snapshot ownership and diagnostics" below — but a bare
+    `generation` advance is never, by itself, a log trigger, so this line
+    does not repeat merely because the engine is running).
 14. No further `BZ_QUEST_LOGE` lines once `FOCUSED` is reached and frames are
     flowing (a healthy frame loop produces **no** per-frame log output at
     all — see "No busy loop / no per-frame logging" below).
@@ -303,7 +303,7 @@ test`, none of which need Gradle/NDK/Quest hardware:
 | `bz_quest_pure.c` | `tests/test_bz_quest_pure.c` | Projection/view-matrix math, format/extension/passthrough-capability selection (unchanged from layer 3). |
 | `bz_quest_scene.c` | `tests/test_bz_quest_scene.c` | Procedural test-scene generator (unchanged from layer 3). |
 | `bz_quest_data.c` | `tests/test_bz_quest_data.c` | Default-dir construction, override read/validate (normal + every documented rejection: relative path, disallowed characters, oversized, empty), full resolve fallback order, and argv construction (normal + undersized-buffer/NULL-arg error paths) — 22 tests, pure, real temp dirs via `mkdtemp()`. |
-| `bz_quest_frame.c` | `tests/test_bz_quest_frame.c` | Reset value, `bz_quest_frame_from_values()` field copy/truncation/ABI-mismatch detection, and every `bz_quest_frame_should_log()` cache-hit/cache-miss branch (identical frame never logs; status/generation/lifecycle-state/lifecycle-error changes each log) — 13 tests, pure, no I/O. |
+| `bz_quest_frame.c` | `tests/test_bz_quest_frame.c` | Reset value, `bz_quest_frame_from_values()` field copy/truncation/ABI-mismatch detection, and every `bz_quest_frame_should_log()` cache-hit/cache-miss branch (identical frame never logs; status/lifecycle-state/lifecycle-error changes each log; a bare `generation` advance — in *any* status, including `OK` — never logs, including across ~190 simulated consecutive engine frames, guarding against the per-frame-log regression fixed in PR #19's review pass) — 15 tests, pure, no I/O. |
 | `bz_quest_bridge.c` | `tests/test_bz_quest_bridge.c` | Valid-override start reaches `RUNNING`; missing-data start reaches `FAILED` with the engine's own error surfaced; invalid-override start reaches `FAILED` *before* any `bzTabletopLifecycle_t` exists; a second `start()` on an already-attempted instance is rejected; suspend/resume forward correctly (and are safe no-ops before a start or after a stop); `stop()` is idempotent and safe pre-start; `destroy()` then a fresh `start()` on the same storage succeeds; `is_terminal()` is correct for every bridge state — 10 tests, **linking the real** `bz_tabletop_lifecycle.c`/`common/bz_runtime.c` (not a stub), 67 assertions. |
 
 `bz_quest_bridge.c`'s tests are the one suite in this table that needs
@@ -919,15 +919,30 @@ layer consumes v3 as-is.
 `android_main()` checks before emitting the `"tabletop frame: ..."` log
 line — it returns `true` only when something actually changed since the
 last capture: the snapshot `status` changed (first-ever capture, or an ABI
-mismatch newly appearing/clearing), the `generation` advanced while
-`status == OK`, the `lifecycleState` changed, or the `lifecycleError` text
-appeared/changed/cleared. It deliberately does **not** return `true` merely
-because a frame ran, so a healthy, steady-state loop (map-less, generation
+mismatch newly appearing/clearing), the `lifecycleState` changed, or the
+`lifecycleError` text appeared/changed/cleared. It deliberately does **not**
+return `true` merely because `generation` advanced, even while
+`status == OK`: `BZ_TT_PublishSnapshotFromClient()` bumps `generation` on
+every engine frame (tens of times per second — see
+`platform/bridge/bz_tabletop_transport.c` and
+`platform/tabletop/client/cl_scrn_tabletop_null.c`'s `SCR_UpdateScreen()`),
+so treating a bare generation advance as a log trigger reproduces exactly
+the per-frame logging AGENTS.md forbids the moment a bridge starts
+successfully — this was a real defect caught in PR #19's review pass and
+fixed by dropping the generation-advance trigger entirely (see
+`test_should_log_generation_only_advance_never_logs_when_ok()` in
+`tests/test_bz_quest_frame.c`, which simulates ~190 consecutive engine
+frames of bare generation churn and asserts none of them log). The
+snapshot's first-ever `OK` transition already proves generation is
+advancing (there would be no `OK` status without a real, non-`NULL`
+snapshot), and `generation` remains available in `bzQuestFrame_t` for
+anyone reading the descriptor directly — only the automatic log trigger
+excludes it. So a healthy, steady-state loop (map-less, generation
 advancing every client frame, exactly as this layer expects — see
-"Known limitations of this frame descriptor" below) produces **zero** additional log lines after the
-first capture, matching AGENTS.md's "never log per frame; log transitions/
-milestones only" convention and this document's own "No busy loop / no
-per-frame logging" policy above.
+"Known limitations of this frame descriptor" below) produces **zero**
+additional log lines after the first capture, matching AGENTS.md's "never
+log per frame; log transitions/milestones only" convention and this
+document's own "No busy loop / no per-frame logging" policy above.
 
 ### Integration into the test tabletop
 

@@ -46,7 +46,6 @@ void bz_quest_frame_from_values(const bzQuestFrameValues_t *values, bzQuestFrame
 bool bz_quest_frame_should_log(const bzQuestFrame_t *previous, const bzQuestFrame_t *current) {
     if (!previous || !current) return false;
     if (previous->status != current->status) return true;
-    if (current->status == BZ_QUEST_FRAME_OK && previous->generation != current->generation) return true;
     if (previous->lifecycleState != current->lifecycleState) return true;
     if (strcmp(previous->lifecycleError, current->lifecycleError) != 0) return true;
     return false;

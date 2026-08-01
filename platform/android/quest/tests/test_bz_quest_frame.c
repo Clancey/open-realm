@@ -161,19 +161,42 @@ static void test_should_log_cache_miss_status_transition_logs(void) {
     ASSERT(bz_quest_frame_should_log(&previous, &current));
 }
 
-static void test_should_log_cache_miss_generation_advance_logs_only_when_ok(void) {
+static void test_should_log_generation_only_advance_never_logs_when_ok(void) {
+    /* PR #19 review fix: BZ_TT_PublishSnapshotFromClient() bumps
+     * `generation` on every engine frame (tens of times per second - see
+     * platform/bridge/bz_tabletop_transport.c and
+     * platform/tabletop/client/cl_scrn_tabletop_null.c's
+     * SCR_UpdateScreen()), so a bare generation advance with status/
+     * lifecycleState/lifecycleError otherwise unchanged must NEVER trigger
+     * a log line - that would violate AGENTS.md's "never log per frame"
+     * rule the moment status reaches OK. This is the inverse of
+     * test_should_log_cache_miss_status_transition_logs above. */
     bzQuestFrame_t previous, current;
     bz_quest_frame_reset(&previous);
     previous.status = BZ_QUEST_FRAME_OK;
     previous.generation = 10;
     current = previous;
     current.generation = 11;
-    ASSERT(bz_quest_frame_should_log(&previous, &current));
+    ASSERT(!bz_quest_frame_should_log(&previous, &current));
 
+    /* Simulate many consecutive engine frames (as the real XR/render loop
+     * would poll): generation keeps climbing, nothing else changes - still
+     * never logs, any single one of these would have failed before this
+     * fix. */
+    uint64_t gen;
+    for (gen = 12; gen < 200; gen++) {
+        previous = current;
+        current.generation = gen;
+        ASSERT(!bz_quest_frame_should_log(&previous, &current));
+    }
+}
+
+static void test_should_log_generation_advance_never_logs_when_not_ok(void) {
     /* Generation advancing while NOT OK (e.g. still NO_SNAPSHOT/mismatch)
-     * must not itself trigger a log - only a status change would (covered
-     * above); this guards against over-eager logging on meaningless
-     * generation churn in a non-OK snapshot state. */
+     * must also not itself trigger a log - only a status change would
+     * (covered above). */
+    bzQuestFrame_t previous, current;
+    bz_quest_frame_reset(&previous);
     previous.status = BZ_QUEST_FRAME_ABI_MISMATCH;
     previous.generation = 10;
     current = previous;
@@ -188,6 +211,19 @@ static void test_should_log_cache_hit_same_generation_ok_never_logs(void) {
     previous.generation = 10;
     current = previous;
     ASSERT(!bz_quest_frame_should_log(&previous, &current));
+}
+
+static void test_should_log_status_transition_logs_even_with_generation_jump(void) {
+    /* Inverse of the generation-only cases above: a REAL transition
+     * (status changing) must still log even though generation also jumped
+     * in the same poll - the fix must not have accidentally suppressed
+     * genuine transitions while fixing the per-frame spam. */
+    bzQuestFrame_t previous, current;
+    bz_quest_frame_reset(&previous); /* NO_SNAPSHOT, generation 0 */
+    current = previous;
+    current.status = BZ_QUEST_FRAME_OK;
+    current.generation = 500;
+    ASSERT(bz_quest_frame_should_log(&previous, &current));
 }
 
 static void test_should_log_lifecycle_state_change_logs(void) {
@@ -222,8 +258,10 @@ void run_bz_quest_frame_tests(void) {
     RUN_TEST(test_should_log_null_pointers_never_log);
     RUN_TEST(test_should_log_cache_hit_identical_frame_never_logs);
     RUN_TEST(test_should_log_cache_miss_status_transition_logs);
-    RUN_TEST(test_should_log_cache_miss_generation_advance_logs_only_when_ok);
+    RUN_TEST(test_should_log_generation_only_advance_never_logs_when_ok);
+    RUN_TEST(test_should_log_generation_advance_never_logs_when_not_ok);
     RUN_TEST(test_should_log_cache_hit_same_generation_ok_never_logs);
+    RUN_TEST(test_should_log_status_transition_logs_even_with_generation_jump);
     RUN_TEST(test_should_log_lifecycle_state_change_logs);
     RUN_TEST(test_should_log_lifecycle_error_appear_and_clear_logs);
 }

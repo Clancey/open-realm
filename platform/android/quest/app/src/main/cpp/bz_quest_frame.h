@@ -110,15 +110,21 @@ void bz_quest_frame_reset(bzQuestFrame_t *out);
 void bz_quest_frame_from_values(const bzQuestFrameValues_t *values, bzQuestFrame_t *out);
 
 /*
- * Decides whether the host should emit a throttled diagnostic log line this
- * poll. Never true merely because a frame ran - the "no busy loop / no
- * per-frame logging" requirement from docs/quest-tabletop.md and AGENTS.md's
- * "no per-frame logging" convention applies here too. Returns true iff any
- * of: the snapshot status changed (first-ever snapshot, or an ABI mismatch
- * newly appearing/clearing), the generation advanced while status is OK,
- * the lifecycle state changed, or the lifecycle error text appeared/
- * changed/cleared. Returns false if either pointer is NULL (nothing to
- * compare against yet).
+ * Decides whether the host should emit a diagnostic log line this poll.
+ * Never true merely because a frame ran, and NEVER true merely because
+ * `generation` advanced: BZ_TT_PublishSnapshotFromClient() bumps generation
+ * on every engine frame (see platform/bridge/bz_tabletop_transport.c and
+ * platform/tabletop/client/cl_scrn_tabletop_null.c's SCR_UpdateScreen()),
+ * so a bare generation-advance trigger would log at the engine's frame
+ * rate (tens of times per second) - exactly the per-frame logging AGENTS.md
+ * and docs/quest-tabletop.md forbid. Returns true iff any of: the snapshot
+ * status changed (first-ever snapshot proves generation is already
+ * advancing, or an ABI mismatch newly appearing/clearing), the lifecycle
+ * state changed, or the lifecycle error text appeared/changed/cleared.
+ * `generation` itself is still copied into bzQuestFrame_t for whoever reads
+ * the descriptor directly - only the automatic log trigger excludes it.
+ * Returns false if either pointer is NULL (nothing to compare against
+ * yet).
  */
 bool bz_quest_frame_should_log(const bzQuestFrame_t *previous, const bzQuestFrame_t *current);
 
