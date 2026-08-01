@@ -1075,9 +1075,12 @@ here:
     `WarcraftAssetAdapter.swift:384-389`.
 - **Scale**: deliberately not a raw MDX-unit passthrough. Two stages, both
   replicated exactly from the reviewed renderer's `.world` coordinate space:
-  a per-category multiplier applied to `max(footprint, 0.25)` for X/Z
-  (`WarcraftRenderDescriptors.swift:375-391`), then a further world-space
-  scale-down `(min(x,2)*0.06, y*0.08, min(z,2)*0.06)`
+  a per-category multiplier applied to `max(footprint, 0.25)` **independently
+  per axis** — footprintX/width feeds X, footprintY/depth feeds Z, never a
+  shared `max(footprintX, footprintY)` across both (a rectangular footprint
+  must stay rectangular) — (`WarcraftRenderDescriptors.swift:375-391`,
+  `LiveTabletopTransport.swift:686`), then a further world-space scale-down
+  `(min(x,2)*0.06, y*0.08, min(z,2)*0.06)`
   (`WarcraftRenderMath.swift:498-514`). `bzTTEntity_t.scale` (the runtime
   unit-scale field, e.g. `SetUnitScale`) is never folded in — grepped, no
   reference to `entity.metadata.scale` in either reviewed Swift file's

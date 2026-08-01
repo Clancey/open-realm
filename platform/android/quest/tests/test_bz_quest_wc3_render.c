@@ -123,6 +123,73 @@ static void test_footprint_above_cap_is_clamped(void) {
     ASSERT_EQ_FLOAT(world[0], 0.12f, 0.0005f);
 }
 
+static void test_rectangular_footprint_scales_x_and_z_independently(void) {
+    /* Regression test for a real bug: X and Z must NOT be forced square by
+     * sharing a single max(footprintX, footprintY) - each axis uses its OWN
+     * footprint value (footprintX -> world X/width, footprintY -> world
+     * Z/depth), per WarcraftRenderDescriptors.swift:375-391's independent
+     * max(footprint.width, 0.25)/max(footprint.depth, 0.25). A 2x0.5
+     * footprint (wide, shallow) must produce two DIFFERENT scale factors,
+     * not the same value on both axes. */
+    bzQuestWc3EntityInput_t entity;
+    memset(&entity, 0, sizeof(entity));
+    entity.category = 2; /* BZ_TTA_CATEGORY_BUILDING: categoryScale 1.0 */
+    entity.footprintX = 2.0f;
+    entity.footprintY = 0.5f;
+    entity.angle = 0.0f;
+
+    float world[16];
+    bz_quest_wc3_build_world_matrix(&entity, world);
+
+    /* sx = min(1.0*2.0, 2)*0.06 = 0.12; sz = min(1.0*0.5, 2)*0.06 = 0.03 -
+     * two distinct values, not both forced to whichever axis is larger. */
+    ASSERT_EQ_FLOAT(world[0], 0.12f, 0.0005f);
+    ASSERT_EQ_FLOAT(world[10], 0.03f, 0.0005f);
+    ASSERT(world[0] != world[10]);
+}
+
+static void test_rectangular_footprint_orientation_is_not_swapped(void) {
+    /* Inverse orientation of the test above - swapping which axis is wide
+     * vs. shallow must swap which world-matrix diagonal entry is larger,
+     * proving footprintX truly drives X and footprintY truly drives Z (not
+     * e.g. both silently reading the same field, or being cross-wired). */
+    bzQuestWc3EntityInput_t entity;
+    memset(&entity, 0, sizeof(entity));
+    entity.category = 2;
+    entity.footprintX = 0.5f;
+    entity.footprintY = 2.0f;
+    entity.angle = 0.0f;
+
+    float world[16];
+    bz_quest_wc3_build_world_matrix(&entity, world);
+
+    /* sx = min(1.0*0.5, 2)*0.06 = 0.03; sz = min(1.0*2.0, 2)*0.06 = 0.12 -
+     * the mirror image of test_rectangular_footprint_scales_x_and_z_independently. */
+    ASSERT_EQ_FLOAT(world[0], 0.03f, 0.0005f);
+    ASSERT_EQ_FLOAT(world[10], 0.12f, 0.0005f);
+}
+
+static void test_rectangular_footprint_clamp_boundaries_are_independent_per_axis(void) {
+    /* Clamp-boundary inverse: one axis below the 0.25 floor while the OTHER
+     * axis is far above the 2.0 world-space cap, in the SAME entity. Each
+     * axis's clamp must apply independently - a shared max()/min() across
+     * both axes would incorrectly clamp both to the same bound. */
+    bzQuestWc3EntityInput_t entity;
+    memset(&entity, 0, sizeof(entity));
+    entity.category = 2;
+    entity.footprintX = 0.1f;   /* below the 0.25 floor -> clamped to 0.25 */
+    entity.footprintY = 100.0f; /* far above the 2.0 cap */
+    entity.angle = 0.0f;
+
+    float world[16];
+    bz_quest_wc3_build_world_matrix(&entity, world);
+
+    /* sx = min(1.0*max(0.1,0.25), 2)*0.06 = min(0.25,2)*0.06 = 0.015.
+     * sz = min(1.0*100, 2)*0.06 = min(100,2)*0.06 = 0.12. */
+    ASSERT_EQ_FLOAT(world[0], 0.015f, 0.0005f);
+    ASSERT_EQ_FLOAT(world[10], 0.12f, 0.0005f);
+}
+
 static void test_mobile_and_item_share_category_multiplier(void) {
     bzQuestWc3EntityInput_t mobile, item;
     memset(&mobile, 0, sizeof(mobile));
@@ -235,6 +302,9 @@ void run_bz_quest_wc3_render_tests(void) {
     RUN_TEST(test_building_scale_uses_full_category_multiplier);
     RUN_TEST(test_footprint_below_minimum_is_clamped);
     RUN_TEST(test_footprint_above_cap_is_clamped);
+    RUN_TEST(test_rectangular_footprint_scales_x_and_z_independently);
+    RUN_TEST(test_rectangular_footprint_orientation_is_not_swapped);
+    RUN_TEST(test_rectangular_footprint_clamp_boundaries_are_independent_per_axis);
     RUN_TEST(test_mobile_and_item_share_category_multiplier);
     RUN_TEST(test_unknown_category_falls_back_to_unit_multiplier);
     RUN_TEST(test_render_list_skips_entities_without_a_model);

@@ -55,11 +55,16 @@
  *
  *   1. WarcraftCategoryScale.scale(category, footprint) - a per-category
  *      multiplier (unit/item 0.72, building 1.0, resource 0.9, doodad 0.8,
- *      destructable 0.86, unknown 0.72) applied to max(footprint, 0.25) for
- *      X/Z and to the bare category multiplier for Y -
- *      WarcraftRenderDescriptors.swift:375-391. `footprint` is
- *      bzTTAssetMetadata_t.footprint_x/footprint_y verbatim
- *      (LiveTabletopTransport.swift:686).
+ *      destructable 0.86, unknown 0.72) applied INDEPENDENTLY per axis:
+ *      max(footprint.width, 0.25) for X and max(footprint.depth, 0.25) for
+ *      Z (never max(width, depth) shared across both axes - a rectangular
+ *      footprint must stay rectangular, not be forced square) - the bare
+ *      category multiplier alone for Y -
+ *      WarcraftRenderDescriptors.swift:375-391. `footprint.width`/`.depth`
+ *      are bzTTAssetMetadata_t.footprint_x/footprint_y respectively,
+ *      verbatim, each independently floor-clamped
+ *      (LiveTabletopTransport.swift:686: `WarcraftFootprint(width:
+ *      raw.footprint_x, depth: raw.footprint_y)`).
  *   2. A further ".world" space scale-down: (min(x,2)*0.06, y*0.08,
  *      min(z,2)*0.06) - WarcraftRenderMath.swift:498-514.
  *

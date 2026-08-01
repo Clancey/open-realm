@@ -33,16 +33,19 @@ void bz_quest_wc3_build_world_matrix(const bzQuestWc3EntityInput_t *entity, floa
     const float ty = entity->originZ;
     const float tz = entity->originY;
 
-    /* --- Scale: category multiplier * max(footprint, 0.25) for X/Z, bare -
-     * category multiplier for Y, then the ".world" space scale-down
-     * (min(x,2)*0.06, y*0.08, min(z,2)*0.06) - WarcraftRenderDescriptors.
-     * swift:375-391 and WarcraftRenderMath.swift:498-514. See this file's
-     * header comment for full citations. */
+    /* --- Scale: category multiplier * max(footprint, 0.25) INDEPENDENTLY
+     * per axis (X uses footprintX/width, Z uses footprintY/depth - a
+     * rectangular footprint must stay rectangular, never forced square by
+     * sharing one max() of both), bare category multiplier for Y, then the
+     * ".world" space scale-down (min(x,2)*0.06, y*0.08, min(z,2)*0.06) -
+     * WarcraftRenderDescriptors.swift:375-391 and WarcraftRenderMath.swift:
+     * 498-514. See this file's header comment for full citations. */
     const float categoryScale = bz_quest_wc3_category_scale(entity->category);
-    const float footprintXZ = fmaxf(fmaxf(entity->footprintX, entity->footprintY), 0.25f);
-    const float dioramaX = categoryScale * footprintXZ;
+    const float footprintX = fmaxf(entity->footprintX, 0.25f);
+    const float footprintZ = fmaxf(entity->footprintY, 0.25f);
+    const float dioramaX = categoryScale * footprintX;
     const float dioramaY = categoryScale;
-    const float dioramaZ = categoryScale * footprintXZ;
+    const float dioramaZ = categoryScale * footprintZ;
     const float sx = fminf(dioramaX, 2.0f) * 0.06f;
     const float sy = dioramaY * 0.08f;
     const float sz = fminf(dioramaZ, 2.0f) * 0.06f;
