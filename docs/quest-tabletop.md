@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layer 3
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layer 4
 
-This is layer 3 of a stacked Meta Quest port:
+This is layer 4 of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -10,17 +10,30 @@ This is layer 3 of a stacked Meta Quest port:
   links the headless Warcraft III engine/game/asset/jass/sheet/shared source
   groups plus the shared tabletop lifecycle host, and proves the Khronos
   OpenXR Android loader + a minimal `xrCreateInstance` probe.
-- **Layer 3 (this layer)**: replaces the layer-2 instance probe with a real
-  OpenXR **session**, a Vulkan **stereo frame loop**, an
-  `XR_FB_passthrough` **compositor layer**, and a minimal **head-tracked
-  tabletop test scene**.
+- Layer 3: replaces the layer-2 instance probe with a real OpenXR
+  **session**, a Vulkan **stereo frame loop**, an `XR_FB_passthrough`
+  **compositor layer**, and a minimal **head-tracked tabletop test scene**.
+- **Layer 4 (this layer, `clancey-quest-tabletop-lifecycle-bridge`)**:
+  connects that host to the real, shared authoritative tabletop engine —
+  a Quest-owned bridge/session adapter
+  (`bz_quest_bridge.h`/[bz_quest_bridge.c](../platform/android/quest/app/src/main/cpp/bz_quest_bridge.c))
+  creates/starts/suspends/resumes/stops/destroys the portable
+  `platform/tabletop/bridge/bz_tabletop_lifecycle.h` engine-thread state
+  machine on the matching Android lifecycle transitions; a deterministic,
+  overridable data-directory resolver
+  (`bz_quest_data.h`/`.c`) builds the engine's startup argv; and a plain-C
+  diagnostic frame descriptor (`bz_quest_frame.h`/`.c`,
+  `bz_quest_snapshot.h`/`.c`) proves the immutable tabletop snapshot really
+  advances via a throttled log line — without drawing any Warcraft content.
 
-**This layer still does not start the engine thread, consume bridge
-snapshots, poll gameplay input, play audio, or stage WC3 data.** See
-[Current limitations](#current-limitations) and `bz_quest_host.c`'s
+**This layer still does not poll gameplay input, play audio, stage WC3
+data onto the device, or render any Warcraft III asset/terrain content.**
+See [Current limitations](#current-limitations) and `bz_quest_host.c`'s
 compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by a `#error` until its
-real implementation lands) — `BZ_QUEST_ENABLE_VULKAN_RENDERER` is the one
-seam this layer replaces with a real implementation.
+real implementation lands) — `BZ_QUEST_ENABLE_ENGINE_START` and
+`BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` are the two seams *this* layer replaces
+with real implementations (`BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`,
+and `BZ_QUEST_ENABLE_DATA_STAGING` remain `#error`-gated for a later layer).
 
 ## Architecture boundary
 
@@ -54,6 +67,23 @@ platform/android/quest/
                                  # destroy + composition layer
       bz_quest_renderer.h/.c    # glues xr+vk+passthrough+scene into one
                                  # init()/frame()/shutdown() the host calls
+      bz_quest_data.h/.c        # Warcraft III data-dir resolution + engine
+                                 # argv construction (layer 4, host-tested,
+                                 # no Android/OpenXR/Vulkan deps)
+      bz_quest_frame.h/.c       # plain-C diagnostic frame descriptor:
+                                 # snapshot/lifecycle-state summary + a pure
+                                 # throttled-log decision (layer 4,
+                                 # host-tested, no engine link dependency)
+      bz_quest_snapshot.h/.c    # thin real BZ_TT_Latest()/BZ_TTSnapshot_*()
+                                 # reader that populates a bz_quest_frame.h
+                                 # descriptor and releases the snapshot every
+                                 # call (layer 4, link-tested only, not
+                                 # host-unit-tested - see its header comment)
+      bz_quest_bridge.h/.c      # Quest-owned lifecycle/session adapter:
+                                 # create/start/suspend/resume/stop/destroy
+                                 # of bzTabletopLifecycle_t (layer 4,
+                                 # host-tested against the real lifecycle +
+                                 # runtime, no Android/OpenXR/Vulkan deps)
       shaders/
         tabletop_vert.vert      # GLSL source (committed) - the only "shader
         tabletop_frag.frag      # truth" in the repo; see "Shader build
@@ -69,7 +99,14 @@ platform/android/quest/
   tests/
     test_bz_quest_pure.c         # bz_quest_pure.c unit tests (host-buildable)
     test_bz_quest_scene.c        # bz_quest_scene.c unit tests (host-buildable)
-    test_bz_quest_pure_main.c    # runs both suites, wired into `make test`
+    test_bz_quest_data.c         # bz_quest_data.c unit tests (layer 4, host-buildable)
+    test_bz_quest_frame.c        # bz_quest_frame.c unit tests (layer 4, host-buildable)
+    test_bz_quest_pure_main.c    # runs the four suites above, wired into `make test`
+    test_bz_quest_bridge.c       # bz_quest_bridge.c tests (layer 4) linking the
+                                 # REAL bz_tabletop_lifecycle.c/bz_runtime.c,
+                                 # exactly like games/warcraft-3/tests/
+                                 # test_bz_tabletop_lifecycle.c already does
+    test_bz_quest_bridge_main.c  # runs that suite, wired into `make test`
 platform/android/quest/build.mk  # thin `make quest*`/`test-quest-*` wrappers
 ```
 
@@ -110,6 +147,13 @@ slow Gradle/CMake configure.
 which this build never links — verified absent from the linked `.so` via
 `verify-native-lib.sh`).
 
+Layer 4's four new Quest-only files (`bz_quest_data.c`, `bz_quest_frame.c`,
+`bz_quest_snapshot.c`, `bz_quest_bridge.c`) are added directly to
+`bz_quest_native`'s own literal source list in `CMakeLists.txt` — unlike the
+nine `BZ_XR_*` variables above, they are not shared/portable engine source
+groups, only Quest-specific host code, so there is nothing for
+`print-<VAR>`/`test-source-sync.sh` to keep in sync for them.
+
 ## Prerequisites
 
 Toolchain versions actually installed and used to build/verify this layer,
@@ -141,9 +185,21 @@ make test-quest-source-sync
 
 # Host-native (no NDK/Gradle/Quest hardware) unit tests for bz_quest_pure.c/
 # bz_quest_scene.c (projection/view-matrix math, format/extension/
-# passthrough-capability selection, procedural scene generator). Runs as
-# part of `make test`.
+# passthrough-capability selection, procedural scene generator), PLUS
+# (layer 4) bz_quest_data.c/bz_quest_frame.c (data-dir/argv resolution,
+# diagnostic frame descriptor + throttled-log decision). Runs as part of
+# `make test`.
 make test-quest-host-tests
+
+# Layer 4: bz_quest_bridge.c tests linking the REAL
+# platform/tabletop/bridge/bz_tabletop_lifecycle.c and common/bz_runtime.c
+# (not a stub) - exercises actual BZ_TabletopCreate/Start/Suspend/Resume/
+# Stop/Destroy transitions against a real (synthetic test-fixture) data
+# directory. Depends on `make test-assets` (builds build/tests/tests.mpq)
+# and the shared/sheet dynamic libs, exactly like
+# games/warcraft-3/game.mk's test-bz-tabletop-lifecycle. Runs as part of
+# `make test`.
+make test-quest-bridge
 
 # Regenerate the SPIR-V-embedded shader header standalone (also run
 # automatically by the CMake build below via a custom_command):
@@ -191,23 +247,41 @@ Expected `OpenRealmQuest` log sequence on success, in order (each line's
 literal text, from the exact `BZ_QUEST_LOGI`/`BZ_QUEST_LOGE` call sites in
 `bz_quest_host.c`/`bz_quest_xr.c`/`bz_quest_vk.c`/`bz_quest_passthrough.c`):
 
-1. `bz_quest_host: starting (layer 3: OpenXR/Vulkan/passthrough renderer)`
-2. `BZ_TabletopCreate/Destroy link proof OK (state=..., not started)`
-3. `APP_CMD_START`
-4. `xrInitializeLoaderKHR succeeded`
-5. `xrGetSystem succeeded: systemName=... vendorId=... passthroughCapabilities=0x...`
+1. `bz_quest_host: starting (layer 4: tabletop lifecycle/snapshot bridge)`
+2. `APP_CMD_START`
+3. `xrInitializeLoaderKHR succeeded`
+4. `xrGetSystem succeeded: systemName=... vendorId=... passthroughCapabilities=0x...`
    (the `0x...` bitmask must have `XR_PASSTHROUGH_CAPABILITY_BIT_FB` set —
    see "Hardware-only acceptance gates" below for what happens if not)
-6. `Vulkan API version bound: min=1.x max=1.x`
-7. `swapchain[0]: WxH, N images` and `swapchain[1]: WxH, N images`
-8. `passthrough object + reconstruction layer created`
-9. `passthrough started`
-10. `bz_quest_renderer_init succeeded`
+5. `Vulkan API version bound: min=1.x max=1.x`
+6. `swapchain[0]: WxH, N images` and `swapchain[1]: WxH, N images`
+7. `passthrough object + reconstruction layer created`
+8. `passthrough started`
+9. `bz_quest_renderer_init succeeded`
+10. Either `bz_quest_bridge_start succeeded (data dir '<path>')` (see
+    "Data-path contract" below for exactly which path this is) **or**
+    `bz_quest_bridge_start failed: <reason> - see docs/quest-tabletop.md's
+    data-path contract; continuing to pump the Android event loop with no
+    engine running` — a data/archive resolution failure here is a real,
+    documented Quest-only failure mode, not a crash: OpenXR/Vulkan/
+    passthrough keep running with the checkerboard test scene and the app
+    stays fully responsive to Android teardown (see "Hardware/data-only
+    acceptance procedure" below).
 11. `APP_CMD_RESUME`
 12. Repeated `XrEventDataSessionStateChanged: state=...` lines progressing
     `READY` -> `xrBeginSession succeeded` -> (eventually) `SYNCHRONIZED` ->
     `VISIBLE` -> `FOCUSED`.
-13. No further `BZ_QUEST_LOGE` lines once `FOCUSED` is reached and frames are
+13. If step 10 succeeded, exactly one `tabletop frame: status=... generation=0
+    lifecycleState=...` line shortly after (the first-ever captured frame,
+    `bz_quest_frame_should_log()`'s "status changed from nothing captured
+    yet" case — see "Diagnostics: throttled log, never per-frame" below),
+    then **no further** `tabletop frame: ...` lines unless
+    `generation`/`lifecycleState`/`lifecycleError` actually changes (there
+    is no map loaded in this layer, so `generation` still advances once
+    per client frame — see "Snapshot ownership and diagnostics" below —
+    but the throttled-log gate suppresses logging every one of those
+    advances).
+14. No further `BZ_QUEST_LOGE` lines once `FOCUSED` is reached and frames are
     flowing (a healthy frame loop produces **no** per-frame log output at
     all — see "No busy loop / no per-frame logging" below).
 
@@ -218,6 +292,33 @@ roughly at waist height ~1m in front of the headset's `LOCAL` origin, with
 correct stereo separation (looking left/right shows appropriate parallax)
 and correct occlusion (cubes closer to the eye occlude the table behind
 them, verifying the depth buffer is wired correctly).
+
+## Testing
+
+Every pure/host-testable module has a matching test file run by `make
+test`, none of which need Gradle/NDK/Quest hardware:
+
+| Module | Test file | What it proves |
+|---|---|---|
+| `bz_quest_pure.c` | `tests/test_bz_quest_pure.c` | Projection/view-matrix math, format/extension/passthrough-capability selection (unchanged from layer 3). |
+| `bz_quest_scene.c` | `tests/test_bz_quest_scene.c` | Procedural test-scene generator (unchanged from layer 3). |
+| `bz_quest_data.c` | `tests/test_bz_quest_data.c` | Default-dir construction, override read/validate (normal + every documented rejection: relative path, disallowed characters, oversized, empty), full resolve fallback order, and argv construction (normal + undersized-buffer/NULL-arg error paths) — 22 tests, pure, real temp dirs via `mkdtemp()`. |
+| `bz_quest_frame.c` | `tests/test_bz_quest_frame.c` | Reset value, `bz_quest_frame_from_values()` field copy/truncation/ABI-mismatch detection, and every `bz_quest_frame_should_log()` cache-hit/cache-miss branch (identical frame never logs; status/generation/lifecycle-state/lifecycle-error changes each log) — 13 tests, pure, no I/O. |
+| `bz_quest_bridge.c` | `tests/test_bz_quest_bridge.c` | Valid-override start reaches `RUNNING`; missing-data start reaches `FAILED` with the engine's own error surfaced; invalid-override start reaches `FAILED` *before* any `bzTabletopLifecycle_t` exists; a second `start()` on an already-attempted instance is rejected; suspend/resume forward correctly (and are safe no-ops before a start or after a stop); `stop()` is idempotent and safe pre-start; `destroy()` then a fresh `start()` on the same storage succeeds; `is_terminal()` is correct for every bridge state — 10 tests, **linking the real** `bz_tabletop_lifecycle.c`/`common/bz_runtime.c` (not a stub), 67 assertions. |
+
+`bz_quest_bridge.c`'s tests are the one suite in this table that needs
+`make test-assets` (to produce a synthetic `build/tests/tests.mpq` data
+directory) and the `shared`/`sheet` dynamic libs — wired automatically as
+target dependencies of `make test-quest-bridge` (see "Build/run/log
+commands" above), exactly mirroring `games/warcraft-3/game.mk`'s existing
+`test-bz-tabletop-lifecycle` recipe.
+
+No `+com_frame_limit`-bounded full engine run was additionally attempted on
+this host beyond what `test_bz_quest_bridge.c` already exercises: this
+machine has no full retail `War3.mpq`/`War3x.mpq` data, only the synthetic
+`test-assets` fixture, and `bz_quest_bridge_stop()` (not a frame limit) is
+what ends each bridge test's engine thread — see "Hardware/data-only
+acceptance procedure" above for exactly what this does and does not prove.
 
 ## OpenXR session lifecycle (`bz_quest_xr.c`)
 
@@ -586,6 +687,276 @@ real `XR_COMPOSITION_LAYER_*_BIT` constants at compile time, and
 bits are set for the arguments the renderer actually passes. See the OpenXR
 spec citation in "Documented quirks" below.
 
+## Tabletop engine lifecycle bridge (`bz_quest_bridge.c`)
+
+### Engine/renderer threading boundary
+
+Exactly one dedicated engine thread runs the whole tabletop engine, and the
+XR/Vulkan render loop never calls an engine frame function directly:
+
+- `platform/tabletop/bridge/bz_tabletop_lifecycle.c`'s `BZ_TabletopStart()`
+  spawns that one thread internally (unchanged from layers 1-3 —
+  `bz_quest_bridge_start()` only calls `BZ_TabletopCreate()`/
+  `BZ_TabletopStart()`, never touches `BZ_RuntimeFrame()`/`BZ_RuntimeInit()`
+  itself). That thread is the only caller of `BZ_RuntimeFrame()` for the
+  lifetime of the app.
+- `android_main()`'s loop (the Android main/UI thread, which is also the
+  thread every `bz_quest_xr_*`/`bz_quest_vk_*` OpenXR/Vulkan call already
+  runs on — see "OpenXR session lifecycle" above) calls
+  `bz_quest_snapshot_capture()` and `bz_quest_renderer_frame()` once per
+  loop iteration. Neither of those functions, nor anything transitively
+  reachable from `bz_quest_renderer.c`, ever calls `BZ_RuntimeFrame()`,
+  `BZ_TabletopStart()`, or any other engine-thread-only entry point — the
+  only cross-thread contact point is the lock-free, ref-counted immutable
+  snapshot described in "Snapshot ownership and diagnostics" below.
+- `bz_quest_bridge_start()`/`_suspend()`/`_resume()`/`_stop()`/`_destroy()`
+  (this file) are the only functions `bz_quest_host.c` calls to affect the
+  engine thread's lifecycle — all of them just forward to the existing
+  `BZ_TabletopStart()`/`BZ_TabletopSuspend()`/`BZ_TabletopResume()`/
+  `BZ_TabletopStop()`/`BZ_TabletopDestroy()` API (see
+  `platform/tabletop/bridge/bz_tabletop_lifecycle.h`), which already
+  implements the actual thread-safe start/join/suspend/resume machinery —
+  this bridge adds no new threading of its own, only Quest-specific
+  argv/data-dir construction and Android-lifecycle-to-lifecycle-call
+  mapping.
+
+### Lifecycle-transition mapping
+
+`bz_quest_handle_cmd()` (in `bz_quest_host.c`) maps exactly these Android
+`onAppCmd` events to bridge calls (each cited at its exact call site):
+
+| Android event | Bridge call | Notes |
+|---|---|---|
+| `APP_CMD_START` | `bz_quest_ensure_bridge_start()` → `bz_quest_bridge_start()` (once per process) | Runs after `bz_quest_ensure_renderer_init()`; blocks the calling thread until `BZ_RuntimeInit()` completes, mirroring the renderer init call's own synchronous convention (see `bz_quest_ensure_bridge_start()`'s header comment in `bz_quest_host.c`). Independent of renderer init success — the engine runs headless even if OpenXR/Vulkan init failed. |
+| `APP_CMD_RESUME` | `bz_quest_bridge_resume()` | Forwards to `BZ_TabletopResume()`; a no-op if the bridge never reached RUNNING/SUSPENDED. |
+| `APP_CMD_PAUSE` | `bz_quest_bridge_suspend()` | Forwards to `BZ_TabletopSuspend()`; same no-op safety. |
+| `APP_CMD_STOP` | *(none — log only)* | Android may still resume from `STOP` without a full `DESTROY`; stopping the engine here would make `APP_CMD_RESUME` unable to cheaply resume it. |
+| `APP_CMD_DESTROY` | *(none — log only)* | See "Teardown ownership" below — `android_main()` alone owns the stop+destroy call, not this callback. |
+
+Repeated start/stop or a "map reload" restart a fresh
+`bzTabletopLifecycle_t`, they do not resume a terminal one:
+`bz_quest_bridge_start()` is single-shot per `bzQuestBridge_t` instance
+(rejects — logs and returns `false` — a second call on an already-attempted
+instance, exactly like the underlying `BZ_TabletopStart()`'s own single-shot
+contract); `bz_quest_bridge_destroy()` fully zeroes the struct so the same
+storage can run `bz_quest_bridge_start()` again for a fresh attempt. See
+`bz_quest_bridge.h`'s header comment for the full ownership rationale.
+
+### Teardown ownership (which owner triggers final shutdown)
+
+`android_main()` is the sole, deterministic owner of final shutdown —
+**not** `bz_quest_handle_cmd()`'s `APP_CMD_DESTROY` case, which only logs.
+This matters because there are four independent triggers that can end the
+app, and all four must fall through the same one teardown code path instead
+of each doing its own (potentially differently-ordered, potentially
+double-run) cleanup:
+
+1. Android requests destroy (`app->destroyRequested` becomes true, checked
+   right after each `ALooper_pollOnce()` and again at the top of the loop
+   condition).
+2. `bz_quest_renderer_frame()` returns `false` (OpenXR session loss/exit
+   pending, or a fatal Vulkan/XR error).
+3. The engine thread self-transitions to a terminal state
+   (`BZ_QUEST_BRIDGE_FAILED`/`BZ_QUEST_BRIDGE_STOPPED`, checked every loop
+   iteration via `bz_quest_bridge_is_terminal()`) — e.g. a future
+   frame-limit or console `quit` reaching `Sys_Quit()`. Nothing about the
+   render path forces this; the engine can end itself independent of any
+   Android/OpenXR event.
+4. Renderer init never even attempted/succeeded in the first place (the
+   loop still runs to pump Android events and the bridge, just with
+   `state.rendererReady` false throughout).
+
+Every one of these `break`s out of `android_main()`'s `while` loop into the
+same code immediately below it:
+`if (state.bridge.startAttempted) bz_quest_bridge_destroy(&state.bridge);`
+runs **before** `bz_quest_renderer_shutdown()`. Bridge-before-renderer is a
+deliberate ordering choice, not arbitrary: an already-exited/terminal engine
+thread has nothing left for a render-thread frame-capture to observe, so
+tearing down the "business logic" side first, then the presentation side,
+keeps the ordering simple and independent of which trigger actually fired
+(see `android_main()`'s teardown-block comment in `bz_quest_host.c`).
+
+## Data-path contract (`bz_quest_data.c`)
+
+### Default data directory
+
+`bz_quest_data_default_dir()` builds `"<base>/Warcraft III"`, where `<base>`
+prefers `ANativeActivity::externalDataPath` (adb-push-accessible without
+root, survives an app update, mirrors `Context.getExternalFilesDir(null)`)
+and falls back to `::internalDataPath` only if external storage is
+unavailable — the NDK's own `ANativeActivity` documentation states
+`externalDataPath` may be `NULL` (e.g. no shared storage volume mounted),
+while `internalDataPath` is always non-`NULL` for a real NativeActivity app.
+This mirrors `platform/apple/visionos/tabletop`'s `"Resources/Warcraft III"`
+bundled-data naming without literally reusing visionOS's bundle-relative
+path, since Quest has no app bundle to look inside.
+
+### Override mechanism
+
+A **single, fixed, documented** file path —
+`"<internalDataPath>/warcraft_data_path_override.txt"`
+(`BZ_QUEST_DATA_OVERRIDE_FILENAME` in `bz_quest_data.h`) — lets a developer
+point at a non-default location (e.g. an external SD card path staged by
+`adb push` before an install-only-once ADB data-copy script lands in a
+later layer). This is **not** a silent secondary search path:
+
+- `internalDataPath` is always non-`NULL`, so this fixed location never
+  itself depends on the value it might override — no chicken-and-egg
+  resolution order.
+- `bz_quest_data_read_override_file()` returns `false` (no override
+  requested — the normal, common case) only when the file does not exist
+  at all. If it exists but is empty or unreadable, that is surfaced as an
+  empty candidate string that the validation step below explicitly
+  rejects — a permission error on a file a developer deliberately staged
+  must never be silently treated as "no override requested".
+- `bz_quest_data_validate_override()` requires the candidate (after
+  trimming exactly one trailing `\n`/`\r\n`) to be non-empty, absolute
+  (start with `/`), fit within `BZ_QUEST_DATA_DIR_MAX` (512) bytes, and
+  contain none of `"`, `\r`, `\n`, `;` — **mirroring
+  `bz_tabletop_lifecycle.c`'s own `BZ_TabletopSubmitMap()` path validation
+  exactly**, since this value flows into the same `"-data"` argv slot that
+  eventually reaches a `map "<path>"`-style console command internally
+  (see `bz_quest_data.h`'s header comment for the full rationale).
+- An invalid override (wrong shape, disallowed character, empty, oversized)
+  is a **hard configuration error surfaced verbatim** to the caller
+  (`bz_quest_bridge_start()` sets `bridge->preLcError` and returns `false`
+  without ever calling `BZ_TabletopCreate()`), never a silent fall-back to
+  the default the developer was explicitly trying to avoid.
+
+`bz_quest_data_resolve()` is the single entry point `bz_quest_bridge_start()`
+calls: read+validate the override if present, else the default dir. It does
+**not** check the resolved directory actually exists or contains valid MPQ
+archives — that check happens inside the engine's own `BZ_RuntimeInit()`
+(`FS_AddDataDirectory()`), whose failure the bridge surfaces separately (see
+"Missing/invalid data behavior" below) rather than being duplicated here.
+
+### Engine startup argv construction
+
+`bz_quest_data_build_argv()` builds
+`["openwarcraft3-quest", "-data", "<dir>"[, "+map", "<name>"]]` — reusing
+the exact `"-data"`/`"+map"` convention
+`platform/apple/visionos/tabletop/app/OpenRealmTabletopApp.swift`'s
+`LiveTabletopTransport` already establishes for this same lifecycle core
+(see `common/bz_runtime.h`'s `bzRuntimeArgs_t` and AGENTS.md's "Command
+Conventions": `+` is a process/startup argument here, never an in-engine
+console command) — no second startup-argument scheme was invented for this
+platform. `mapName` is always `NULL` in this layer (see "Current
+limitations" below); the 3-argument form (`-data` only) is what actually
+runs. The whole call uses caller-provided fixed-size storage — no heap
+allocation.
+
+### Missing/invalid data behavior
+
+If the resolved directory does not exist or has no valid archives,
+`BZ_RuntimeInit()` (via `FS_AddDataDirectory()`) fails and logs the exact
+path (`"Failed to add data directory: <path>"`), and
+`bz_tabletop_lifecycle.c` moves the lifecycle to its real
+`BZ_TABLETOP_STATE_FAILED` state with a descriptive
+`BZ_TabletopLastError()` — this bridge does not invent a second failure
+mode. `bz_quest_bridge_state()` then reports `BZ_QUEST_BRIDGE_FAILED`, and
+`bz_quest_bridge_is_terminal()` returns `true`, so `android_main()`'s loop
+funnels this into the same one teardown path as every other exit trigger
+(see "Teardown ownership" above) — Android/OpenXR teardown stays fully
+responsive; the app does not hang or crash, it just runs with no engine
+thread active (confirmed by `test_bz_quest_bridge.c`'s
+`test_start_with_missing_data_reaches_failed` — see "Testing" above).
+
+## Snapshot ownership and diagnostics (`bz_quest_frame.c`/`bz_quest_snapshot.c`)
+
+### Acquire/copy/release contract
+
+`bz_quest_snapshot_capture()` (the one real caller of
+`BZ_TT_Latest()`/`BZ_TTSnapshot_*()`/`BZ_TTSnapshot_Release()`, kept in its
+own translation unit precisely so `bz_quest_frame.c` stays link-clean of
+`platform/bridge/bz_tabletop_transport.c`'s heavy engine dependencies) is
+called exactly once per `android_main()` loop iteration, on the XR/render
+thread:
+
+1. Acquires the latest immutable snapshot via `BZ_TT_Latest()` (may return
+   `NULL` if nothing has been published yet — not an error).
+2. If non-`NULL`, copies only the small diagnostic values
+   `bz_quest_frame_from_values()` needs (ABI version, generation,
+   connection state, map name/bounds, player number/team, selected/total/
+   overflow entity counts, fog dimensions, config-string count, action-
+   layout presence) into a plain `bzQuestFrameValues_t` on the stack.
+3. Releases the snapshot via `BZ_TTSnapshot_Release()` — **on every
+   branch**, including "no snapshot published yet" (nothing to release)
+   and an ABI-mismatched snapshot (still released after being read, just
+   flagged `BZ_QUEST_FRAME_ABI_MISMATCH` by `bz_quest_frame_from_values()`
+   instead of `BZ_QUEST_FRAME_OK`). No engine pointer/handle from the
+   snapshot ever outlives this one function call — see
+   `bz_quest_snapshot.h`'s header comment and
+   `platform/bridge/bz_tabletop_transport.h`'s retain/release contract.
+
+This call site is pinned to the render thread deliberately (not merely
+"wherever is safe" — `BZ_TT_Latest()` itself is thread-safe from any
+thread): a future input/gameplay layer will need to read the *same*
+generation's entity/selection data the renderer just drew, so both must
+observe one consistent snapshot from a single call site rather than two
+independently-timed `BZ_TT_Latest()` calls that could race a generation
+change between them.
+
+### Frame descriptor fields tracked
+
+`bzQuestFrame_t` (see `bz_quest_frame.h`) tracks, in one plain-C struct:
+snapshot generation/readiness (`status`: `NO_SNAPSHOT`/`ABI_MISMATCH`/`OK`,
+`generation`), player/"camera" state (`playerValid`/`playerNumber`/
+`playerTeam` — WC3's tabletop ABI has no separate camera struct; the XR
+head pose is tracked independently by `bz_quest_xr.c`, out of scope for
+this descriptor, so "camera state" per this layer's task scope means these
+player fields), entity count (`entityCount`/`entitiesOverflowCount`/
+`selectedEntityCount`), terrain/fog/selection/configstring availability
+(`mapBoundsValid`, `fogPresent`/`fogWidth`/`fogHeight`,
+`configStringCount`, `actionLayoutPresent`), and lifecycle errors
+(`lifecycleState`, `lifecycleError`). **No ABI widening was needed or
+performed** — `bzTTSnapshot_t` v3 already exposes every field this layer
+requires (see `bz_quest_frame.h`'s comment on `bzQuestFrameValues_t`); this
+layer consumes v3 as-is.
+
+### Diagnostics: throttled log, never per-frame
+
+`bz_quest_frame_should_log()` (pure, host-tested, no I/O) is the single gate
+`android_main()` checks before emitting the `"tabletop frame: ..."` log
+line — it returns `true` only when something actually changed since the
+last capture: the snapshot `status` changed (first-ever capture, or an ABI
+mismatch newly appearing/clearing), the `generation` advanced while
+`status == OK`, the `lifecycleState` changed, or the `lifecycleError` text
+appeared/changed/cleared. It deliberately does **not** return `true` merely
+because a frame ran, so a healthy, steady-state loop (map-less, generation
+advancing every client frame, exactly as this layer expects — see
+"Known limitations of this frame descriptor" below) produces **zero** additional log lines after the
+first capture, matching AGENTS.md's "never log per frame; log transitions/
+milestones only" convention and this document's own "No busy loop / no
+per-frame logging" policy above.
+
+### Integration into the test tabletop
+
+This layer does **not** translate any snapshot field into a drawable
+Warcraft asset — `bz_quest_scene.c`'s procedural checkerboard-and-cubes
+test scene (see "Test scene" below) is drawn completely independently of
+the frame descriptor. Instead, `android_main()`'s throttled log line
+(`"tabletop frame: status=... generation=... lifecycleState=... ..."`,
+cited exactly at the log call site in `bz_quest_host.c`) is the sole,
+clearly-documented "diagnostic indicator" that snapshots really do advance
+once the engine thread is running — it proves the wiring end-to-end
+without pretending full rendering exists. A later layer (asset/terrain
+rendering, out of scope here — see "Known limitations of this frame descriptor") would replace this
+throttled-log proof with an actual translation from `bzQuestFrame_t`'s
+entity/terrain fields into drawable geometry.
+
+### Known limitations of this frame descriptor
+
+- No map is ever loaded in this layer (`bz_quest_data_build_argv()` is
+  always called with `mapName == NULL`), so `mapLoaded`/`mapBoundsValid`/
+  `playerValid`/`fogPresent` will all read `false` and `entityCount` will
+  read `0` in every real run — this is expected, not a bug; the tabletop
+  transport still publishes an advancing-generation snapshot every client
+  frame regardless of whether a map is loaded (see
+  `platform/tabletop/client/cl_scrn_tabletop_null.c`'s
+  `SCR_UpdateScreen()`), which is exactly what the throttled log proves.
+- No asset/terrain/entity geometry is ever drawn from this descriptor —
+  see "Integration into the test tabletop" above.
+
 ## Test scene (`bz_quest_scene.c`)
 
 Purely procedural, no asset files: an `BZ_QUEST_SCENE_TABLE_TILES` x
@@ -746,33 +1117,42 @@ debug prototype. Replace before any wider distribution.
 
 Everything below is explicitly out of scope for this layer; each has a
 compile-time `#error`-guarded seam in `bz_quest_host.c`
-(`BZ_QUEST_ENABLE_ENGINE_START`, `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS`,
-`BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`,
+(`BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`,
 `BZ_QUEST_ENABLE_DATA_STAGING`) so a later layer flips exactly one on as its
 real implementation lands, instead of a silent stub reporting fake success.
-`BZ_QUEST_ENABLE_VULKAN_RENDERER` is now hard-required to `1` (a
-`#error` fires if a build tries to set it to `0`) since this layer's
-renderer is no longer optional:
+`BZ_QUEST_ENABLE_VULKAN_RENDERER`, `BZ_QUEST_ENABLE_ENGINE_START`, and
+`BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` are now all hard-required to `1` (a
+`#error` fires if a build tries to set any of them to `0`) since this
+layer's renderer and tabletop bridge are no longer optional:
 
-- The engine thread is never started (`BZ_TabletopStart()` is never
-  called) — only `BZ_TabletopCreate()`/`BZ_TabletopDestroy()` are exercised.
-- No `bz_tabletop_transport.h` bridge-snapshot consumption, no OpenXR
-  action/input polling, no audio output, no War3 MPQ data staging onto the
-  device.
-- No Warcraft III asset rendering — the test scene is a procedurally
+- No OpenXR action/input polling, no audio output, no War3 MPQ data staging
+  onto the device (no ADB data-copy script yet — a developer must stage
+  data manually per "Data-path contract" above until that later layer
+  lands).
+- No map is ever loaded (`bz_quest_bridge_start()` always passes a `NULL`
+  map name) — see "Known limitations of this frame descriptor" above.
+- No Warcraft III asset rendering — the test scene is still a procedurally
   generated checkerboard + cubes, nothing loaded from `.mdx`/`.blp`/MPQ
-  data.
+  data, and no snapshot field is translated into drawable geometry (see
+  "Integration into the test tabletop" above).
+- No gameplay controller input reaches the engine (no `BZ_TabletopSubmit*`
+  command is ever called by this layer).
 - No Vulkan multiview, MSAA, or fixed foveation (`XR_FB_foveation`) — see
   "Vulkan render pass/pipeline/targets" above for why this is an explicit,
   documented seam rather than an oversight.
+- The tabletop ABI was **not** widened — `bzTTSnapshot_t` v3 is consumed
+  as-is; no concrete evidence surfaced during this layer's implementation
+  that an essential datum for this layer's scope (diagnostics only) is
+  missing from it.
 
 ### Hardware-only acceptance gates
 
 **No physical Meta Quest device was available in this development
 environment.** Everything below requires real hardware and was **not**
 verified this session — do not report session creation, passthrough
-activation, stereo correctness, frame rate/timing, or any visual result as
-confirmed until each is checked against a real device:
+activation, stereo correctness, frame rate/timing, engine startup against
+real staged data, or any visual result as confirmed until each is checked
+against a real device:
 
 - Whether `xrCreateSession`/`xrCreateSwapchain`/`xrBeginSession` actually
   succeed against a real Quest 3/3S OpenXR runtime (only compile-time/
@@ -794,6 +1174,19 @@ confirmed until each is checked against a real device:
   fence-wait-per-eye synchronization strategy (see the
   `XR_KHR_vulkan_enable2` fence-handoff quirk above) is fast enough for a
   comfortable frame rate — untestable without a device to profile.
+- Whether `ANativeActivity::internalDataPath`/`externalDataPath` actually
+  resolve to the paths this document assumes on a real Quest 3/3S OS
+  build, and whether `adb push`-staged real `War3.mpq`/`War3x.mpq` (or an
+  override file) is actually discovered and loaded successfully by
+  `BZ_RuntimeInit()` on-device — only the path-construction/validation
+  logic itself was host-tested (see "Testing" above); the actual
+  filesystem paths a real device reports were never observed.
+- Whether the bridge/engine thread genuinely starts, advances snapshot
+  generations, and tears down cleanly across real Android pause/resume/
+  destroy and OpenXR session-loss events on physical hardware — only a
+  synthetic, non-Quest `pthreads`-hosted lifecycle run (via
+  `make test-quest-bridge`, see "Testing" above) was exercised this
+  session, not a real Android `onAppCmd` sequence.
 - Whether `adb install`/launch/logcat actually behave as described in
   "Exact on-device acceptance procedure" above — the procedure is written
   from the OpenXR/Android/NDK spec and Meta's own documentation, not from
@@ -802,32 +1195,106 @@ confirmed until each is checked against a real device:
   throughout this document are versioned/updatable; re-fetch and diff
   before relying on them for a release build.
 
-### What *was* verified this session (compile-time/host-only)
+### Hardware/data-only acceptance procedure
+
+Two independent things must both be true before this layer can be called
+"working" on a real device — physical Quest hardware, AND real staged WC3
+data — and this document distinguishes exactly which each of the following
+sub-procedures actually proves:
+
+**A. Hardware-only (no real WC3 data staged, override left unset).** Proves
+the bridge starts and fails *cleanly* — no crash, no hang, Android/OpenXR
+teardown stays fully responsive:
+
+1. Run steps 1-2 of "Exact on-device acceptance procedure" above (build,
+   install, launch, tail `OpenRealmQuest:V`) with **no**
+   `warcraft_data_path_override.txt` staged and no data pushed to
+   `externalDataPath`/`internalDataPath`.
+2. Expect log line 10 from that procedure to read
+   `bz_quest_bridge_start failed: ...` (a `"Failed to add data directory:
+   ..."` reason from the engine, surfaced through
+   `bz_quest_bridge_last_error()`), **not** `succeeded`.
+3. Expect the app to keep running (passthrough camera + checkerboard test
+   scene) and to exit cleanly on `adb shell am force-stop
+   org.openrealm.quest` or the Oculus button — confirms "surface the exact
+   path/error and enter the lifecycle's real failed state while keeping
+   Android/OpenXR teardown responsive" without needing any real game data.
+
+**B. Data-only (no headset — a bounded non-Quest host build).** Proves the
+*shared* lifecycle/transport core this bridge wraps genuinely starts,
+advances snapshot generations, and stops cleanly, independent of any
+Quest/Android/OpenXR code:
+
+1. `make test-quest-bridge` — links the real
+   `bz_tabletop_lifecycle.c`/`common/bz_runtime.c`, stages a valid
+   synthetic data directory override (`build/tests/tests.mpq`, produced by
+   `make test-assets`), and runs `BZ_TabletopCreate()`/`Start()`/
+   `Suspend()`/`Resume()`/`Stop()`/`Destroy()` against it end to end on
+   this host, with no Quest/Android/OpenXR code involved at all (see
+   `test_bz_quest_bridge.c`'s `test_start_with_valid_override_reaches_running`).
+2. This is the closest bounded, hardware-free proof available in this
+   environment that "advancing snapshots" really works, given that no full
+   retail `War3.mpq`/`War3x.mpq` data is present on this machine — only
+   the synthetic `test-assets` fixture is (see "Testing" above for exactly
+   why a `+com_frame_limit`-bounded *full* engine run was not additionally
+   attempted here).
+
+**Neither A nor B alone proves the Quest map boots or that snapshots
+advance while wearing a headset** — that requires physical hardware *and*
+real staged data together, which was not available in this environment;
+do not report either as confirmed until both are combined on a real
+device.
+
+
+### What *was* verified this session
 
 - All `bz_quest_*.c` files individually syntax-check clean
   (`-fsyntax-only -Wall -Wextra --target=aarch64-linux-android29`) against
   the real extracted OpenXR AAR headers and the NDK's Vulkan headers.
-- The full Gradle/CMake `assembleDebug` build succeeds end to end,
-  producing `app-debug.apk` with `lib/arm64-v8a/libbz_quest_native.so`.
+- The full Gradle/CMake `assembleDebug` build succeeds end to end (`JAVA_HOME`
+  pointed at Temurin 17, NDK 27.2.12479018), producing `app-debug.apk` with
+  `lib/arm64-v8a/libbz_quest_native.so` — now statically linking
+  `bz_quest_data.c`/`bz_quest_frame.c`/`bz_quest_snapshot.c`/
+  `bz_quest_bridge.c` alongside the existing renderer/scene sources.
 - `scripts/verify-native-lib.sh` passes against that APK: exactly one
   packaged ABI (`arm64-v8a`); `DT_NEEDED` is exactly
   `libopenxr_loader.so libvulkan.so libandroid.so liblog.so libz.so libm.so
-  libdl.so libc.so` (no SDL2/desktop-GL/Apple-ObjC/VrApi dependency); no
-  forbidden symbol referenced; no `main()` symbol linked;
-  `ANativeActivity_onCreate` and `android_main` both present in the dynamic
-  symbol table.
+  libdl.so libc.so` (no SDL2/desktop-GL/Apple-ObjC/VrApi dependency, and no
+  new dynamic dependency was introduced by this layer — the tabletop
+  lifecycle/runtime is already statically linked via `openwarcraft3-bridge`/
+  `openwarcraft3-engine`); no forbidden symbol referenced; no `main()`
+  symbol linked; `ANativeActivity_onCreate` and `android_main` both present
+  in the dynamic symbol table.
 - The shader build pipeline produces valid SPIR-V (magic-number-checked)
   for both `tabletop_vert.vert`/`tabletop_frag.frag`, embedded into the
   linked `.so` with no committed binary.
-- `make test-quest-source-sync`, `make test-quest-host-tests` (3252/3252
-  assertions across `bz_quest_pure.c`'s math/selection helpers and
-  `bz_quest_scene.c`'s procedural generator), and the full repo-root
-  `make test` all pass.
+- `make test-quest-source-sync`, `make test-quest-host-tests` (3349/3349
+  assertions across `bz_quest_pure.c`'s math/selection helpers,
+  `bz_quest_scene.c`'s procedural generator, and — new this layer —
+  `bz_quest_data.c`'s data-dir/argv resolution and `bz_quest_frame.c`'s
+  frame-descriptor/throttled-log logic), `make test-quest-bridge` (67/67
+  assertions, new this layer, linking the real
+  `bz_tabletop_lifecycle.c`/`bz_runtime.c` against a synthetic staged data
+  directory — see "Hardware/data-only acceptance procedure" above), and the
+  full repo-root `make test` all pass with no regressions.
+- `git diff --check clancey-quest-vulkan-openxr-session...HEAD` reports no
+  whitespace errors.
 
 ## Related documents
 
 - [visionos-tabletop.md](visionos-tabletop.md) — the shared
-  `platform/tabletop/` extraction this layer links unmodified.
+  `platform/tabletop/` extraction this layer links unmodified, and the
+  origin of the `"-data"`/`"+map"` engine startup argv convention this
+  layer's `bz_quest_data_build_argv()` reuses
+  (`platform/apple/visionos/tabletop/app/OpenRealmTabletopApp.swift`'s
+  `LiveTabletopTransport`).
+- `platform/tabletop/bridge/bz_tabletop_lifecycle.h` — the portable
+  create/start/suspend/resume/stop/destroy engine-thread state machine
+  `bz_quest_bridge.c` wraps unmodified.
+- `platform/bridge/bz_tabletop_transport.h` — the immutable, ref-counted
+  snapshot ABI (`bzTTSnapshot_t`, v3) `bz_quest_snapshot.c` reads via
+  `BZ_TT_Latest()`/`BZ_TTSnapshot_*()`/`BZ_TTSnapshot_Release()`, consumed
+  as-is with no ABI widening in this layer.
 - Khronos OpenXR Android loader:
   <https://github.com/KhronosGroup/OpenXR-SDK-Source> (`src/tests/hello_xr`
   for the reference loader-init/instance/session/Vulkan-interop sequence),
