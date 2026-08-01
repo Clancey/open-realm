@@ -2259,8 +2259,13 @@ generated binary or taking on a platform text-rendering library dependency
 bit convention was verified concretely against the asymmetric `'F'` glyph
 (not assumed) - see that file's header comment. Any byte outside 7-bit ASCII
 remaps to `'?'` (a visibly-present "unsupported character" glyph, never
-invisible blank space), and the capture layer logs once per unique
-unsupported byte.
+invisible blank space); `bz_quest_wc3_hud_font_glyph_uv()`/`_layout_text()`
+themselves are pure and never log (see their header comments), so
+`bz_quest_vk_wc3_hud.c`'s `build_text_vertices()` - the one production
+caller of both - is what actually implements the "once per unique
+unsupported byte" and "once per truncated text run" diagnostics, via its
+own file-local `VK_WC3_HUD_LOG_ONCE` dedup helper (the same one-dedup-
+table-per-translation-unit convention as `bz_quest_vk_wc3.c`'s).
 
 ### GPU representation, ownership, and draw order
 
@@ -2283,7 +2288,14 @@ unsupported byte.
   than being treated as fatal - satisfying "pending resources retry without
   repeated ABI pixel copies or log spam" (the retry only re-runs the cheap,
   deterministic atlas-pixel build, and failure is logged once via
-  `BZ_QUEST_LOGE`, not per-frame).
+  `BZ_QUEST_LOGE`, not per-frame). `create_font_atlas()` writes directly
+  into `vkHud->fontImage`/`fontImageMemory`/`fontImageView` (one owner, no
+  shadow locals), so every failure path past `vkCreateImage` calls
+  `destroy_font_image()` before returning - tearing down exactly whatever
+  got created and resetting every handle to `VK_NULL_HANDLE` - so a
+  mid-sequence failure (e.g. out-of-memory at `vkAllocateMemory`) can never
+  leak a live image/view across retries; only a fully successful sequence
+  sets `haveFont = true`.
 - Both dynamic vertex/index buffers (panel and text) are
   `HOST_VISIBLE|HOST_COHERENT` and mapped exactly once for the module's whole
   lifetime - the same single-buffered-per-frame discipline
@@ -2308,7 +2320,7 @@ unsupported byte.
 
 | Behavior | Status |
 |---|---|
-| Status bar: player name, gold/lumber/food used/cap, hero tokens | Supported |
+| Status bar: player name, gold/lumber/food used/cap, hero tokens | Supported. `BZ_QUEST_HUD_MAX_STATUS_TEXT` (88) is sized to the worst-case `UINT32_MAX`-valued resource line (78 chars) and max-length-name selected line (52 chars) with headroom - a prior too-small value (40) silently cut numeric fields mid-digit; `bzQuestHudFrame_t.statusTextTruncated` is a defensive runtime detector (set from each `snprintf()`'s own return value) that should be unreachable given today's field sizes, logged once by `bz_quest_vk_wc3_hud.c` if it ever fires. |
 | Selected-entity count | Supported (count only - no per-entity name/health/mana; see "Authority" above) |
 | Game-result (victory/defeat/draw) status line | Supported |
 | Loading/no-player-snapshot status line | Supported |
@@ -2335,20 +2347,33 @@ unsupported byte.
   row-major sort, hidden-slot exclusion, disabled/unsupported-semantic
   handling, overlapping-grid-slot distinctness, cancel-region presence/
   absence, statelessness across successive different-input calls (map
-  reload), and hit-test coverage: stale frame ID rejection, center/edge/
-  outside hits, parallel-ray and behind-origin rejection, and disabled-slot
-  hits still being reported.
+  reload), hit-test coverage (stale frame ID rejection, center/edge/outside
+  hits, parallel-ray and behind-origin rejection, and disabled-slot hits
+  still being reported), and `UINT32_MAX`-valued resources/selected-count
+  plus a maximum-length player name rendering completely untruncated
+  (`statusTextTruncated == false`, every numeric field's full value present
+  in the rendered text) - the regression test for the too-small
+  `BZ_QUEST_HUD_MAX_STATUS_TEXT` defect a PR #24 review pass found.
 - `platform/android/quest/scripts/test-wc3-hud-layout.sh` (wired into
   `make test`/`make quest` as `test-quest-wc3-hud-layout`) structurally
   guards the four new shaders' build-shaders.sh/CMakeLists.txt wiring, the
   font atlas's `VK_FORMAT_R8_UNORM` image/view format, the text shader's
   `set 0 binding 0` sampler, both pipelines' depth-test/depth-write/cull-
   mode/topology flags, the single vertex-only `mvp` push constant on both
-  pipelines, and the fog overlay → selection markers → HUD render-pass
-  ordering in `bz_quest_renderer.c`.
+  pipelines, the fog overlay → selection markers → HUD render-pass
+  ordering in `bz_quest_renderer.c`, `create_font_atlas()`'s exactly-7
+  `destroy_font_image(vkHud)` cleanup call sites (one per failure point
+  past `vkCreateImage`, plus exactly one more in `bz_quest_vk_wc3_hud_destroy()`
+  = 8 total) with `destroy_font_image()` defined before it's called, and
+  `build_text_vertices()`'s truncation-return capture / unsupported-byte
+  scan / `VK_WC3_HUD_LOG_ONCE`-backed diagnostics for text-run truncation,
+  unsupported bytes, and `statusTextTruncated` - the structural regression
+  coverage for the font-atlas leak and missing-diagnostics defects a PR #24
+  review pass found (host-unit-untestable since the actual GPU calls and
+  `fprintf` logging require a device/impure I/O).
 - `platform/android/quest/build.mk`'s `test-quest-host-tests` target now
   builds `bz_quest_wc3_hud_font.c`/`bz_quest_wc3_hud.c` and their test files
-  alongside the earlier pure Quest modules - **4462/4462 assertions pass**.
+  alongside the earlier pure Quest modules - **4472/4472 assertions pass**.
 - The shader build pipeline (`build-shaders.sh`/`CMakeLists.txt`) now
   regenerates the four new `warcraft_hud_panel_*`/`warcraft_hud_text_*`
   SPIR-V headers automatically, and `CMakeLists.txt`'s `bz_quest_native`
