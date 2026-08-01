@@ -24,6 +24,15 @@ BZ_QUEST_HOST_TEST_BIN := $(BZ_QUEST_TESTS_DIR)/.bz_quest_pure_tests
 test-quest-source-sync:
 	@$(BZ_QUEST_DIR)/scripts/test-source-sync.sh
 
+# Structural (no-Gradle/no-NDK) check that the layer-5A texture descriptor
+# pool keeps its +1 create-before-evict spare slot - see
+# bz_quest_vk_wc3.h's BZ_QUEST_VK_WC3_TEXTURE_DESCRIPTOR_POOL_CAPACITY
+# comment and platform/android/quest/scripts/test-wc3-descriptor-pool-headroom.sh
+# for the exact deadlock this guards against.
+.PHONY: test-quest-wc3-descriptor-pool-headroom
+test-quest-wc3-descriptor-pool-headroom:
+	@$(BZ_QUEST_DIR)/scripts/test-wc3-descriptor-pool-headroom.sh
+
 # Host-native (no NDK/Gradle/Quest hardware required) unit tests for the
 # platform-independent bz_quest_pure.c/bz_quest_scene.c helpers (projection/
 # view-matrix math, format/extension/passthrough-capability selection, and
@@ -66,7 +75,7 @@ test-quest-host-tests:
 .PHONY: test-quest-bridge
 $(eval $(call test_schema,test-quest-bridge,test-assets $(SHARED_LIB) $(SHEET_LIB),$(CFLAGS) -I$(BZ_QUEST_CPP_DIR) -Iplatform/tabletop/bridge -Iserver -Iclient -Igames/warcraft-3 -I$(BZ_QUEST_TESTS_DIR) -Itests,$(BIN_DIR)/test_bz_quest_bridge$(EXE_EXT),$(BZ_QUEST_TESTS_DIR)/test_bz_quest_bridge_main.c $(BZ_QUEST_TESTS_DIR)/test_bz_quest_bridge.c $(BZ_QUEST_CPP_DIR)/bz_quest_data.c $(BZ_QUEST_CPP_DIR)/bz_quest_bridge.c platform/tabletop/bridge/bz_tabletop_lifecycle.c common/bz_runtime.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz -lpthread,))
 
-test: test-quest-source-sync test-quest-host-tests test-quest-bridge
+test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-host-tests test-quest-bridge
 
 # Assembles the unsigned arm64-v8a debug APK via the project's own Gradle
 # wrapper. Requires an installed Android SDK/NDK (see docs/quest-tabletop.md)
@@ -94,4 +103,4 @@ quest-install-debug: quest-assemble-debug
 # hardware: source-list sync plus a full Gradle/CMake build and native
 # library verification.
 .PHONY: quest
-quest: test-quest-source-sync quest-verify-native-lib
+quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom quest-verify-native-lib

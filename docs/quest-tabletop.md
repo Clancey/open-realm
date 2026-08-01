@@ -1104,6 +1104,24 @@ Two `bzQuestWc3Cache_t` instances (from the shared, host-tested
   same constant for both), FIFO-evicting the oldest entry once full (not an
   unbounded allocation) - see `bz_quest_wc3_cache.h`'s contract, host-tested
   by `test_acquire_evicts_oldest_entry_at_capacity`.
+- **Create-before-evict headroom**: `bz_quest_wc3_cache_acquire()` calls the
+  create-callback BEFORE evicting the oldest entry on a miss at capacity (by
+  design — a failed create must never destroy a still-good cached entry).
+  This means the *real* backing resource pool for a cache's create-callback
+  must have room for `capacity + 1` simultaneously-live resources, not just
+  `capacity` — otherwise the create-before-evict order deadlocks permanently
+  once the pool is full (every subsequent distinct key repeats the identical
+  allocation failure, since eviction never runs). The texture cache's Vulkan
+  descriptor pool is therefore sized to
+  `BZ_QUEST_VK_WC3_TEXTURE_DESCRIPTOR_POOL_CAPACITY` (=
+  `BZ_QUEST_WC3_CACHE_CAPACITY + 1`, not the bare capacity) — see
+  `bz_quest_vk_wc3.h`'s comment at that constant. Structurally verified by
+  `test-wc3-descriptor-pool-headroom.sh` (checked into
+  `test-quest-wc3-descriptor-pool-headroom`/`quest` Make targets) and proven
+  at the pure-cache-logic level by
+  `test_acquire_deadlocks_when_ceiling_matches_capacity_with_no_spare_slot`/
+  `test_acquire_recovers_when_ceiling_has_one_spare_slot` in
+  `test_bz_quest_wc3_cache.c`.
 - **Hit path**: the render path (`bz_quest_vk_wc3_render_target()`) never
   triggers an upload — it uses a read-only `cache_find()` linear scan over
   the cache's public `slots[]` array; an item whose model/texture isn't yet

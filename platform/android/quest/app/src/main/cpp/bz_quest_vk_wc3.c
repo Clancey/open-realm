@@ -809,12 +809,17 @@ bool bz_quest_vk_wc3_create(const bzQuestVk_t *vk, bzQuestVkWc3_t *out) {
     }
 
     {
+        /* Sized to BZ_QUEST_VK_WC3_TEXTURE_DESCRIPTOR_POOL_CAPACITY (capacity
+         * + 1 spare set), NOT the bare BZ_QUEST_VK_WC3_TEXTURE_CACHE_CAPACITY
+         * - see that constant's doc comment in bz_quest_vk_wc3.h for why a
+         * pool sized to exactly `capacity` sets deadlocks the texture cache
+         * the first time a (capacity+1)-th distinct texture is requested. */
         VkDescriptorPoolSize poolSize = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                        BZ_QUEST_VK_WC3_TEXTURE_CACHE_CAPACITY};
+                                        BZ_QUEST_VK_WC3_TEXTURE_DESCRIPTOR_POOL_CAPACITY};
         VkDescriptorPoolCreateInfo poolInfo = {0};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        poolInfo.maxSets = BZ_QUEST_VK_WC3_TEXTURE_CACHE_CAPACITY;
+        poolInfo.maxSets = BZ_QUEST_VK_WC3_TEXTURE_DESCRIPTOR_POOL_CAPACITY;
         poolInfo.poolSizeCount = 1;
         poolInfo.pPoolSizes = &poolSize;
         if (vkCreateDescriptorPool(vk->device, &poolInfo, NULL, &out->descriptorPool) != VK_SUCCESS) {

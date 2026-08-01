@@ -57,6 +57,29 @@ enum {
      * unbounded allocation). */
     BZ_QUEST_VK_WC3_MODEL_CACHE_CAPACITY = BZ_QUEST_WC3_CACHE_CAPACITY,
     BZ_QUEST_VK_WC3_TEXTURE_CACHE_CAPACITY = BZ_QUEST_WC3_CACHE_CAPACITY,
+    /* bz_quest_wc3_cache_acquire()'s documented order (bz_quest_wc3_cache.h)
+     * calls create() BEFORE evicting the oldest entry on a miss at
+     * capacity, so it can stay transactional (a failed create() never
+     * destroys a still-good cached entry). That means the texture
+     * descriptor pool backing texture_create()'s vkAllocateDescriptorSets()
+     * call (bz_quest_vk_wc3.c) must be sized for ONE MORE live descriptor
+     * set than BZ_QUEST_VK_WC3_TEXTURE_CACHE_CAPACITY, not the bare
+     * capacity: at the instant the (capacity+1)-th distinct texture is
+     * created, `capacity` older sets are still allocated (eviction hasn't
+     * run yet), so a pool sized to exactly `capacity` sets always fails
+     * that allocation - permanently, since a failed create() never reaches
+     * the eviction step that would have freed a set - pinning the cache at
+     * `capacity` entries forever. A single spare slot fixes this: the
+     * (capacity+1)-th create() succeeds using the spare slot, eviction then
+     * runs and frees the oldest set, restoring the pool to `capacity`
+     * live sets before the next miss. This constant, not
+     * BZ_QUEST_VK_WC3_TEXTURE_CACHE_CAPACITY, MUST be used for both
+     * VkDescriptorPoolSize::descriptorCount and
+     * VkDescriptorPoolCreateInfo::maxSets in bz_quest_vk_wc3_create() - see
+     * scripts/test-wc3-descriptor-pool-headroom.sh, which fails the build
+     * if a future edit reverts either call site to the bare capacity
+     * constant. */
+    BZ_QUEST_VK_WC3_TEXTURE_DESCRIPTOR_POOL_CAPACITY = BZ_QUEST_VK_WC3_TEXTURE_CACHE_CAPACITY + 1,
     /* 7 blend modes * 2 cull modes * 2 depth-test * 2 depth-write = 56
      * theoretically distinct pipelines; real MDX materials only exercise a
      * handful of these combinations, so this is a generous cap, not a
