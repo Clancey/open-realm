@@ -165,6 +165,26 @@ bool bz_quest_wc3_world_transform_measure(float minX, float minZ, float maxX, fl
 void bz_quest_wc3_world_transform_point(const bzQuestWc3WorldTransform_t *transform, float x, float y,
                                         float z, float outXYZ[3]);
 
+/*
+ * Exact inverse of bz_quest_wc3_world_transform_point(): maps a diorama/
+ * target-space point (tx = X axis, ty = up/height axis, tz = "north" axis)
+ * back to the same (x = engine X, y = engine up/height, z = engine "north")
+ * triple that function's forward `x,y,z` arguments accept, so
+ * point(inverse(p)) == p and inverse(point(p)) == p within float rounding:
+ *   x = tx/scale + centerX, y = ty/scale, z = tz/scale + centerZ.
+ * Added for the layer 6 controller input hit-test path, which converts a
+ * terrain ray/plane hit (found in target space) back into the authoritative
+ * engine world coordinates BZ_TT_PostSmartPoint()/PostTargetPoint() expect -
+ * run exactly once per hit, never re-derived with a separate literal. As
+ * with the forward function, `transform` NULL means "no valid map bounds"
+ * and passes tx,ty,tz through unchanged (raw passthrough); a scale of 0 is
+ * impossible for a transform produced by bz_quest_wc3_world_transform_measure()
+ * (it rejects zero/negative span), so no divide-by-zero guard is needed for
+ * a measured transform, and the NULL branch never divides at all.
+ */
+void bz_quest_wc3_world_transform_point_inverse(const bzQuestWc3WorldTransform_t *transform, float tx,
+                                                float ty, float tz, float outXYZ[3]);
+
 enum {
     /* MDX texture records/model config-string identities carry a fixed
      * 260-byte path (mirrors platform/bridge/bz_tabletop_assets.h's

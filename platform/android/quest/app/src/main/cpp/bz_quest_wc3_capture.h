@@ -64,6 +64,7 @@
 
 #include <stdint.h>
 
+#include "bz_quest_input_state.h"
 #include "bz_quest_wc3_fog.h"
 #include "bz_quest_wc3_hud.h"
 #include "bz_quest_wc3_render.h"
@@ -71,6 +72,22 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Layer 6: POD interaction world the renderer feeds into the pure state
+ * machine each frame (see bz_quest_wc3_capture_interaction()). Sized to the
+ * same per-frame render-item cap as the entity render list. */
+typedef struct {
+    bool available;
+    bzQuestWc3WorldTransform_t transform;
+    bool haveTransform;
+    uint64_t generation;
+    uint64_t mapEpoch;
+    bzQuestHudActionTarget_t targetMode;
+    uint32_t entityCount;
+    bzQuestInputEntity_t entities[BZ_QUEST_WC3_MAX_RENDER_ITEMS];
+    uint32_t selectedCount;
+    uint32_t selectedIds[BZ_QUEST_INPUT_MAX_SELECT_IDS];
+} bzQuestWc3InteractionCapture_t;
 
 /*
  * Invoked once per unique model (deduplicated by model config-string index
@@ -222,6 +239,30 @@ bool bz_quest_wc3_capture_fog(bzQuestWc3FogCapture_t *out);
  * full evidence trail; this is a scope decision, not a bug).
  */
 bool bz_quest_wc3_capture_hud(bzQuestHudInput_t *out);
+
+/*
+ * Layer 6 interaction capture: same "each call site retains its own
+ * immutable snapshot" discipline as bz_quest_wc3_capture_fog()/_hud() above.
+ * Reads BZ_TT_Latest() once and fills `out` with everything the pure
+ * interaction state machine (bz_quest_input_state.h) needs to ray-hit-test
+ * and post commands against THIS snapshot: the shared world transform
+ * (bz_quest_wc3_world_transform_measure() over the map bounds - the SAME
+ * transform terrain/entities/fog use), one bzQuestInputEntity_t per entity
+ * with a rendered model (composed-space center via
+ * bz_quest_wc3_world_transform_point() of its Z-up->Y-up-swapped origin, a
+ * hit-sphere radius derived from the SAME bz_quest_wc3_entity_footprint_scale()
+ * the rendered selection marker uses - never bzTTEntity_t.radius, which is in
+ * raw WC3 units - and the entity's authoritative engine ground origin for the
+ * documented target-entity-as-point ABI-gap path), the server-authored target
+ * MODE, the current selection id set (for additive select), the snapshot
+ * generation (carried through for BOTH the hit-test staleness check and the
+ * BZ_TT_Post* observed_generation), and a map-identity epoch (FNV-1a of
+ * BZ_TTSnapshot_MapName()) that changes ONLY on a real map reload (never per
+ * generation), driving the state machine's one-shot transient clear + board
+ * reset. Releases the snapshot on every branch. `available` is false (and
+ * `out` otherwise zeroed) when no snapshot/ABI-mismatch.
+ */
+void bz_quest_wc3_capture_interaction(bzQuestWc3InteractionCapture_t *out);
 
 uint32_t bz_quest_wc3_render_clock_msec(void);
 

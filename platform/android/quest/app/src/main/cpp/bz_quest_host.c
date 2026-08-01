@@ -99,7 +99,12 @@
 #error "BZ_QUEST_ENABLE_WC3_RENDERER: layer 5A always builds the real static-model Vulkan renderer - CMakeLists.txt must define this to 1"
 #endif
 #if BZ_QUEST_ENABLE_INPUT
-#error "BZ_QUEST_ENABLE_INPUT: OpenXR action/input polling is a later Quest layer - see docs/quest-tabletop.md"
+/* Layer 6 replaces this seam with the real OpenXR Touch-controller action
+ * layer (bz_quest_xr_actions.c / bz_quest_input_state.c / bz_quest_vk_wc3_pointer.c),
+ * driven once per frame from bz_quest_renderer_frame() - see docs/quest-tabletop.md
+ * "Layer 6: Meta Quest Touch controller input". */
+#else
+#error "BZ_QUEST_ENABLE_INPUT: layer 6 always builds the real OpenXR Touch-controller input layer - CMakeLists.txt must define this to 1"
 #endif
 #if BZ_QUEST_ENABLE_AUDIO
 #error "BZ_QUEST_ENABLE_AUDIO: audio output is a later Quest layer - see docs/quest-tabletop.md"

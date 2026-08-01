@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E/6
 
-This document tracks layers 5A/5B/5C/5D/5E of a stacked Meta Quest port:
+This document tracks layers 5A/5B/5C/5D/5E/6 of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -63,11 +63,29 @@ This document tracks layers 5A/5B/5C/5D/5E of a stacked Meta Quest port:
   (`bz_quest_vk_wc3_hud.h`/`.c`). Presentation only - see
   "[Layer 5E: Warcraft III status/command-card HUD](#layer-5e-warcraft-iii-statuscommand-card-hud-bz_quest_wc3_hudh-bz_quest_vk_wc3_hudc)"
   below for full scope, ownership, and evidence.
+- **Layer 6 (this layer, `clancey-quest-touch-controls`)**: adds the first
+  playable **Meta Quest Touch-controller input** layer on top of 5A-5E: an
+  OpenXR action set with aim/grip poses, trigger/squeeze/thumbstick/face-button
+  actions and per-hand haptics (`bz_quest_xr_actions.h`/`.c`, with the pure
+  binding tables in `bz_quest_xr_bindings.h`/`.c`), a pure host-testable
+  interaction state machine + deterministic ray-hit priority + board
+  pan/rotate/zoom transform + typed-command mapping
+  (`bz_quest_input_state.h`/`.c`), Quest-local Vulkan ray/reticle rendering
+  (`bz_quest_vk_wc3_pointer.h`/`.c`, reusing the layer-5D marker shaders), and
+  a per-frame interaction capture (`bz_quest_wc3_capture_interaction()`). Every
+  gameplay command is posted **only** through the existing typed
+  `BZ_TT_Post*` transport - never by mutating local state - see
+  "[Layer 6: Meta Quest Touch controller input](#layer-6-meta-quest-touch-controller-input-bz_quest_xr_actionsc-bz_quest_input_statec-bz_quest_vk_wc3_pointerc)"
+  below for full scope, the action map, the state machine, the ray-hit
+  priority list, the command-mapping table (incl. the documented target-entity
+  ABI gap), and the board-transform clamp ranges.
 
 **These layers now render fog of war, per-entity selection markers, and a
-status/command-card HUD, but still do not render particles/effects, still do
-not poll gameplay input or post any tabletop command, and still do not play
-audio or stage WC3 data onto the device.**
+status/command-card HUD, and (layer 6) read Touch controllers to select
+units, activate command-card buttons, issue smart/target orders, cancel, and
+pan/rotate/zoom the board - all posted through the authoritative typed
+tabletop transport. They still do not render particles/effects, do not track
+hands, do not play audio, and do not stage WC3 data onto the device.**
 See
 [Current limitations](#current-limitations) and
 `bz_quest_host.c`'s compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by
@@ -75,7 +93,8 @@ a `#error` until its real implementation lands) — `BZ_QUEST_ENABLE_ENGINE_STAR
 and `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` were layer 4's two seams;
 `BZ_QUEST_ENABLE_WC3_RENDERER` is the one seam *layer 5A* replaces with a
 real implementation (layer 5E's HUD renders under this same seam - it adds no
-new one); `BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`, and
+new one); `BZ_QUEST_ENABLE_INPUT` is the seam *layer 6* replaces with the real
+OpenXR Touch-controller input layer; `BZ_QUEST_ENABLE_AUDIO` and
 `BZ_QUEST_ENABLE_DATA_STAGING` remain `#error`-gated for a later layer.
 
 ## Architecture boundary
@@ -364,6 +383,13 @@ test`, none of which need Gradle/NDK/Quest hardware:
 | `bz_quest_wc3_fog.c` | `tests/test_bz_quest_wc3_fog.c` | Three-state fog classification, row-major cell indexing, world<->cell conversion (including rectangular/non-chunk-multiple grids), 0/128/255 texture packing with and without row padding, content-based dirty-check hit/miss, per-axis selection-marker matrix/tint generation (with and without the shared world transform), independent per-axis nonpositive-scale rejection, and zero-dimension rejection paths. |
 | `bz_quest_wc3_render.c` (world transform) | `tests/test_bz_quest_wc3_world_transform.c` | Cross-subsystem integration for the shared world/tabletop transform: entity-at-terrain-corner/center coordinate match against `bz_quest_wc3_terrain_build_chunk()`'s real vertex output, fog-cell/entity raw-space agreement, selection-marker/entity translation+scale sharing, rectangular bounds + nonzero origin, map-reload producing an independent transform, and a guard against double-applying the transform. |
 | `bz_quest_bridge.c` | `tests/test_bz_quest_bridge.c` | Valid-override start reaches `RUNNING`; missing-data start reaches `FAILED` with the engine's own error surfaced; invalid-override start reaches `FAILED` *before* any `bzTabletopLifecycle_t` exists; a second `start()` on an already-attempted instance is rejected; suspend/resume forward correctly (and are safe no-ops before a start or after a stop); `stop()` is idempotent and safe pre-start; `destroy()` then a fresh `start()` on the same storage succeeds; `is_terminal()` is correct for every bridge state — 10 tests, **linking the real** `bz_tabletop_lifecycle.c`/`common/bz_runtime.c` (not a stub), 67 assertions. |
+| `bz_quest_input_state.c` (layer 6) | `tests/test_bz_quest_input_state.c` | The pure Touch-controller interaction state machine: button edge detection (idle→press→hold→release→idle produces exactly one edge; two cycles produce two; a controller going inactive mid-hold clears the latch without firing a phantom release), deterministic ray-hit priority (HUD action > HUD cancel > HUD disabled/stale/hidden consumed-but-no-command > nearest-entity sphere > terrain plane > no-hit; boundary hits exactly on a region edge; entity-vs-terrain precedence), world↔composed coordinate inversion round-trip (forward `bz_quest_wc3_world_transform_point` then the new inverse, plus the degenerate no-bounds passthrough), board transform compose/inverse round-trip and scale/translate/pitch clamping at both ends, pan/rotate/zoom math, target/cancel transitions incl. the `ENTITY`/`ENTITY_OR_POINT` ABI-gap decision (target-point at the entity's ground origin), command-mapping-table completeness (every command type reachable, queue-full/stale-generation rejection paths surface a rejected haptic and leave no latched state), and idempotent transient-clear on focus-loss/controller-loss/generation-bump/map-epoch-change (clears once on entry, never re-fires while the condition persists). |
+| `bz_quest_xr_bindings.c` (layer 6) | `tests/test_bz_quest_xr_bindings.c` | The pure OpenXR binding tables: both profile path strings are legal OpenXR paths; every action/component path is lowercase-legal (no spaces/uppercase, no leading/trailing/double slash); `simple_controller` is a strict subset of `touch_controller` (same aim/grip/select/menu/haptic semantic actions bound, thumbstick/squeeze/face-buttons only on Touch); the reserved Oculus/system button is never bound; menu is left-hand-only; face buttons differ by hand (X/Y left, A/B right); no duplicate component path per side; and the path validator rejects malformed inputs. |
+
+`bz_quest_wc3_render.c`'s world-transform integration test
+(`tests/test_bz_quest_wc3_world_transform.c`) was also extended in layer 6
+to cover `bz_quest_wc3_world_transform_point_inverse()`'s exact round-trip
+against the forward transform (see [Layer 6](#layer-6-meta-quest-touch-controller-input-bz_quest_xr_actionsc-bz_quest_input_statec-bz_quest_vk_wc3_pointerc)).
 
 `bz_quest_bridge.c`'s tests are the one suite in this table that needs
 `make test-assets` (to produce a synthetic `build/tests/tests.mpq` data
@@ -2405,6 +2431,311 @@ verified with a real loaded Warcraft III map in this environment:
   source checks, and the real native APK build/dependency inspection above -
   never claimed as an on-device visual success.
 
+## Layer 6: Meta Quest Touch controller input (`bz_quest_xr_actions.c`, `bz_quest_input_state.c`, `bz_quest_vk_wc3_pointer.c`)
+
+Layer 6 is the first layer that **reads the controllers and posts gameplay
+commands**. Everything before it was render-only (the layer-5E HUD hit-test
+was an exported-but-never-invoked contract - see "Supported vs. unsupported
+HUD behavior" above). This layer wires the OpenXR Touch controllers into the
+existing per-frame loop, runs a pure interaction state machine over the
+captured world, and posts the decided command through the **existing typed
+tabletop transport only** (`platform/bridge/bz_tabletop_transport.h`'s
+`BZ_TT_Post*`), never by mutating local player/entity/selection state - the
+server is authoritative and any effect appears only in a *later* snapshot.
+
+### Module map and ownership
+
+| File | Kind | Owns |
+|---|---|---|
+| `bz_quest_xr_bindings.h`/`.c` | **Pure** (plain `cc`, no OpenXR link) | The interaction-profile/action/component-path tables and an OpenXR path-syntax validator. No `Xr*` types - just strings and small enums, so the binding tables are host-testable. |
+| `bz_quest_xr_actions.h`/`.c` | Impure (owns `XrAction`/`XrActionSet`/`XrSpace`) | One `XrActionSet`, the semantic `XrAction`s, per-hand aim/grip `XrSpace`s, `xrSuggestInteractionProfileBindings` per profile, `xrAttachSessionActionSets`, the once-per-frame `xrSyncActions` + `xrGetActionState*`/`xrLocateSpace` reads (unpacked into plain POD), and `xrApplyHapticFeedback`. |
+| `bz_quest_input_state.h`/`.c` | **Pure** | The interaction phase enum, per-hand edge latches, the board pan/rotate/zoom transform (+ its inverse), the deterministic ray-hit priority, the command-mapping table, the haptic-pulse decision, and the idempotent transient-clear bookkeeping. This is what `tests/test_bz_quest_input_state.c` exercises with no OpenXR/Vulkan/engine link. |
+| `bz_quest_wc3_capture.c` (`bz_quest_wc3_capture_interaction()`) | Impure (bridge snapshot reader) | Copies one snapshot generation's world transform, entity hit-spheres (composed center + footprint-scale radius), target mode, and selection set into plain POD, plus an FNV-1a map-name epoch, for the pure state machine. |
+| `bz_quest_vk_wc3_pointer.h`/`.c` | Impure (Vulkan) | Procedural per-hand ray-beam + reticle geometry, drawn with the **reused** layer-5D `warcraft_marker` shaders (no new shader). |
+
+The pure/impure split mirrors layer 5E's `bz_quest_wc3_hud.h` (POD-only) vs.
+`bz_quest_vk_wc3_hud.c` (Vulkan) discipline: no `XrAction`/`XrSpace`/`XrPath`
+ever appears in a host-testable header.
+
+### Action map
+
+One `XrActionSet` (`"tabletop"`) with these semantic actions, bound for both
+`/interaction_profiles/oculus/touch_controller` and (as a reduced fallback)
+`/interaction_profiles/khr/simple_controller`:
+
+| Semantic action | Type | Touch binding (L / R) | simple_controller binding | Purpose |
+|---|---|---|---|---|
+| aim pose | pose | `input/aim/pose` (both) | `input/aim/pose` (both) | ray origin/direction |
+| grip pose | pose | `input/grip/pose` (both) | `input/grip/pose` (both) | grip-drag anchor |
+| select | bool | `input/trigger/value` (both) | `input/select/click` (both) | tap → select / smart-point / target-point / HUD button |
+| squeeze | bool | `input/squeeze/value` (both) | *(unbound)* | grip → smart-entity order; left grip-drag pans the board |
+| thumbstick | vec2 | `input/thumbstick` (both) | *(unbound)* | right X = board yaw, right Y = board zoom, left Y = board height |
+| thumbstick click | bool | `input/thumbstick/click` (both) | *(unbound)* | reserved (no command mapped this layer) |
+| primary (A/X) | bool | `input/x/click` (L) `input/a/click` (R) | *(unbound)* | additive-selection modifier |
+| secondary (B/Y) | bool | `input/y/click` (L) `input/b/click` (R) | *(unbound)* | **cancel** (`BZ_TT_PostCancel`) |
+| menu | bool | `input/menu/click` (**L only**) | `input/menu/click` (**L only**) | board reset to default transform |
+| haptic | vibration output | `output/haptic` (both) | `output/haptic` (both) | accept/reject feedback |
+
+Reserved-button rule: the Meta Quest system/Oculus button is **never** bound;
+menu is left-hand-only because the profile only exposes a menu click on the
+left controller (`bz_quest_xr_bindings.c`, verified by
+`tests/test_bz_quest_xr_bindings.c`'s `test_no_reserved_system_binding` /
+`test_menu_left_only_binding`).
+
+**simple_controller degradation.** On the fallback profile only aim/grip/
+select/menu/haptic are bound. The state machine degrades gracefully: no
+thumbstick means no yaw/zoom/height board manipulation and no grip squeeze
+means no smart-entity order; the menu click still resets the board, select
+still drives select/smart-point/target-point/HUD-button, and cancel is
+unavailable (the secondary button doesn't exist on that profile) - documented
+here as an explicit reduced-capability path, not a silent no-op.
+
+### OpenXR lifecycle integration (adds to, never duplicates, `bz_quest_xr.c`)
+
+- `bz_quest_xr_actions_create()` is called once from
+  `bz_quest_renderer_init()` after the session/spaces exist: it creates the
+  action set + actions, suggests both profiles' bindings (each
+  `xrSuggestInteractionProfileBindings` hard-checked - logs + returns false on
+  failure, matching `bz_quest_xr.c`'s `bool`-return convention), creates the
+  per-hand aim/grip action spaces, and calls `xrAttachSessionActionSets` once.
+- `bz_quest_xr_actions_sync()` is called once per frame from
+  `bz_quest_renderer_frame()` **only while the session is running and
+  `XR_SESSION_STATE_FOCUSED`** (syncing while unfocused is wasteful/undefined
+  per the spec); when not focused it leaves every hand inactive and
+  `focused=false`, which drives the state machine's idempotent transient
+  clear. It edge-reads each boolean, reads the thumbstick vec2, and locates
+  the aim/grip poses at the frame's predicted display time (the same `XrTime`
+  used to locate the eye views).
+- Every state read honors `isActive`: an inactive action is never treated as
+  "still pressed"/"still held". A controller transitioning active→inactive
+  (device loss/reconnect) clears its latched edge state exactly once, as does
+  a focus loss - both proven by `test_bz_quest_input_state.c`'s
+  reconnect/focus-loss idempotent-clear tests.
+- `bz_quest_xr_actions_destroy()` destroys the action spaces then the action
+  set (which destroys its child actions), `XR_NULL_HANDLE`-guarded, mirroring
+  `bz_quest_xr_destroy()`'s ordering discipline.
+
+### Interaction state machine
+
+`bz_quest_input_state.h`'s `bzQuestInputPhase_t` is a single enum (never
+parallel booleans, per AGENTS.md): `IDLE_RAY` (ray pointing, no gesture owns
+input), `BOARD_MANIPULATE` (a pan/rotate/zoom gesture owns input this frame),
+and `TARGET_POINT_MODE` (the server's `current_target != NONE` owns input for
+gameplay targeting). Board manipulation and a gameplay/target gesture are
+mutually exclusive owners of input each frame - mirroring
+`TabletopControls.swift`'s gesture-ownership exclusivity: a board grip-drag/
+thumbstick gesture cannot begin while the server is in a target mode, and a
+tap is suppressed on the same hand/frame a grip-drag or thumbstick gesture is
+active so a manipulation never doubles as a tap.
+
+Edge semantics: every button command fires only on the false→true transition
+(`bz_quest_edge_update()` tracks previous-frame state per action) - never
+re-fired while held, never on a bare "changed since last sync". Press-hold-
+release yields exactly one command; two press/release cycles yield two
+(`test_bz_quest_input_state.c`).
+
+### Ray-hit priority (deterministic, evaluated every frame in this order)
+
+The ray is first transformed **into composed space** with
+`bz_quest_board_transform_inverse_ray()` (the same board transform the world/
+HUD is drawn through), then `bz_quest_input_hit_test()` evaluates, in order:
+
+1. **HUD action/cancel region** via `bz_quest_wc3_hud_hit_test()` against the
+   *same* `bzQuestHudFrame_t` the renderer draws (`bz_quest_vk_wc3_hud_frame()`).
+   A hidden slot yields no region; a disabled/stale-frame-id slot is reported
+   as `HUD_DISABLED` - it *consumes* the ray (posts nothing, buzzes "reject")
+   so the ray never passes through the panel onto a unit behind it. The frame's
+   `generation` is used for both the HUD staleness check and the later post's
+   `observed_generation` (same value, never divergent).
+2. **Nearest entity sphere** (smallest positive ray-`t` wins). Entity hit
+   spheres are built in `bz_quest_wc3_capture_interaction()` from the *same*
+   `bz_quest_wc3_world_transform_point()` composed center and
+   `bz_quest_wc3_entity_footprint_scale()` radius the rendered mesh/selection
+   marker uses - never a separately-drifting bound, never `bzTTEntity_t.radius`.
+3. **Terrain/world plane** (ray-plane at composed `y = planeY = 0`, the diorama
+   base). No cheap per-point height query exists on
+   `bz_quest_wc3_terrain.h`, so this is a flat-plane fallback at the diorama
+   base - documented gap; the hit is converted back to authoritative engine
+   world coordinates **exactly once** via the new
+   `bz_quest_wc3_world_transform_point_inverse()` (added in
+   `bz_quest_wc3_render.h`/`.c` alongside the existing forward transform,
+   round-trip-tested in `test_bz_quest_wc3_world_transform.c`).
+4. **No hit** → no command.
+
+### Command mapping (table-driven)
+
+`bz_quest_input_state.c`'s `kTargetTable` maps `(server target mode, hit kind)`
+to a typed command; no if/else ladder:
+
+| Hit | target = NONE | target = POINT | target = ENTITY | target = ENTITY_OR_POINT |
+|---|---|---|---|---|
+| HUD button | `PostButton(actionCode)` | (same) | (same) | (same) |
+| HUD cancel region / secondary button | `PostCancel` | (same) | (same) | (same) |
+| HUD disabled/stale | consume, reject-buzz, no post | (same) | (same) | (same) |
+| Entity (trigger tap) | `PostSelect` (additive if A/X held, else replace) | `PostTargetPoint(entity origin)` | `PostTargetPoint(entity origin)` | `PostTargetPoint(entity origin)` |
+| Entity (grip squeeze) | `PostSmartEntity(entity)` | `PostTargetPoint(entity origin)` | `PostTargetPoint(entity origin)` | `PostTargetPoint(entity origin)` |
+| Terrain point | `PostSmartPoint(x,y)` | `PostTargetPoint(x,y)` | **reject** (no valid entity) | `PostTargetPoint(x,y)` |
+
+**Documented ABI gap (target-entity).** `platform/bridge/bz_tabletop_transport.h`
+exposes **no** `BZ_TT_PostTargetEntity` - only `BZ_TT_PostTargetPoint` (confirm
+with `grep BZ_TT_Post` in that header: the only posts are Select, SmartEntity,
+SmartPoint, Button, Cancel, TargetPoint). So when the server is in
+`BZ_TT_ACTION_TARGET_ENTITY`/`ENTITY_OR_POINT` and the ray hits an entity,
+this layer uses **workaround (a)**: post `BZ_TT_PostTargetPoint` at the
+entity's own real engine ground origin (`entityEngineX,entityEngineNorth`,
+captured from the authoritative snapshot origin - never fabricated). This
+preserves server authority (the server still resolves what's at that point)
+and fabricates no data beyond projecting the unit's own position to a ground
+point. It is **not** silently dropped: an `ENTITY`-only mode terrain tap (no
+valid entity) is explicitly rejected with the reject haptic. This is the least-
+fabricating option given the ABI; if a `PostTargetEntity` is ever added, the
+`kTargetTable` `onEntity` column is the single place to switch.
+
+Every `BZ_TT_Post*` returns a `bzTTResult_t`; the impure driver
+(`bz_quest_renderer_post_command()`) turns `BZ_TT_OK` into the "accept" haptic
+and any failure (queue-full/stale-generation/invalid-argument) into the
+"reject" haptic, leaving no latched success state. Haptic constants:
+accept = 0.6 amplitude / 20 ms (crisp tap), reject = 0.35 amplitude / 90 ms
+(soft buzz) - distinct by design so the player feels received-but-refused
+input (`bz_quest_input_state.c:173-176`).
+
+### Board transform (composes with, never replaces, the bounds transform)
+
+`bzQuestBoardTransform_t` is a Quest-user-owned translation + yaw + uniform
+scale that is **folded into** every eye's view*projection as
+`mvpBoard = mvp * board` (`bz_quest_renderer.c`), applied consistently to
+terrain, models, fog, selection markers, HUD panel placement, and the ray/
+reticle endpoints, plus the inverse hit-test path - it does not replace the
+existing bounds-derived `bzQuestWc3WorldTransform_t`, it stacks on top of it
+(the same "one shared transform applied everywhere" pattern layer 5D
+established). Composing the board transform then its inverse round-trips to the
+original point within float tolerance (`test_bz_quest_input_state.c`).
+
+Input mapping and clamp ranges (`bz_quest_input_state.h:84-104`):
+
+| Gesture | Effect | Range/rate |
+|---|---|---|
+| Left grip-drag | pan (tx/tz) | translate clamped to ±3.0 m |
+| Right thumbstick X | yaw rotate | 2.0 rad/s at full deflection |
+| Right thumbstick Y | zoom (uniform scale) | 1.5 scale-units/s, clamped **[0.30, 3.00]** |
+| Left thumbstick Y | board height (ty) | 0.6 m/s, clamped **[-2.0, 1.0]** m |
+| Left menu click | reset board to default | tx=0, ty=-0.40, tz=-0.60, yaw=0, scale=1 |
+| (thumbstick deadzone) | — | 0.2 |
+
+The clamps mirror the "diorama box" reasoning in `bz_quest_wc3_render.h`: no
+unbounded zoom-to-zero/infinity, board stays within arm's reach, height stays
+above the floor and below head height. Every clamp is bounded at both ends,
+proven in `test_bz_quest_input_state.c`.
+
+### Rendering (ray/reticle)
+
+`bz_quest_vk_wc3_pointer.c` builds procedural per-hand geometry each frame (a
+thin crossed-quad beam, half-width 0.004 m, from the aim origin to the reticle
+hit point, plus a 16-segment reticle disc, radius 0.02 m) into a host-visible
+dynamic vertex buffer, written once per frame before the eye loop (hazard-free
+because `render_warcraft_target` waits on the per-eye fence after each eye
+submit). It **reuses the layer-5D `warcraft_marker` shader pair** (position-
+only vertex, `mat4 mvp` + `vec4 tint` push constant) - layer 6 adds **no new
+shader**. The pipeline matches the marker/HUD passthrough conventions: depth-
+test on, depth-write off (a beam is occluded by nearer board geometry but never
+occludes later draws), `VK_CULL_MODE_NONE`, `TRIANGLE_LIST`, straight-alpha
+`SRC_ALPHA/ONE_MINUS_SRC_ALPHA` blend over passthrough. The pointer is recorded
+**last** (after the HUD) in the *plain* per-eye view*projection - the physical
+controllers live in tracking space, not the board-folded composed space; the
+reticle endpoints were already mapped out of composed space by
+`bz_quest_renderer_process_input()`. The reticle/beam tint encodes the hit
+kind (amber HUD, red disabled/refused, green entity, cyan terrain, dim white
+no-hit). No per-frame logging (matches "No busy loop / no per-frame logging"
+above).
+
+### Lifecycle / edge cases (each clears transient state exactly once)
+
+`bz_quest_input_state_update()` idempotently clears all transient interaction
+state (edge latches, active pan-drag) exactly once on entry to each of: focus
+loss, controller `isActive` loss, snapshot-generation change, and map-epoch
+change (a real `BZ_TTSnapshot_MapName()` change, tracked via the FNV-1a epoch -
+never per-generation, which advances every frame), plus a board reset on map
+change. `bz_quest_renderer_shutdown()` clears the state and destroys the
+pointer + action modules. Each clear is one-shot: staying in the condition
+across N frames does not re-fire (both directions tested).
+
+### Supported vs. unsupported behavior
+
+| Behavior | Status |
+|---|---|
+| Select (replace/additive), smart-entity, smart-point, cancel, HUD button, target-point orders posted via typed transport | Supported |
+| Board pan/rotate/zoom/height + reset, folded consistently into world/HUD/fog/selection/pointer | Supported |
+| Deterministic ray-hit priority with the real HUD hit-test + real entity footprints + terrain plane | Supported |
+| Per-hand aim rays + hit reticles with hit-kind tint | Supported |
+| Accept/reject haptics distinct by amplitude/duration | Supported |
+| Target-**entity** submission | ABI gap: no `BZ_TT_PostTargetEntity`; resolved as target-point at the entity's ground origin (workaround (a) above), never silently dropped. |
+| Terrain **height** under the ray | Flat diorama-base plane only - no per-point heightfield query exists on `bz_quest_wc3_terrain.h` (documented gap). |
+| Hand tracking, audio, data staging, particles/effects, multiplayer, Meta Platform services | **Out of scope for this layer** - separate later layers, not started. |
+
+### Tests and build wiring
+
+- `platform/android/quest/tests/test_bz_quest_input_state.c` and
+  `tests/test_bz_quest_xr_bindings.c` are the two new pure suites (see the
+  [Testing](#testing) table for exactly what each proves), plus the extended
+  `tests/test_bz_quest_wc3_world_transform.c` inverse-transform round-trip.
+  All run under `make test-quest-host-tests` - **4880/4880 assertions pass**.
+- `platform/android/quest/scripts/test-wc3-pointer-layout.sh` (wired into
+  `make test`/`make quest` as `test-quest-wc3-pointer-layout`) structurally
+  guards the pointer module's shader **reuse** (no new pointer shader), its
+  depth/cull/topology/blend pipeline flags, the "pointer recorded after HUD in
+  the plain mvp" render order, the `mvpBoard = mvp * board` fold, and the
+  action module's exactly-once focus-gated `xrSyncActions`.
+- `CMakeLists.txt`'s `bz_quest_native` source list includes the four new
+  `.c` files (`bz_quest_input_state.c`, `bz_quest_xr_bindings.c`,
+  `bz_quest_xr_actions.c`, `bz_quest_vk_wc3_pointer.c`) and defines
+  `BZ_QUEST_ENABLE_INPUT=1`; `bz_quest_host.c`'s `#error` seam for that flag is
+  now the "layer 6 must define this to 1" guard (replacing the earlier
+  "later layer" gate).
+
+### Acceptance gates
+
+This layer's **pure** logic (state machine, hit priority, command mapping,
+board transform, binding tables, transform inverse) is fully host-verified by
+the tests above. The **impure** OpenXR/Vulkan glue was compiled/linked for the
+real arm64-v8a target via the project's Gradle/CMake build and checked by
+`quest-verify-native-lib`, but was **not** run on a physical device:
+
+- No physical Quest 3/3S was connected, so there was **no** human check of real
+  controller ray alignment, reticle placement, haptic feel, board-manipulation
+  ergonomics, or that a posted command actually round-trips through the server
+  into a later snapshot. These are **hardware-only** gates - see the exact
+  on-device procedure below.
+- `bz_quest_host.c` still starts the bridge with `NULL` (no map selected), so
+  even on-device the transport can sit in the "no player snapshot" state; a
+  real command round-trip additionally requires real loaded ROC/TFT map data,
+  which this host does not have.
+
+### Exact on-device acceptance procedure (requires a connected Quest 3/3S)
+
+```sh
+# 1. Build + install (see "Build/run/log commands" above for env setup).
+make quest-assemble-debug
+adb install -r platform/android/quest/app/build/outputs/apk/debug/app-debug.apk
+# 2. Launch and tail this app's log tag while wearing the headset.
+adb shell am start -n <package>/android.app.NativeActivity
+adb logcat -s bz_quest_native:V
+# 3. With a real map loaded, verify by hand (each is hardware-only, unproven here):
+#    - both controller rays render and track; the reticle tints by hit kind
+#      (amber over the HUD, green over a unit, cyan over terrain);
+#    - trigger over a unit selects it (selection marker appears in a LATER
+#      frame - never instantly/locally); A/X + trigger adds to selection;
+#    - grip over a unit issues a smart order; trigger over terrain issues a
+#      smart-point order; a command-card button posts its action; B/Y cancels;
+#    - in a target mode, trigger over terrain/unit issues the target-point
+#      order (unit resolves to its ground origin - the ABI-gap path);
+#    - left grip-drag pans, right stick rotates/zooms, left stick raises/lowers,
+#      left menu resets - all move terrain+models+fog+selection+HUD together;
+#    - a crisp buzz on an accepted action, a distinct softer buzz on a refused
+#      one (disabled HUD slot, queue-full, stale generation);
+#    - dropping a controller (set it down) stops its ray without a phantom
+#      press; taking the headset off (focus loss) and back on resumes cleanly.
+```
+
 ## Manifest requirements
 
 Unchanged from layer 2: `AndroidManifest.xml`'s NativeActivity metadata,
@@ -2424,20 +2755,19 @@ debug prototype. Replace before any wider distribution.
 
 Everything below is explicitly out of scope for this layer; each has a
 compile-time `#error`-guarded seam in `bz_quest_host.c`
-(`BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`,
-`BZ_QUEST_ENABLE_DATA_STAGING`) so a later layer flips exactly one on as its
-real implementation lands, instead of a silent stub reporting fake success.
-`BZ_QUEST_ENABLE_VULKAN_RENDERER`, `BZ_QUEST_ENABLE_ENGINE_START`,
-`BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS`, and (new this layer)
-`BZ_QUEST_ENABLE_WC3_RENDERER` are now all hard-required to `1` (a `#error`
-fires if a build tries to set any of them to `0`) since this layer's
-Warcraft renderer, procedural renderer, and tabletop bridge are no longer
-optional:
+(`BZ_QUEST_ENABLE_AUDIO`, `BZ_QUEST_ENABLE_DATA_STAGING`) so a later layer
+flips exactly one on as its real implementation lands, instead of a silent
+stub reporting fake success. `BZ_QUEST_ENABLE_VULKAN_RENDERER`,
+`BZ_QUEST_ENABLE_ENGINE_START`, `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS`,
+`BZ_QUEST_ENABLE_WC3_RENDERER`, and (new this layer) `BZ_QUEST_ENABLE_INPUT`
+are now all hard-required to `1` (a `#error` fires if a build tries to set any
+of them to `0`) since the Warcraft renderer, procedural renderer, tabletop
+bridge, and OpenXR Touch input are no longer optional:
 
-- No OpenXR action/input polling, no audio output, no War3 MPQ data staging
-  onto the device (no ADB data-copy script yet — a developer must stage
-  data manually per "Data-path contract" above until that later layer
-  lands).
+- Touch-controller input (layer 6) is now present and posts real typed
+  commands; audio output and War3 MPQ data staging onto the device remain out
+  of scope (no ADB data-copy script yet — a developer must stage data manually
+  per "Data-path contract" above until that later layer lands).
 - No map is ever loaded (`bz_quest_bridge_start()` always passes a `NULL`
   map name) — see "Known limitations of this frame descriptor" above. With
   no map loaded, `BZ_TT_Latest()` returns an entity-less snapshot, so layer
@@ -2462,8 +2792,11 @@ optional:
   material behavior" above.
 - Transparency ordering is per-entity (by world-translation distance to the
   eye), not per-triangle — see "Draw ordering / transparency" above.
-- No gameplay controller input reaches the engine (no `BZ_TabletopSubmit*`
-  command is ever called by this layer).
+- Gameplay controller input (layer 6) now reaches the engine via the typed
+  `BZ_TT_Post*` transport (select/smart/target/cancel/button) — but only the
+  point-based target path exists (no `BZ_TT_PostTargetEntity` in the ABI; see
+  "Layer 6"'s command-mapping table for the documented workaround), and no
+  command round-trip was verified on-device or against real map data.
 - No Vulkan multiview, MSAA, or fixed foveation (`XR_FB_foveation`) — see
   "Vulkan render pass/pipeline/targets" above for why this is an explicit,
   documented seam rather than an oversight.

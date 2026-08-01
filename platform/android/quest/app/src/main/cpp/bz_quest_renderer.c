@@ -3,10 +3,12 @@
  */
 #include "bz_quest_renderer.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "bz_quest_log.h"
 #include "bz_quest_pure.h"
+#include "platform/bridge/bz_tabletop_transport.h"
 
 /* Preference order: non-sRGB first (the render pass writes vertex colors
  * straight through with no gamma-correction step - see tabletop_frag.frag),
@@ -81,6 +83,13 @@ bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer
     if (!bz_quest_vk_wc3_fog_create(vk, &renderer->wc3Fog)) goto fail;
     if (!bz_quest_vk_wc3_hud_create(vk, &renderer->wc3Hud)) goto fail;
 
+    /* Layer 6: OpenXR Touch action set (needs session+space, created above)
+     * and the ray/reticle pipeline; the pure state machine starts at its
+     * default board placement. */
+    if (!bz_quest_xr_actions_create(xr, &renderer->xrActions)) goto fail;
+    if (!bz_quest_vk_wc3_pointer_create(vk, &renderer->wc3Pointer)) goto fail;
+    bz_quest_input_state_init(&renderer->inputState);
+
     BZ_QUEST_LOGI("renderer init complete");
     return true;
 
@@ -88,6 +97,131 @@ fail:
     BZ_QUEST_LOGE("renderer init failed - tearing down partial state");
     bz_quest_renderer_shutdown(renderer);
     return false;
+}
+
+/* Layer 6: maps the pure state machine's single decided command onto the
+ * typed tabletop transport. `generation` is the SAME snapshot generation the
+ * hit-test used for its staleness check (bz_quest_input_state.h) - the
+ * transport rejects a stale post, which the caller turns into a "rejected"
+ * haptic. No local player/entity/selection mutation: the effect appears only
+ * in a later snapshot (server authoritative). */
+static bzTTResult_t bz_quest_renderer_post_command(const bzQuestInputCommand_t *c, uint64_t generation) {
+    switch (c->type) {
+    case BZ_QUEST_INPUT_CMD_SELECT:
+        return BZ_TT_PostSelect(BZ_TABLETOP_ABI_VERSION, generation, c->selectIds, c->selectCount);
+    case BZ_QUEST_INPUT_CMD_SMART_ENTITY:
+        return BZ_TT_PostSmartEntity(BZ_TABLETOP_ABI_VERSION, generation, c->targetEntity);
+    case BZ_QUEST_INPUT_CMD_SMART_POINT:
+        return BZ_TT_PostSmartPoint(BZ_TABLETOP_ABI_VERSION, generation, c->x, c->y);
+    case BZ_QUEST_INPUT_CMD_BUTTON:
+        return BZ_TT_PostButton(BZ_TABLETOP_ABI_VERSION, generation, c->code, strlen(c->code));
+    case BZ_QUEST_INPUT_CMD_CANCEL:
+        return BZ_TT_PostCancel(BZ_TABLETOP_ABI_VERSION, generation);
+    case BZ_QUEST_INPUT_CMD_TARGET_POINT:
+        return BZ_TT_PostTargetPoint(BZ_TABLETOP_ABI_VERSION, generation, c->x, c->y);
+    default:
+        return BZ_TT_OK; /* BZ_QUEST_INPUT_CMD_NONE - nothing to post */
+    }
+}
+
+/* Ray/reticle tint per hit kind - warm for actionable HUD/entity hits, red for
+ * a refused (disabled/stale) HUD slot, cyan for a bare terrain point, dim
+ * white for no hit. RGBA straight-alpha (matches the marker/passthrough blend). */
+static void bz_quest_renderer_pointer_tint(bzQuestInputHitKind_t kind, float out[4]) {
+    static const float kAmber[4] = {1.0f, 0.75f, 0.20f, 0.90f};
+    static const float kRed[4] = {0.90f, 0.20f, 0.20f, 0.85f};
+    static const float kGreen[4] = {0.30f, 1.00f, 0.40f, 0.90f};
+    static const float kCyan[4] = {0.30f, 0.80f, 1.00f, 0.85f};
+    static const float kDim[4] = {0.80f, 0.80f, 0.85f, 0.50f};
+    const float *c = kDim;
+    switch (kind) {
+    case BZ_QUEST_INPUT_HIT_HUD_BUTTON:
+    case BZ_QUEST_INPUT_HIT_HUD_CANCEL: c = kAmber; break;
+    case BZ_QUEST_INPUT_HIT_HUD_DISABLED: c = kRed; break;
+    case BZ_QUEST_INPUT_HIT_ENTITY: c = kGreen; break;
+    case BZ_QUEST_INPUT_HIT_TERRAIN: c = kCyan; break;
+    default: c = kDim; break;
+    }
+    memcpy(out, c, sizeof(float) * 4);
+}
+
+/* Fallback ray length (meters) when a hand's ray hits nothing - the beam still
+ * shows where the controller points. */
+#define BZ_QUEST_RENDERER_POINTER_FALLBACK_LEN 2.5f
+
+/* Layer 6 per-frame input: capture the interaction world, read the Touch
+ * actions at `displayTime`, run the pure state machine, post the decided
+ * command + haptic, and build this frame's ray/reticle geometry (in tracking
+ * space) plus the board model matrix folded into the world view*projection.
+ * Runs once per frame (not per eye). */
+static void bz_quest_renderer_process_input(bzQuestRenderer_t *renderer, XrTime displayTime,
+                                            float outBoardMatrix[16]) {
+    bzQuestXr_t *xr = &renderer->xr;
+
+    bz_quest_wc3_capture_interaction(&renderer->interaction);
+
+    bzQuestInputFrame_t frame;
+    memset(&frame, 0, sizeof(frame));
+    int64_t last = renderer->lastDisplayTime;
+    frame.dt = (last != 0 && displayTime > last) ? (float)((double)(displayTime - last) / 1e9) : 0.0f;
+    renderer->lastDisplayTime = displayTime;
+
+    bz_quest_xr_actions_sync(xr, &renderer->xrActions, displayTime, &frame);
+
+    frame.world.hudFrame = bz_quest_vk_wc3_hud_has_frame(&renderer->wc3Hud)
+                               ? bz_quest_vk_wc3_hud_frame(&renderer->wc3Hud)
+                               : NULL;
+    frame.world.entities = renderer->interaction.entities;
+    frame.world.entityCount = renderer->interaction.entityCount;
+    frame.world.transform = renderer->interaction.haveTransform ? &renderer->interaction.transform : NULL;
+    frame.world.planeY = 0.0f;
+    frame.world.generation = renderer->interaction.generation;
+    frame.world.targetMode = renderer->interaction.targetMode;
+    frame.selectedIds = renderer->interaction.selectedIds;
+    frame.selectedCount = renderer->interaction.selectedCount;
+    frame.mapEpoch = renderer->interaction.mapEpoch;
+
+    bzQuestInputOutput_t out;
+    memset(&out, 0, sizeof(out));
+    bz_quest_input_state_update(&renderer->inputState, &frame, &out);
+
+    if (out.hasCommand) {
+        bzTTResult_t result = bz_quest_renderer_post_command(&out.command, frame.world.generation);
+        bzQuestHapticPulse_t pulse = bz_quest_haptic_pulse(result == BZ_TT_OK);
+        bz_quest_xr_actions_apply_haptic(xr, &renderer->xrActions, out.command.hand, &pulse);
+    } else if (out.wantHaptic) {
+        bzQuestHapticPulse_t pulse = bz_quest_haptic_pulse(out.hapticAccepted);
+        bz_quest_xr_actions_apply_haptic(xr, &renderer->xrActions, out.hapticHand, &pulse);
+    }
+
+    bz_quest_board_transform_matrix(&renderer->inputState.board, outBoardMatrix);
+
+    /* Build ray/reticle geometry in tracking space: reticle points come out of
+     * the pure hit-test in COMPOSED space, so map them back into tracking
+     * space with the SAME board transform the board geometry uses. */
+    bzQuestVkWc3PointerHand_t hands[BZ_QUEST_INPUT_HAND_COUNT];
+    memset(hands, 0, sizeof(hands));
+    for (int h = 0; h < BZ_QUEST_INPUT_HAND_COUNT; ++h) {
+        const bzQuestInputHandSample_t *sample = &frame.hands[h];
+        hands[h].visible = out.feedback.visible[h] && sample->aimValid;
+        if (!hands[h].visible) continue;
+        memcpy(hands[h].rayStart, sample->aimOrigin, sizeof(hands[h].rayStart));
+        if (out.feedback.hasReticle[h]) {
+            float tracking[3];
+            bz_quest_board_transform_apply_point(&renderer->inputState.board, out.feedback.reticle[h],
+                                                 tracking);
+            memcpy(hands[h].rayEnd, tracking, sizeof(hands[h].rayEnd));
+            memcpy(hands[h].reticle, tracking, sizeof(hands[h].reticle));
+            hands[h].hasReticle = true;
+        } else {
+            for (int k = 0; k < 3; ++k)
+                hands[h].rayEnd[k] =
+                    sample->aimOrigin[k] + sample->aimDir[k] * BZ_QUEST_RENDERER_POINTER_FALLBACK_LEN;
+            hands[h].hasReticle = false;
+        }
+        bz_quest_renderer_pointer_tint(out.feedback.hitKind[h], hands[h].tint);
+    }
+    bz_quest_vk_wc3_pointer_update(&renderer->wc3Pointer, hands);
 }
 
 /* Builds one eye's model-view-projection matrix from its tracked pose/FOV.
@@ -122,8 +256,8 @@ static bool bz_quest_renderer_build_mvp(const XrView *view, float outMvp[16]) {
  * limit rather than pretending to do a global per-triangle merge sort. */
 static bool bz_quest_renderer_render_warcraft_target(
     bzQuestRenderer_t *renderer, uint32_t viewIndex, uint32_t imageIndex, uint32_t width, uint32_t height,
-    const float viewProj[16], const float cameraWorldPos[3], const bzQuestWc3TerrainRenderList_t *terrainList,
-    const bzQuestWc3RenderList_t *wc3List) {
+    const float viewProj[16], const float pointerViewProj[16], const float cameraWorldPos[3],
+    const bzQuestWc3TerrainRenderList_t *terrainList, const bzQuestWc3RenderList_t *wc3List) {
     const bzQuestVk_t *vk = &renderer->vk;
     if (viewIndex >= BZ_QUEST_VIEW_COUNT || imageIndex >= vk->targetCount[viewIndex]) {
         BZ_QUEST_LOGE("bz_quest_renderer: render target view=%u image=%u out of range", viewIndex, imageIndex);
@@ -190,6 +324,12 @@ static bool bz_quest_renderer_render_warcraft_target(
     bz_quest_vk_wc3_fog_record_overlay(&renderer->wc3Fog, target->commandBuffer, viewProj);
     bz_quest_vk_wc3_fog_record_selection(&renderer->wc3Fog, target->commandBuffer, viewProj, wc3List);
     bz_quest_vk_wc3_hud_record(&renderer->wc3Hud, target->commandBuffer, viewProj);
+    /* Layer 6: ray pointers/reticles last, in PLAIN (non-board-folded)
+     * view*projection - the controllers are physical objects in tracking
+     * space; their reticle endpoints were already mapped out of composed
+     * space by bz_quest_renderer_process_input(). Depth-tested so a beam is
+     * occluded by nearer board geometry. */
+    bz_quest_vk_wc3_pointer_record(&renderer->wc3Pointer, target->commandBuffer, pointerViewProj);
 
     vkCmdEndRenderPass(target->commandBuffer);
     if (vkEndCommandBuffer(target->commandBuffer) != VK_SUCCESS) {
@@ -235,6 +375,13 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
     bool haveViews = frameState.shouldRender &&
                      bz_quest_xr_locate_views(xr, frameState.predictedDisplayTime, views);
 
+    /* Layer 6: read Touch actions + run the interaction state machine once per
+     * frame (always while the session runs, even on a non-rendering frame, so
+     * focus-loss/disconnect/map-change transient-state clears still fire). It
+     * also produces this frame's board model matrix and ray/reticle geometry. */
+    float boardMatrix[16];
+    bz_quest_renderer_process_input(renderer, frameState.predictedDisplayTime, boardMatrix);
+
     /* Captured once per frame (not once per eye) - see
      * bz_quest_vk_wc3_capture_and_upload()'s doc comment. Only bothered with
      * when the frame will actually render (haveViews): capturing here also
@@ -272,7 +419,8 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
                 haveViews = false;
             } else if (wc3RenderList.count > 0 || terrainRenderList.count > 0 ||
                        bz_quest_vk_wc3_fog_has_overlay(&renderer->wc3Fog) ||
-                       bz_quest_vk_wc3_hud_has_frame(&renderer->wc3Hud)) {
+                       bz_quest_vk_wc3_hud_has_frame(&renderer->wc3Hud) ||
+                       bz_quest_vk_wc3_pointer_has_geometry(&renderer->wc3Pointer)) {
                 /* Warcraft III terrain and/or models exist this frame: record
                  * both into one shared eye render pass, interleaving terrain
                  * opaque -> model opaque -> terrain blended -> model blended.
@@ -283,14 +431,27 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
                  * still renders on a frame with a connected bridge snapshot
                  * but no selection/models yet (e.g. observing an empty
                  * board) - see bz_quest_wc3_hud.h's no-selection state. */
+                /* Fold the Quest-user board transform into this eye's
+                 * view*projection so terrain, models, fog, selection markers,
+                 * and the HUD panel all move/rotate/scale together
+                 * (mvpBoard = mvp * board). The camera position the world
+                 * shaders use must be expressed in the SAME composed space,
+                 * so inverse-map the tracking-space head position through the
+                 * board transform. The ray pointer is drawn with the plain
+                 * mvp (physical controllers in tracking space). */
                 const float cameraWorldPos[3] = {
                     views[i].pose.position.x,
                     views[i].pose.position.y,
                     views[i].pose.position.z,
                 };
+                float mvpBoard[16];
+                bz_quest_mat4_multiply(mvp, boardMatrix, mvpBoard);
+                float cameraComposed[3];
+                bz_quest_board_transform_inverse_point(&renderer->inputState.board, cameraWorldPos,
+                                                       cameraComposed);
                 rendered = bz_quest_renderer_render_warcraft_target(
-                    renderer, i, imageIndex, swapchain->width, swapchain->height, mvp, cameraWorldPos,
-                    &terrainRenderList, &wc3RenderList);
+                    renderer, i, imageIndex, swapchain->width, swapchain->height, mvpBoard, mvp,
+                    cameraComposed, &terrainRenderList, &wc3RenderList);
                 if (!rendered) haveViews = false;
             } else {
                 /* No valid Warcraft render items yet (e.g. no snapshot,
@@ -343,6 +504,12 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
 }
 
 void bz_quest_renderer_shutdown(bzQuestRenderer_t *renderer) {
+    /* Layer 6 first: clear any latched interaction state exactly once, then
+     * release the ray pipeline and the OpenXR action set (before the session
+     * is destroyed by bz_quest_xr_destroy() below). */
+    bz_quest_input_state_clear(&renderer->inputState, /*resetBoard=*/true);
+    bz_quest_vk_wc3_pointer_destroy(&renderer->wc3Pointer);
+    bz_quest_xr_actions_destroy(&renderer->xr, &renderer->xrActions);
     bz_quest_vk_wc3_hud_destroy(&renderer->wc3Hud);
     bz_quest_vk_wc3_fog_destroy(&renderer->wc3Fog);
     bz_quest_vk_wc3_terrain_destroy(&renderer->wc3Terrain);

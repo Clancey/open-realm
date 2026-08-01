@@ -260,6 +260,10 @@ add_library(bz_quest_native SHARED
     bz_quest_vk_wc3_fog.c
     bz_quest_vk_wc3_terrain.c
     bz_quest_vk_wc3_hud.c
+    bz_quest_input_state.c
+    bz_quest_xr_bindings.c
+    bz_quest_xr_actions.c
+    bz_quest_vk_wc3_pointer.c
 )
 add_dependencies(bz_quest_native bz_quest_shaders)
 target_compile_definitions(bz_quest_native PRIVATE
@@ -267,6 +271,7 @@ target_compile_definitions(bz_quest_native PRIVATE
     BZ_QUEST_ENABLE_ENGINE_START=1
     BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS=1
     BZ_QUEST_ENABLE_WC3_RENDERER=1
+    BZ_QUEST_ENABLE_INPUT=1
 )
 target_include_directories(bz_quest_native PRIVATE
     "${BZ_REPO_ROOT}"

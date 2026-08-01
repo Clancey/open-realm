@@ -55,6 +55,10 @@ test-quest-wc3-fog-selection-layout:
 test-quest-wc3-hud-layout:
 	@$(BZ_QUEST_DIR)/scripts/test-wc3-hud-layout.sh
 
+.PHONY: test-quest-wc3-pointer-layout
+test-quest-wc3-pointer-layout:
+	@$(BZ_QUEST_DIR)/scripts/test-wc3-pointer-layout.sh
+
 # Host-native (no NDK/Gradle/Quest hardware required) unit tests for the
 # platform-independent bz_quest_pure.c/bz_quest_scene.c helpers (projection/
 # view-matrix math, format/extension/passthrough-capability selection, and
@@ -77,6 +81,8 @@ test-quest-host-tests:
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wc3_world_transform.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wc3_hud_font.c \
 		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_wc3_hud.c \
+		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_input_state.c \
+		$(BZ_QUEST_TESTS_DIR)/test_bz_quest_xr_bindings.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_pure.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_scene.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_data.c \
@@ -88,6 +94,8 @@ test-quest-host-tests:
 		$(BZ_QUEST_CPP_DIR)/bz_quest_wc3_fog.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_wc3_hud_font.c \
 		$(BZ_QUEST_CPP_DIR)/bz_quest_wc3_hud.c \
+		$(BZ_QUEST_CPP_DIR)/bz_quest_input_state.c \
+		$(BZ_QUEST_CPP_DIR)/bz_quest_xr_bindings.c \
 		-lm -o $(BZ_QUEST_HOST_TEST_BIN)
 	@$(BZ_QUEST_HOST_TEST_BIN)
 	@rm -f $(BZ_QUEST_HOST_TEST_BIN)
@@ -108,7 +116,7 @@ test-quest-host-tests:
 .PHONY: test-quest-bridge
 $(eval $(call test_schema,test-quest-bridge,test-assets $(SHARED_LIB) $(SHEET_LIB),$(CFLAGS) -I$(BZ_QUEST_CPP_DIR) -Iplatform/tabletop/bridge -Iserver -Iclient -Igames/warcraft-3 -I$(BZ_QUEST_TESTS_DIR) -Itests,$(BIN_DIR)/test_bz_quest_bridge$(EXE_EXT),$(BZ_QUEST_TESTS_DIR)/test_bz_quest_bridge_main.c $(BZ_QUEST_TESTS_DIR)/test_bz_quest_bridge.c $(BZ_QUEST_CPP_DIR)/bz_quest_data.c $(BZ_QUEST_CPP_DIR)/bz_quest_bridge.c platform/tabletop/bridge/bz_tabletop_lifecycle.c common/bz_runtime.c common/common.c common/cmd.c common/cvar.c common/msg.c common/net.c common/mpq.c,-lsheet -lshared -lm -lz -lpthread,))
 
-test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-host-tests test-quest-bridge
+test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-host-tests test-quest-bridge
 
 # Assembles the unsigned arm64-v8a debug APK via the project's own Gradle
 # wrapper. Requires an installed Android SDK/NDK (see docs/quest-tabletop.md)
@@ -136,4 +144,4 @@ quest-install-debug: quest-assemble-debug
 # hardware: source-list sync plus a full Gradle/CMake build and native
 # library verification.
 .PHONY: quest
-quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout quest-verify-native-lib
+quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout quest-verify-native-lib

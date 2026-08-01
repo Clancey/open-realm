@@ -52,6 +52,21 @@ void bz_quest_wc3_world_transform_point(const bzQuestWc3WorldTransform_t *transf
     outXYZ[2] = (z - transform->centerZ) * transform->scale;
 }
 
+void bz_quest_wc3_world_transform_point_inverse(const bzQuestWc3WorldTransform_t *transform, float tx,
+                                                float ty, float tz, float outXYZ[3]) {
+    if (!transform) {
+        outXYZ[0] = tx;
+        outXYZ[1] = ty;
+        outXYZ[2] = tz;
+        return;
+    }
+    /* Inverse of the forward affine map above; measure() guarantees scale>0. */
+    const float invScale = 1.0f / transform->scale;
+    outXYZ[0] = tx * invScale + transform->centerX;
+    outXYZ[1] = ty * invScale;
+    outXYZ[2] = tz * invScale + transform->centerZ;
+}
+
 void bz_quest_wc3_entity_footprint_scale(uint32_t category, float footprintX, float footprintY,
                                          float *outScaleX, float *outScaleY, float *outScaleZ) {
     /* --- Scale: category multiplier * max(footprint, 0.25) INDEPENDENTLY

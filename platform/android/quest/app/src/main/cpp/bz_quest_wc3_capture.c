@@ -2,7 +2,7 @@
  * bz_quest_wc3_capture.c - see bz_quest_wc3_capture.h.
  */
 #include "bz_quest_wc3_capture.h"
-
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1147,6 +1147,93 @@ bool bz_quest_wc3_capture_hud(bzQuestHudInput_t *out) {
 
     BZ_TTSnapshot_Release(snap);
     return true;
+}
+
+/* FNV-1a over the map name so a real map reload (name change) yields a new
+ * epoch, while a mere generation bump (same map, new snapshot) does not. 0 is
+ * reserved for "no name" so the very first real map still differs from init. */
+static uint64_t bz_quest_map_epoch(const char *name) {
+    uint64_t h = 1469598103934665603ULL;
+    for (const char *p = name; p && *p; ++p) { h ^= (uint8_t)*p; h *= 1099511628211ULL; }
+    return h;
+}
+
+void bz_quest_wc3_capture_interaction(bzQuestWc3InteractionCapture_t *out) {
+    memset(out, 0, sizeof(*out));
+
+    const bzTTSnapshot_t *snap = BZ_TT_Latest();
+    if (!snap) return;
+    if (BZ_TTSnapshot_AbiVersion(snap) != BZ_TABLETOP_ABI_VERSION) {
+        BZ_TTSnapshot_Release(snap);
+        return;
+    }
+
+    out->generation = BZ_TTSnapshot_Generation(snap);
+
+    char mapName[128];
+    mapName[0] = '\0';
+    if (BZ_TTSnapshot_MapName(snap, mapName, sizeof(mapName))) out->mapEpoch = bz_quest_map_epoch(mapName);
+
+    const bzTTPlayer_t *player = BZ_TTSnapshot_Player(snap);
+    out->targetMode = player ? (bzQuestHudActionTarget_t)player->target : BZ_QUEST_HUD_TARGET_NONE;
+
+    out->selectedCount = BZ_TTSnapshot_SelectedEntityIds(snap, out->selectedIds, BZ_QUEST_INPUT_MAX_SELECT_IDS);
+
+    bzTTBox2_t mapBounds;
+    out->haveTransform = BZ_TTSnapshot_MapBounds(snap, &mapBounds) &&
+                         bz_quest_wc3_world_transform_measure(mapBounds.min_x, mapBounds.min_y, mapBounds.max_x,
+                                                              mapBounds.max_y, &out->transform);
+
+    const bzQuestWc3WorldTransform_t *xf = out->haveTransform ? &out->transform : NULL;
+    uint32_t entityCount = BZ_TTSnapshot_EntityCount(snap);
+    for (uint32_t i = 0; i < entityCount && out->entityCount < BZ_QUEST_WC3_MAX_RENDER_ITEMS; i++) {
+        bzTTEntity_t entity;
+        if (!BZ_TTSnapshot_EntityAt(snap, i, &entity)) continue;
+        if (entity.model == 0) continue; /* only entities that actually render are hittable */
+
+        /* Category/footprint via the same metadata resolution the render/HUD
+         * paths use (team_color override), so the hit-sphere radius matches
+         * the rendered selection marker's footprint scale exactly. */
+        bzTTEntityMetadataInput_t metaInput;
+        memset(&metaInput, 0, sizeof(metaInput));
+        bzTTAssetMetadata_t metadata;
+        memset(&metadata, 0, sizeof(metadata));
+        if (entity.class_id != 0) {
+            metaInput.class_id = entity.class_id;
+            metaInput.override_mask = BZ_TTA_METADATA_OVERRIDE_TEAM_COLOR;
+            metaInput.team_color = entity.player;
+            BZ_TTA_ResolveEntityMetadata(BZ_TABLETOP_ASSETS_ABI_VERSION, &metaInput, &metadata);
+        }
+
+        bzQuestInputEntity_t *e = &out->entities[out->entityCount++];
+        e->number = entity.number;
+        /* Z-up engine origin -> Y-up composed center, exactly as
+         * bz_quest_wc3_build_world_matrix() places the rendered mesh
+         * (world_transform_point(xf, originX, originZ, originY)). */
+        float center[3];
+        bz_quest_wc3_world_transform_point(xf, entity.origin_x, entity.origin_z, entity.origin_y, center);
+        e->centerX = center[0];
+        e->centerY = center[1];
+        e->centerZ = center[2];
+        /* Engine ground origin (x,y) for the documented target-entity-as-point
+         * ABI-gap workaround - the authoritative coords BZ_TT_PostTargetPoint
+         * expects, never a fabricated value. */
+        e->engineX = entity.origin_x;
+        e->engineNorth = entity.origin_y;
+        /* Hit-sphere radius = the larger horizontal half-extent of the SAME
+         * per-axis footprint/category scale the rendered selection marker uses
+         * (bz_quest_wc3_entity_footprint_scale()), NOT bzTTEntity_t.radius
+         * (raw WC3 units). A conservative enclosing sphere over the marker
+         * footprint - see bz_quest_wc3_render.h's selection-marker comment. */
+        float sx, sy, sz;
+        bz_quest_wc3_entity_footprint_scale(metadata.category, metadata.footprint_x, metadata.footprint_y, &sx,
+                                            &sy, &sz);
+        e->radius = fmaxf(sx, sz);
+        if (e->radius <= 0.0f) e->radius = 0.02f; /* floor: never a zero-radius (un-hittable) sphere */
+    }
+
+    out->available = true;
+    BZ_TTSnapshot_Release(snap);
 }
 
 uint32_t bz_quest_wc3_render_clock_msec(void) {

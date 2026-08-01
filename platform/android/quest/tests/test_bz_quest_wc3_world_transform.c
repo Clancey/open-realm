@@ -67,6 +67,47 @@ static void test_transform_point_null_transform_is_raw_passthrough(void) {
     ASSERT_EQ_FLOAT(out[2], 9.0f, 0.0001f);
 }
 
+static void test_transform_point_inverse_matches_hand_formula(void) {
+    bzQuestWc3WorldTransform_t transform = {0.01f, 100.0f, 200.0f};
+    float out[3];
+    bz_quest_wc3_world_transform_point_inverse(&transform, 0.5f, 0.05f, 0.5f, out);
+    ASSERT_EQ_FLOAT(out[0], 0.5f / 0.01f + 100.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[1], 0.05f / 0.01f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[2], 0.5f / 0.01f + 200.0f, 0.0001f);
+}
+
+static void test_transform_point_inverse_round_trips_forward(void) {
+    /* Layer 6 hit-test depends on forward(inverse(p)) == p and
+     * inverse(forward(p)) == p to the tolerance a terrain tap needs. Derive
+     * the transform from real map bounds, never a hand literal. */
+    bzQuestWc3WorldTransform_t t;
+    ASSERT(bz_quest_wc3_world_transform_measure(512.0f, 256.0f, 4608.0f, 3328.0f, &t));
+    const float engineX = 1234.0f, engineUp = 42.0f, engineNorth = 2222.0f;
+    float target[3], back[3];
+    bz_quest_wc3_world_transform_point(&t, engineX, engineUp, engineNorth, target);
+    bz_quest_wc3_world_transform_point_inverse(&t, target[0], target[1], target[2], back);
+    ASSERT_EQ_FLOAT(back[0], engineX, 0.01f);
+    ASSERT_EQ_FLOAT(back[1], engineUp, 0.01f);
+    ASSERT_EQ_FLOAT(back[2], engineNorth, 0.01f);
+
+    /* And the other direction from an arbitrary diorama point. */
+    const float tx = 0.3f, ty = -0.1f, tz = -0.25f;
+    float engine[3], fwd[3];
+    bz_quest_wc3_world_transform_point_inverse(&t, tx, ty, tz, engine);
+    bz_quest_wc3_world_transform_point(&t, engine[0], engine[1], engine[2], fwd);
+    ASSERT_EQ_FLOAT(fwd[0], tx, 0.0001f);
+    ASSERT_EQ_FLOAT(fwd[1], ty, 0.0001f);
+    ASSERT_EQ_FLOAT(fwd[2], tz, 0.0001f);
+}
+
+static void test_transform_point_inverse_null_is_raw_passthrough(void) {
+    float out[3];
+    bz_quest_wc3_world_transform_point_inverse(NULL, 7.0f, 8.0f, 9.0f, out);
+    ASSERT_EQ_FLOAT(out[0], 7.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[1], 8.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(out[2], 9.0f, 0.0001f);
+}
+
 /* ------------------------------------------------------------------ */
 /* Integration fixture helpers                                        */
 /* ------------------------------------------------------------------ */
@@ -376,6 +417,9 @@ void run_bz_quest_wc3_world_transform_tests(void) {
     RUN_TEST(test_transform_measure_rejects_degenerate_bounds);
     RUN_TEST(test_transform_point_applies_scale_and_center);
     RUN_TEST(test_transform_point_null_transform_is_raw_passthrough);
+    RUN_TEST(test_transform_point_inverse_matches_hand_formula);
+    RUN_TEST(test_transform_point_inverse_round_trips_forward);
+    RUN_TEST(test_transform_point_inverse_null_is_raw_passthrough);
     RUN_TEST(test_integration_entity_at_terrain_corner_matches_terrain_position);
     RUN_TEST(test_integration_entity_at_terrain_far_corner_matches_terrain_position);
     RUN_TEST(test_integration_entity_at_terrain_center_matches_terrain_center);

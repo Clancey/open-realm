@@ -17,9 +17,13 @@
 #include "bz_quest_vk_wc3.h"
 #include "bz_quest_vk_wc3_fog.h"
 #include "bz_quest_vk_wc3_hud.h"
+#include "bz_quest_vk_wc3_pointer.h"
 #include "bz_quest_vk_wc3_terrain.h"
+#include "bz_quest_input_state.h"
+#include "bz_quest_wc3_capture.h"
 #include "bz_quest_wc3_render.h"
 #include "bz_quest_xr.h"
+#include "bz_quest_xr_actions.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +43,17 @@ typedef struct bzQuestRenderer_s {
      * selection) so it is never occluded by board geometry - see
      * bz_quest_vk_wc3_hud.h's header comment for authority/scope. */
     bzQuestVkWc3Hud_t wc3Hud;
+    /* Layer 6: Meta Quest Touch controller input. xrActions owns the OpenXR
+     * action set/spaces; inputState is the pure state machine; wc3Pointer
+     * draws the ray/reticle; interaction is per-frame captured POD the state
+     * machine hit-tests against (kept in the struct, not on the stack, since
+     * its entity array is large). lastDisplayTime feeds the state machine's
+     * dt. See docs/quest-tabletop.md Layer 6. */
+    bzQuestXrActions_t xrActions;
+    bzQuestVkWc3Pointer_t wc3Pointer;
+    bzQuestInputState_t inputState;
+    bzQuestWc3InteractionCapture_t interaction;
+    int64_t lastDisplayTime;
 } bzQuestRenderer_t;
 
 /*
