@@ -210,7 +210,8 @@ static void test_resolve_fails_with_no_usable_base_and_no_override(void) {
 static void test_build_argv_without_map(void) {
     char storage[BZ_QUEST_DATA_ARGV_MAX][BZ_QUEST_DATA_DIR_MAX];
     const char *argv[BZ_QUEST_DATA_ARGV_MAX];
-    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", NULL, storage, argv, BZ_QUEST_DATA_ARGV_MAX);
+    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", BZ_QUEST_DATA_EDITION_ROC, NULL, storage, argv,
+                                         BZ_QUEST_DATA_ARGV_MAX);
     ASSERT_EQ_INT(argc, 3);
     ASSERT_STR_EQ(argv[1], "-data");
     ASSERT_STR_EQ(argv[2], "/sdcard/Warcraft III");
@@ -219,26 +220,181 @@ static void test_build_argv_without_map(void) {
 static void test_build_argv_with_map(void) {
     char storage[BZ_QUEST_DATA_ARGV_MAX][BZ_QUEST_DATA_DIR_MAX];
     const char *argv[BZ_QUEST_DATA_ARGV_MAX];
-    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", "(2)IceCrown", storage, argv,
-                                         BZ_QUEST_DATA_ARGV_MAX);
+    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", BZ_QUEST_DATA_EDITION_ROC, "(2)IceCrown", storage,
+                                         argv, BZ_QUEST_DATA_ARGV_MAX);
     ASSERT_EQ_INT(argc, 5);
     ASSERT_STR_EQ(argv[3], "+map");
     ASSERT_STR_EQ(argv[4], "(2)IceCrown");
+}
+
+static void test_build_argv_roc_never_emits_tft_flag(void) {
+    /* Inverse of the TFT tests below: a ROC-edition build (with or without
+     * a map) must never contain "-tft" anywhere in its argv. */
+    char storage[BZ_QUEST_DATA_ARGV_MAX][BZ_QUEST_DATA_DIR_MAX];
+    const char *argv[BZ_QUEST_DATA_ARGV_MAX];
+    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", BZ_QUEST_DATA_EDITION_ROC, "(2)IceCrown", storage,
+                                         argv, BZ_QUEST_DATA_ARGV_MAX);
+    for (int i = 0; i < argc; i++) {
+        ASSERT(strcmp(argv[i], "-tft") != 0);
+    }
+}
+
+static void test_build_argv_tft_without_map(void) {
+    char storage[BZ_QUEST_DATA_ARGV_MAX][BZ_QUEST_DATA_DIR_MAX];
+    const char *argv[BZ_QUEST_DATA_ARGV_MAX];
+    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", BZ_QUEST_DATA_EDITION_TFT, NULL, storage, argv,
+                                         BZ_QUEST_DATA_ARGV_MAX);
+    ASSERT_EQ_INT(argc, 4);
+    ASSERT_STR_EQ(argv[0], "openwarcraft3-quest");
+    ASSERT_STR_EQ(argv[1], "-data");
+    ASSERT_STR_EQ(argv[2], "/sdcard/Warcraft III");
+    ASSERT_STR_EQ(argv[3], "-tft");
+}
+
+static void test_build_argv_tft_with_map_preserves_order(void) {
+    /* "-tft" must land between the data dir and "+map" - the exact argv
+     * shape LiveTabletopTransport.swift's own
+     * `edition == .tft ? baseArguments + ["-tft"] : baseArguments` template
+     * produces for this same lifecycle core (see bz_quest_data.h). */
+    char storage[BZ_QUEST_DATA_ARGV_MAX][BZ_QUEST_DATA_DIR_MAX];
+    const char *argv[BZ_QUEST_DATA_ARGV_MAX];
+    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", BZ_QUEST_DATA_EDITION_TFT, "(2)IceCrown", storage,
+                                         argv, BZ_QUEST_DATA_ARGV_MAX);
+    ASSERT_EQ_INT(argc, 6);
+    ASSERT_STR_EQ(argv[2], "/sdcard/Warcraft III");
+    ASSERT_STR_EQ(argv[3], "-tft");
+    ASSERT_STR_EQ(argv[4], "+map");
+    ASSERT_STR_EQ(argv[5], "(2)IceCrown");
 }
 
 static void test_build_argv_rejects_undersized_max_argv(void) {
     char storage[BZ_QUEST_DATA_ARGV_MAX][BZ_QUEST_DATA_DIR_MAX];
     const char *argv[BZ_QUEST_DATA_ARGV_MAX];
     /* mapName is non-NULL (needs argc 5), but caller only allows 3. */
-    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", "SomeMap", storage, argv, 3);
+    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", BZ_QUEST_DATA_EDITION_ROC, "SomeMap", storage, argv,
+                                         3);
+    ASSERT_EQ_INT(argc, 0);
+}
+
+static void test_build_argv_rejects_undersized_max_argv_for_tft_plus_map(void) {
+    /* TFT + map needs argc 6; a caller-side buffer sized only for the old
+     * ROC-max (5) must be rejected explicitly, not silently truncated. */
+    char storage[BZ_QUEST_DATA_ARGV_MAX][BZ_QUEST_DATA_DIR_MAX];
+    const char *argv[BZ_QUEST_DATA_ARGV_MAX];
+    int argc = bz_quest_data_build_argv("/sdcard/Warcraft III", BZ_QUEST_DATA_EDITION_TFT, "SomeMap", storage, argv,
+                                         5);
     ASSERT_EQ_INT(argc, 0);
 }
 
 static void test_build_argv_rejects_null_data_dir(void) {
     char storage[BZ_QUEST_DATA_ARGV_MAX][BZ_QUEST_DATA_DIR_MAX];
     const char *argv[BZ_QUEST_DATA_ARGV_MAX];
-    int argc = bz_quest_data_build_argv(NULL, NULL, storage, argv, BZ_QUEST_DATA_ARGV_MAX);
+    int argc = bz_quest_data_build_argv(NULL, BZ_QUEST_DATA_EDITION_ROC, NULL, storage, argv,
+                                         BZ_QUEST_DATA_ARGV_MAX);
     ASSERT_EQ_INT(argc, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* bz_quest_data_detect_edition                                       */
+/* ------------------------------------------------------------------ */
+
+static bool touch(const char *dir, const char *name) {
+    char path[BZ_QUEST_DATA_DIR_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path)) return false;
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+static void test_detect_edition_roc_only_is_roc(void) {
+    char dir[BZ_QUEST_DATA_DIR_MAX];
+    ASSERT(make_temp_dir(dir, sizeof(dir)));
+    ASSERT(touch(dir, "War3.mpq"));
+
+    bzQuestDataEdition_t edition = BZ_QUEST_DATA_EDITION_TFT; /* deliberately wrong initial value */
+    ASSERT(bz_quest_data_detect_edition(dir, &edition));
+    ASSERT_EQ_INT(edition, BZ_QUEST_DATA_EDITION_ROC);
+
+    char path[BZ_QUEST_DATA_DIR_MAX];
+    snprintf(path, sizeof(path), "%s/War3.mpq", dir);
+    remove(path);
+    remove(dir);
+}
+
+static void test_detect_edition_tft_over_roc_is_tft(void) {
+    char dir[BZ_QUEST_DATA_DIR_MAX];
+    ASSERT(make_temp_dir(dir, sizeof(dir)));
+    ASSERT(touch(dir, "War3.mpq"));
+    ASSERT(touch(dir, "War3x.mpq"));
+    ASSERT(touch(dir, "War3xLocal.mpq"));
+
+    bzQuestDataEdition_t edition = BZ_QUEST_DATA_EDITION_ROC;
+    ASSERT(bz_quest_data_detect_edition(dir, &edition));
+    ASSERT_EQ_INT(edition, BZ_QUEST_DATA_EDITION_TFT);
+
+    char path[BZ_QUEST_DATA_DIR_MAX];
+    snprintf(path, sizeof(path), "%s/War3.mpq", dir);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/War3x.mpq", dir);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/War3xLocal.mpq", dir);
+    remove(path);
+    remove(dir);
+}
+
+static void test_detect_edition_is_case_insensitive(void) {
+    /* Mirrors common/common.c's FS_AddArchiveScanEntry() and
+     * stage-wc3-data.sh's find_ci - a Windows-sourced install's differently
+     * cased archive name must still be detected as TFT. */
+    char dir[BZ_QUEST_DATA_DIR_MAX];
+    ASSERT(make_temp_dir(dir, sizeof(dir)));
+    ASSERT(touch(dir, "war3.MPQ"));
+    ASSERT(touch(dir, "WAR3X.mpq"));
+
+    bzQuestDataEdition_t edition = BZ_QUEST_DATA_EDITION_ROC;
+    ASSERT(bz_quest_data_detect_edition(dir, &edition));
+    ASSERT_EQ_INT(edition, BZ_QUEST_DATA_EDITION_TFT);
+
+    char path[BZ_QUEST_DATA_DIR_MAX];
+    snprintf(path, sizeof(path), "%s/war3.MPQ", dir);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/WAR3X.mpq", dir);
+    remove(path);
+    remove(dir);
+}
+
+static void test_detect_edition_ignores_non_mpq_war3x_prefixed_file(void) {
+    /* A "War3x..."-prefixed file that is NOT a ".mpq" (e.g. a stray text
+     * file) must not trip TFT detection, matching FS_HasExtension()'s own
+     * requirement that the extension check runs first in the engine. */
+    char dir[BZ_QUEST_DATA_DIR_MAX];
+    ASSERT(make_temp_dir(dir, sizeof(dir)));
+    ASSERT(touch(dir, "War3.mpq"));
+    ASSERT(touch(dir, "War3x.readme.txt"));
+
+    bzQuestDataEdition_t edition = BZ_QUEST_DATA_EDITION_TFT;
+    ASSERT(bz_quest_data_detect_edition(dir, &edition));
+    ASSERT_EQ_INT(edition, BZ_QUEST_DATA_EDITION_ROC);
+
+    char path[BZ_QUEST_DATA_DIR_MAX];
+    snprintf(path, sizeof(path), "%s/War3.mpq", dir);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/War3x.readme.txt", dir);
+    remove(path);
+    remove(dir);
+}
+
+static void test_detect_edition_fails_on_missing_directory(void) {
+    bzQuestDataEdition_t edition;
+    ASSERT(!bz_quest_data_detect_edition("/nonexistent/bz-quest-data-test-dir", &edition));
+}
+
+static void test_detect_edition_rejects_null_args(void) {
+    bzQuestDataEdition_t edition;
+    ASSERT(!bz_quest_data_detect_edition(NULL, &edition));
+    ASSERT(!bz_quest_data_detect_edition("", &edition));
+    ASSERT(!bz_quest_data_detect_edition("/tmp", NULL));
 }
 
 void run_bz_quest_data_tests(void) {
@@ -262,6 +418,16 @@ void run_bz_quest_data_tests(void) {
     RUN_TEST(test_resolve_fails_with_no_usable_base_and_no_override);
     RUN_TEST(test_build_argv_without_map);
     RUN_TEST(test_build_argv_with_map);
+    RUN_TEST(test_build_argv_roc_never_emits_tft_flag);
+    RUN_TEST(test_build_argv_tft_without_map);
+    RUN_TEST(test_build_argv_tft_with_map_preserves_order);
     RUN_TEST(test_build_argv_rejects_undersized_max_argv);
+    RUN_TEST(test_build_argv_rejects_undersized_max_argv_for_tft_plus_map);
     RUN_TEST(test_build_argv_rejects_null_data_dir);
+    RUN_TEST(test_detect_edition_roc_only_is_roc);
+    RUN_TEST(test_detect_edition_tft_over_roc_is_tft);
+    RUN_TEST(test_detect_edition_is_case_insensitive);
+    RUN_TEST(test_detect_edition_ignores_non_mpq_war3x_prefixed_file);
+    RUN_TEST(test_detect_edition_fails_on_missing_directory);
+    RUN_TEST(test_detect_edition_rejects_null_args);
 }

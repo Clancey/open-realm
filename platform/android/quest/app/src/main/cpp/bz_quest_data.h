@@ -52,9 +52,24 @@ extern "C" {
 enum {
     BZ_QUEST_DATA_DIR_MAX = 512,   /* generous bound for an Android filesystem path */
     BZ_QUEST_DATA_ERROR_MAX = 256,
-    /* argv[0], "-data", <dir>[, "+map", <name>] - see bz_quest_data_build_argv(). */
-    BZ_QUEST_DATA_ARGV_MAX = 5,
+    /* argv[0], "-data", <dir>[, "-tft"][, "+map", <name>] - see
+     * bz_quest_data_build_argv(). Max is 3 (base) + 1 ("-tft") + 2 ("+map"
+     * <name>) = 6. */
+    BZ_QUEST_DATA_ARGV_MAX = 6,
 };
+
+/*
+ * Which Warcraft III edition a resolved data directory contains - detected
+ * fresh every start from the directory's own on-disk archives (see
+ * bz_quest_data_detect_edition()) rather than configured/cached separately,
+ * so this can never drift from what FS_AddDataDirectory() will actually see
+ * mirrors platform/apple/visionos/tabletop/app/TabletopProductFlow.swift's
+ * TabletopEdition enum's roc/tft cases, but Quest has no edition-picker UI
+ * (out of this layer's scope), so this value is derived, never chosen. */
+typedef enum {
+    BZ_QUEST_DATA_EDITION_ROC = 0,
+    BZ_QUEST_DATA_EDITION_TFT = 1,
+} bzQuestDataEdition_t;
 
 /* Fixed, documented override-file name (relative to internalDataPath) an
  * ADB staging step may `adb push` before first launch. Never guessed at a
@@ -129,24 +144,68 @@ bool bz_quest_data_resolve(const char *internalDataPath, const char *externalDat
                             size_t out_cap, char *out_error, size_t error_cap);
 
 /*
+ * Scans dataDir's immediate directory entries (opendir/readdir - plain
+ * POSIX, no Android-specific API, host-testable like the rest of this file)
+ * for a ".mpq" file whose basename begins with the 5-character "War3x"
+ * expansion prefix, matching common/common.c's FS_AddArchiveScanEntry()
+ * check byte-for-byte (case-insensitive extension via strcasecmp,
+ * case-insensitive 5-char prefix via strncasecmp - see that function for
+ * the exact rule this mirrors). This is the same signal
+ * stage-wc3-data.sh's own find_ci "War3x.mpq"/"War3xLocal.mpq" checks use
+ * to decide ROC-vs-TFT-over-ROC before ever staging a file, so a directory
+ * this function calls TFT is guaranteed to be one the staging script would
+ * also have accepted as a complete TFT layout (or a directory a developer
+ * populated by hand identically).
+ *
+ * Returns true with *out_edition set (ROC if no such file is found, TFT
+ * otherwise) iff dataDir could be opened as a directory. Returns false
+ * (out_edition untouched) if dataDir is NULL/empty or cannot be opened at
+ * all (does not exist yet, no permission, etc.) - this is deliberately NOT
+ * treated as a hard error here: FS_AddDataDirectory() inside
+ * BZ_RuntimeInit() is the authoritative existence/archive check and
+ * surfaces its own actionable "Failed to add data directory" error later;
+ * callers of this function should simply leave the edition at its safe
+ * ROC default when detection itself could not run, exactly as
+ * bz_quest_bridge_start() does.
+ */
+bool bz_quest_data_detect_edition(const char *dataDir, bzQuestDataEdition_t *out_edition);
+
+/*
  * Builds a BZ_TabletopCreate()-compatible argv from a resolved data
- * directory and an optional map name, reusing the exact "-data" "<dir>"
- * [, "+map" "<name>"] convention platform/apple/visionos/tabletop/app/
- * OpenRealmTabletopApp.swift's LiveTabletopTransport already establishes
- * for this same lifecycle core (see common/bz_runtime.h's bzRuntimeArgs_t
- * and AGENTS.md's "Command Conventions": "+" is a process/startup argument
- * here, never an in-engine console command) - never inventing a second
- * startup-argument scheme for this platform.
+ * directory, its detected edition (see bz_quest_data_detect_edition()), and
+ * an optional map name, reusing the exact "-data" "<dir>" [, "-tft"] [,
+ * "+map" "<name>"] convention platform/apple/visionos/tabletop/app/
+ * LiveTabletopTransport.swift's own `edition == .tft ? baseArguments +
+ * ["-tft"] : baseArguments` already establishes for this same lifecycle
+ * core (see common/bz_runtime.h's bzRuntimeArgs_t and AGENTS.md's "Command
+ * Conventions": "+" is a process/startup argument here, never an in-engine
+ * console command) - never inventing a second startup-argument scheme for
+ * this platform.
+ *
+ * "-tft" is appended as a plain dash *flag* argv entry (no value slot),
+ * processed by common/cvar.c's Cvar_ApplyCommandLine() - which
+ * common/common.c's Com_Init() runs to completion, setting the
+ * "fs_expansion" cvar to "1", *before* BZ_RuntimeInit() ever calls
+ * FS_AddDataDirectory() (see common/bz_runtime.c's BZ_RuntimeInit(): it
+ * calls Com_Init() first, then FS_AddDataDirectory() only after Com_Init()
+ * returns). This is deliberately NOT a late "+fs_expansion 1": late "+"
+ * commands are only executed via Cbuf_AddLateCommands()/Cbuf_Execute()
+ * inside CL_Init(), which BZ_RuntimeInit() calls strictly AFTER
+ * FS_AddDataDirectory() has already scanned and (without "-tft" already
+ * applied) skipped every "War3x*" archive - a "+fs_expansion 1" appended
+ * here would always be too late to affect archive mounting.
  *
  * out_storage[i] must each provide BZ_QUEST_DATA_DIR_MAX bytes; out_argv[i]
  * is pointed at out_storage[i] (or a static string literal for argv[0]/
- * "-data"/"+map"), so the whole call can run with no heap allocation.
- * max_argv must be >= BZ_QUEST_DATA_ARGV_MAX (the caller-side constant that
- * is always sufficient for this function's output). Returns the argc
- * written (3 if mapName is NULL/empty, 5 otherwise), or 0 on a caller bug
- * (max_argv too small, or dataDir too long for one out_storage slot).
+ * "-data"/"-tft"/"+map"), so the whole call can run with no heap
+ * allocation. max_argv must be >= BZ_QUEST_DATA_ARGV_MAX (the caller-side
+ * constant that is always sufficient for this function's output). Returns
+ * the argc written (3 if mapName is NULL/empty and edition is ROC, up to 6
+ * if both a map name is given and edition is TFT), or 0 on a caller bug
+ * (max_argv too small, or dataDir/mapName too long for one out_storage
+ * slot).
  */
-int bz_quest_data_build_argv(const char *dataDir, const char *mapName,
+int bz_quest_data_build_argv(const char *dataDir, bzQuestDataEdition_t edition, const char *mapName,
                               char out_storage[][BZ_QUEST_DATA_DIR_MAX], const char **out_argv,
                               int max_argv);
 

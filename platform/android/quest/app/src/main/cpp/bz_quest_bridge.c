@@ -21,9 +21,20 @@ bool bz_quest_bridge_start(bzQuestBridge_t *bridge, const char *internalDataPath
         return false;
     }
 
+    /* Detection failure (directory not yet present/creatable) is not itself
+     * a start failure here - edition simply stays at its safe ROC default
+     * and FS_AddDataDirectory() inside BZ_TabletopStart() below remains the
+     * authoritative existence/archive check, surfacing its own actionable
+     * "Failed to add data directory" error if the directory is genuinely
+     * unusable (see bz_quest_data_detect_edition()'s doc comment). */
+    bzQuestDataEdition_t edition = BZ_QUEST_DATA_EDITION_ROC;
+    bz_quest_data_detect_edition(bridge->dataDir, &edition);
+    fprintf(stderr, "bz_quest_bridge_start: resolved data dir '%s', edition=%s\n", bridge->dataDir,
+            edition == BZ_QUEST_DATA_EDITION_TFT ? "tft" : "roc");
+
     char storage[BZ_QUEST_DATA_ARGV_MAX][BZ_QUEST_DATA_DIR_MAX];
     const char *argv[BZ_QUEST_DATA_ARGV_MAX];
-    int argc = bz_quest_data_build_argv(bridge->dataDir, mapName, storage, argv, BZ_QUEST_DATA_ARGV_MAX);
+    int argc = bz_quest_data_build_argv(bridge->dataDir, edition, mapName, storage, argv, BZ_QUEST_DATA_ARGV_MAX);
     if (!argc) {
         snprintf(bridge->preLcError, sizeof(bridge->preLcError),
                  "bz_quest_data_build_argv failed for data dir '%s'", bridge->dataDir);

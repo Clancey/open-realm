@@ -3,6 +3,7 @@
  */
 #include "bz_quest_data.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -79,23 +80,61 @@ bool bz_quest_data_resolve(const char *internalDataPath, const char *externalDat
     return true;
 }
 
-int bz_quest_data_build_argv(const char *dataDir, const char *mapName,
+bool bz_quest_data_detect_edition(const char *dataDir, bzQuestDataEdition_t *out_edition) {
+    if (!dataDir || !dataDir[0] || !out_edition) return false;
+
+    DIR *dir = opendir(dataDir);
+    if (!dir) return false;
+
+    bzQuestDataEdition_t edition = BZ_QUEST_DATA_EDITION_ROC;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        const char *name = entry->d_name;
+        size_t len = strlen(name);
+        /* Mirrors common/common.c's FS_AddArchiveScanEntry() exactly: a
+         * ".mpq" file (case-insensitive extension) whose basename begins
+         * with the 5-char "War3x" expansion prefix (case-insensitive) is
+         * what makes the engine itself treat this data directory as
+         * TFT-capable - see bz_quest_data.h's doc comment on this function
+         * for the full citation. */
+        if (len >= 4 && !strcasecmp(name + len - 4, ".mpq") && len >= 5 && !strncasecmp(name, "war3x", 5)) {
+            edition = BZ_QUEST_DATA_EDITION_TFT;
+            break;
+        }
+    }
+    closedir(dir);
+
+    *out_edition = edition;
+    return true;
+}
+
+int bz_quest_data_build_argv(const char *dataDir, bzQuestDataEdition_t edition, const char *mapName,
                               char out_storage[][BZ_QUEST_DATA_DIR_MAX], const char **out_argv,
                               int max_argv) {
     bool haveMap = mapName && mapName[0];
-    int argc = haveMap ? 5 : 3;
+    bool haveTft = edition == BZ_QUEST_DATA_EDITION_TFT;
+    int argc = 3 + (haveTft ? 1 : 0) + (haveMap ? 2 : 0);
     if (max_argv < argc || !dataDir) return 0;
     if (strlen(dataDir) >= BZ_QUEST_DATA_DIR_MAX) return 0;
+    if (haveMap && strlen(mapName) >= BZ_QUEST_DATA_DIR_MAX) return 0;
 
     strcpy(out_storage[0], dataDir);
-    out_argv[0] = "openwarcraft3-quest";
-    out_argv[1] = "-data";
-    out_argv[2] = out_storage[0];
+    int i = 0;
+    out_argv[i++] = "openwarcraft3-quest";
+    out_argv[i++] = "-data";
+    out_argv[i++] = out_storage[0];
+    if (haveTft) {
+        /* A dash *flag* (no value slot), applied by
+         * Cvar_ApplyCommandLine() before BZ_RuntimeInit() ever calls
+         * FS_AddDataDirectory() - see this function's doc comment in
+         * bz_quest_data.h for the full ordering trace and why a late
+         * "+fs_expansion 1" would not work. */
+        out_argv[i++] = "-tft";
+    }
     if (haveMap) {
-        if (strlen(mapName) >= BZ_QUEST_DATA_DIR_MAX) return 0;
         strcpy(out_storage[1], mapName);
-        out_argv[3] = "+map";
-        out_argv[4] = out_storage[1];
+        out_argv[i++] = "+map";
+        out_argv[i++] = out_storage[1];
     }
     return argc;
 }

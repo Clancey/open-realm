@@ -55,18 +55,26 @@ typedef struct {
 } bzQuestBridge_t;
 
 /*
- * Resolves the data directory (bz_quest_data_resolve()), builds argv
- * (bz_quest_data_build_argv()), then BZ_TabletopCreate()+BZ_TabletopStart()
- * - which blocks the calling thread until BZ_RuntimeInit() completes (state
- * leaves STARTING), exactly mirroring bz_quest_ensure_renderer_init()'s
- * existing synchronous-on-APP_CMD_START convention (see bz_quest_host.c).
- * The dedicated engine thread bz_tabletop_lifecycle.c spawns is the ONLY
- * thread that ever calls BZ_RuntimeFrame(); this function's caller (the
- * Android main/UI thread) never touches engine frame functions directly.
+ * Resolves the data directory (bz_quest_data_resolve()), detects its
+ * Warcraft III edition from that same directory (bz_quest_data_detect_edition()
+ * - ROC vs. TFT-over-ROC, never separately configured), builds argv
+ * (bz_quest_data_build_argv(), which appends "-tft" when TFT was detected),
+ * then BZ_TabletopCreate()+BZ_TabletopStart() - which blocks the calling
+ * thread until BZ_RuntimeInit() completes (state leaves STARTING), exactly
+ * mirroring bz_quest_ensure_renderer_init()'s existing
+ * synchronous-on-APP_CMD_START convention (see bz_quest_host.c). The
+ * dedicated engine thread bz_tabletop_lifecycle.c spawns is the ONLY thread
+ * that ever calls BZ_RuntimeFrame(); this function's caller (the Android
+ * main/UI thread) never touches engine frame functions directly.
  *
  * internalDataPath/externalDataPath should be ANativeActivity's own fields
  * of the same name; mapName may be NULL/empty (no map auto-load - this
  * layer does not implement gameplay/asset rendering, see bz_quest_frame.h).
+ * Logs the resolved data directory and detected edition
+ * ("bz_quest_bridge_start: resolved data dir '...', edition=roc|tft") via
+ * fprintf(stderr, ...) before attempting BZ_TabletopCreate(), so a
+ * developer tailing logcat can confirm which edition was detected without
+ * needing to inspect the staged files by hand.
  *
  * Returns true iff the underlying lifecycle reached RUNNING. Returns false
  * on ANY failure (data-dir resolution failure, BZ_TabletopCreate() OOM, or

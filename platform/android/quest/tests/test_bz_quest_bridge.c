@@ -17,6 +17,7 @@
  * comment).
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -82,6 +83,43 @@ static bool stage_override(const char *internalDataPath, const char *value) {
     fputs(value, f);
     fclose(f);
     return true;
+}
+
+static bool make_temp_data_dir(char *out, size_t cap) {
+    if (snprintf(out, cap, "/tmp/bz_quest_bridge_data_XXXXXX") >= (int)cap) return false;
+    return mkdtemp(out) != NULL;
+}
+
+/* Packs a single-entry .mpq archive at archivePath containing one file
+ * named entryName holding entryContent, via the real build/bin/mpqtool
+ * (built by the same top-level `make` this test itself depends on - see
+ * platform/android/quest/build.mk's test-quest-bridge target) - the exact
+ * "mpqtool -mpq <archive> pack <src> <archive-file>" invocation
+ * games/warcraft-3/game.mk's own test-assets target uses to build
+ * tests.mpq. Real MPQ bytes are required here (not a bare renamed empty
+ * file) because FS_AddArchive() -> SFileOpenArchive() must actually
+ * succeed for the mounted-vs-skipped distinction below to mean anything. */
+static bool pack_marker_archive(const char *archivePath, const char *entryName, const char *entryContent) {
+    char cwd[512];
+    if (!getcwd(cwd, sizeof(cwd))) return false;
+
+    char srcPath[300];
+    if (snprintf(srcPath, sizeof(srcPath), "/tmp/bz_quest_bridge_marker_XXXXXX") >= (int)sizeof(srcPath)) return false;
+    int fd = mkstemp(srcPath);
+    if (fd < 0) return false;
+    ssize_t n = write(fd, entryContent, strlen(entryContent));
+    close(fd);
+    if (n < 0 || (size_t)n != strlen(entryContent)) {
+        remove(srcPath);
+        return false;
+    }
+
+    char cmd[1600];
+    int written = snprintf(cmd, sizeof(cmd), "'%s/%s/mpqtool' -mpq '%s' pack '%s' '%s' >/dev/null 2>&1", cwd,
+                            "build/bin", archivePath, srcPath, entryName);
+    bool ok = written > 0 && written < (int)sizeof(cmd) && system(cmd) == 0;
+    remove(srcPath);
+    return ok;
 }
 
 /* ------------------------------------------------------------------ */
@@ -265,6 +303,105 @@ static void test_destroy_resets_instance_for_a_fresh_start(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* TFT edition auto-detection reaching real runtime init                */
+/* ------------------------------------------------------------------ */
+
+static void test_roc_only_data_leaves_expansion_disabled(void) {
+    /* A data directory with only a base archive (no War3x*) must:
+     *  - auto-detect as ROC (bz_quest_bridge_start()'s bz_quest_data_detect_edition() call)
+     *  - reach RUNNING via the real BZ_RuntimeInit()/FS_AddDataDirectory()
+     *  - leave the real fs_expansion cvar at 0
+     *  - mount the base archive's own content (sanity: FS_FileExists finds it)
+     * fs_expansion is force-reset to its true fresh-process default (0)
+     * before start: it is a real process-global cvar in this test binary,
+     * so this removes any dependency on which test happened to run before
+     * this one - a real Android launch only ever calls Com_Init() once. */
+    reset_counters();
+    Cvar_Set("fs_expansion", "0");
+    char internalDir[256], dataDir[256];
+    ASSERT(make_temp_internal_dir(internalDir, sizeof(internalDir)));
+    ASSERT(make_temp_data_dir(dataDir, sizeof(dataDir)));
+    ASSERT(stage_override(internalDir, dataDir));
+
+    char war3Path[400];
+    snprintf(war3Path, sizeof(war3Path), "%s/War3.mpq", dataDir);
+    ASSERT(pack_marker_archive(war3Path, "ROC_MARKER.txt", "roc-marker\n"));
+
+    bzQuestBridge_t bridge;
+    memset(&bridge, 0, sizeof(bridge));
+    ASSERT(bz_quest_bridge_start(&bridge, internalDir, NULL, NULL));
+    ASSERT_EQ_INT(bz_quest_bridge_state(&bridge), BZ_QUEST_BRIDGE_RUNNING);
+    ASSERT_EQ_INT(Cvar_Integer("fs_expansion", -1), 0);
+    ASSERT(FS_FileExists("ROC_MARKER.txt"));
+    ASSERT(!FS_FileExists("TFT_MARKER.txt"));
+
+    bz_quest_bridge_destroy(&bridge);
+}
+
+static void test_tft_over_roc_data_enables_and_mounts_expansion(void) {
+    /* A data directory with a base archive AND a War3x*-prefixed archive
+     * must: auto-detect as TFT, reach RUNNING, and the War3x archive's own
+     * content must be visible via FS_FileExists() - proving "-tft" reached
+     * Cvar_ApplyCommandLine() (see bz_quest_data.h's ordering doc comment)
+     * in time for FS_AddDataDirectory()'s archive scan/mount pass, not
+     * merely that the cvar got set after the fact. This is the exact
+     * behavior gap the review flagged: previously the engine skipped every
+     * War3x* archive because -tft was never in argv at all. fs_expansion
+     * is force-reset to 0 first for the same test-order-independence
+     * reason as the ROC test above. */
+    reset_counters();
+    Cvar_Set("fs_expansion", "0");
+    char internalDir[256], dataDir[256];
+    ASSERT(make_temp_internal_dir(internalDir, sizeof(internalDir)));
+    ASSERT(make_temp_data_dir(dataDir, sizeof(dataDir)));
+    ASSERT(stage_override(internalDir, dataDir));
+
+    char war3Path[400], war3xPath[400];
+    snprintf(war3Path, sizeof(war3Path), "%s/War3.mpq", dataDir);
+    snprintf(war3xPath, sizeof(war3xPath), "%s/War3x.mpq", dataDir);
+    ASSERT(pack_marker_archive(war3Path, "ROC_MARKER.txt", "roc-marker\n"));
+    ASSERT(pack_marker_archive(war3xPath, "TFT_MARKER.txt", "tft-marker\n"));
+
+    bzQuestBridge_t bridge;
+    memset(&bridge, 0, sizeof(bridge));
+    ASSERT(bz_quest_bridge_start(&bridge, internalDir, NULL, NULL));
+    ASSERT_EQ_INT(bz_quest_bridge_state(&bridge), BZ_QUEST_BRIDGE_RUNNING);
+    ASSERT_EQ_INT(Cvar_Integer("fs_expansion", -1), 1);
+    ASSERT(FS_FileExists("ROC_MARKER.txt"));
+    ASSERT(FS_FileExists("TFT_MARKER.txt")); /* proves the War3x.mpq archive was actually mounted, not skipped */
+
+    bz_quest_bridge_destroy(&bridge);
+}
+
+static void test_case_insensitive_war3x_name_still_mounts_via_bridge(void) {
+    /* A differently-cased "war3X.mpq" (as a Windows-sourced install might
+     * produce) must be detected identically to "War3x.mpq" end-to-end
+     * through the real bridge, mirroring FS_AddArchiveScanEntry()'s own
+     * case-insensitive strncasecmp() check. */
+    reset_counters();
+    Cvar_Set("fs_expansion", "0");
+    char internalDir[256], dataDir[256];
+    ASSERT(make_temp_internal_dir(internalDir, sizeof(internalDir)));
+    ASSERT(make_temp_data_dir(dataDir, sizeof(dataDir)));
+    ASSERT(stage_override(internalDir, dataDir));
+
+    char war3Path[400], war3xPath[400];
+    snprintf(war3Path, sizeof(war3Path), "%s/war3.MPQ", dataDir);
+    snprintf(war3xPath, sizeof(war3xPath), "%s/WAR3X.mpq", dataDir);
+    ASSERT(pack_marker_archive(war3Path, "ROC_MARKER.txt", "roc-marker\n"));
+    ASSERT(pack_marker_archive(war3xPath, "TFT_MARKER.txt", "tft-marker\n"));
+
+    bzQuestBridge_t bridge;
+    memset(&bridge, 0, sizeof(bridge));
+    ASSERT(bz_quest_bridge_start(&bridge, internalDir, NULL, NULL));
+    ASSERT_EQ_INT(bz_quest_bridge_state(&bridge), BZ_QUEST_BRIDGE_RUNNING);
+    ASSERT_EQ_INT(Cvar_Integer("fs_expansion", -1), 1);
+    ASSERT(FS_FileExists("TFT_MARKER.txt"));
+
+    bz_quest_bridge_destroy(&bridge);
+}
+
+/* ------------------------------------------------------------------ */
 /* bz_quest_bridge_is_terminal                                         */
 /* ------------------------------------------------------------------ */
 
@@ -314,6 +451,9 @@ void run_bz_quest_bridge_tests(void) {
     RUN_TEST(test_suspend_resume_stop_are_safe_before_start);
     RUN_TEST(test_stop_is_idempotent);
     RUN_TEST(test_destroy_resets_instance_for_a_fresh_start);
+    RUN_TEST(test_roc_only_data_leaves_expansion_disabled);
+    RUN_TEST(test_tft_over_roc_data_enables_and_mounts_expansion);
+    RUN_TEST(test_case_insensitive_war3x_name_still_mounts_via_bridge);
     RUN_TEST(test_is_terminal_matches_failed_and_stopped_only);
     RUN_TEST(test_is_terminal_true_for_failed_state);
 }
