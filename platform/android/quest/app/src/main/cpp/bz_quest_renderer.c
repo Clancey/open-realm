@@ -19,6 +19,21 @@ static const int64_t BZ_QUEST_PREFERRED_COLOR_FORMATS[] = {
     VK_FORMAT_B8G8R8A8_SRGB,
 };
 
+/* Cross-checks bz_quest_pure.h's mirrored XR_COMPOSITION_LAYER_*_BIT literal
+ * values (needed there because that file must stay host-buildable without
+ * openxr.h - see its comment) against the real constants this file *can*
+ * see, at file scope so it runs once per build rather than once per frame.
+ * A future OpenXR header update that ever renumbered these bits would fail
+ * the build here instead of silently miscompositing passthrough. */
+_Static_assert(BZ_QUEST_XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT_VALUE ==
+                   XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
+               "bz_quest_pure.h's mirrored XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT "
+               "value has drifted from openxr.h");
+_Static_assert(BZ_QUEST_XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT_VALUE ==
+                   XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT,
+               "bz_quest_pure.h's mirrored XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT "
+               "value has drifted from openxr.h");
+
 bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer) {
     memset(renderer, 0, sizeof(*renderer));
     bzQuestXr_t *xr = &renderer->xr;
@@ -162,6 +177,12 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
         }
         projectionLayer.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
         projectionLayer.space = xr->appSpace;
+        /* Straight (non-premultiplied) alpha: see bz_quest_pure.h's
+         * bz_quest_projection_layer_flags() comment and
+         * tabletop_frag.frag - without BLEND_TEXTURE_SOURCE_ALPHA_BIT the
+         * compositor ignores alpha entirely and this layer fully occludes
+         * XR_FB_passthrough beneath it. */
+        projectionLayer.layerFlags = bz_quest_projection_layer_flags(/*unpremultipliedAlpha=*/true);
         projectionLayer.viewCount = BZ_QUEST_VIEW_COUNT;
         projectionLayer.views = projectionViews;
         layers[layerCount++] = (const XrCompositionLayerBaseHeader *)&projectionLayer;

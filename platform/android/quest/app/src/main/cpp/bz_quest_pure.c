@@ -130,3 +130,22 @@ uint32_t bz_quest_xr_version_to_vk_api_version(uint64_t xrEncodedVersion) {
     /* VK_MAKE_API_VERSION(variant, major, minor, patch), variant=patch=0. */
     return ((uint32_t)major << 22) | ((uint32_t)minor << 12);
 }
+
+/* Literal values must match XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT
+ * (0x00000002) / XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT
+ * (0x00000004) from the OpenXR 1.1.49 openxr.h - see bz_quest_pure.h's
+ * comment on bz_quest_projection_layer_flags() for why this file cannot
+ * #include openxr.h directly (it must stay host-buildable). Callers in
+ * bz_quest_renderer.c cross-check these macros against the real
+ * XR_COMPOSITION_LAYER_*_BIT constants with a _Static_assert - see that
+ * file - so any future spec/header drift fails the build instead of
+ * silently diverging. */
+uint64_t bz_quest_projection_layer_flags(bool unpremultipliedAlpha) {
+    uint64_t flags = BZ_QUEST_XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT_VALUE;
+    if (unpremultipliedAlpha) flags |= BZ_QUEST_XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT_VALUE;
+    return flags;
+}
+
+int bz_quest_looper_timeout_millis(bool wantsXrEventPolling, bool xrSessionRunning) {
+    return (wantsXrEventPolling || xrSessionRunning) ? 0 : -1;
+}

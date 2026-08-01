@@ -116,6 +116,82 @@ uint32_t bz_quest_xr_version_to_vk_api_version(uint64_t xrEncodedVersion);
  */
 bool bz_quest_passthrough_capable(uint64_t capabilityFlags, uint64_t requiredBits);
 
+/*
+ * Returns the XrCompositionLayerFlags bits an XrCompositionLayerProjection
+ * must set so its per-fragment alpha is honored by the compositor instead
+ * of being ignored (in which case the layer would be treated as fully
+ * opaque and would completely occlude XR_FB_passthrough beneath it,
+ * regardless of what alpha the fragment shader wrote).
+ *
+ * Per the OpenXR 1.1 spec's "Composition Layers" chapter (XrCompositionLayerBaseHeader
+ * flags description, registry.khronos.org/OpenXR/specs/1.1/html/xrspec.html
+ * #XrCompositionLayerFlags, verified against the extracted
+ * org.khronos.openxr:openxr_loader_for_android 1.1.49 openxr.h - see
+ * docs/quest-tabletop.md):
+ *
+ *   - XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT must be set, or
+ *     the runtime ignores the layer's alpha channel entirely and treats
+ *     every texel as fully opaque (alpha=1) no matter what the shader
+ *     wrote - this is the bit that makes alpha matter at all.
+ *   - XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT must additionally be
+ *     set whenever the source color data is *not* premultiplied by its own
+ *     alpha (i.e. "straight" alpha, where a half-transparent red texel is
+ *     still written as full-intensity red with alpha=0.5, not half-
+ *     intensity red) - tabletop_frag.frag writes exactly this straight-
+ *     alpha form (`vec4(fragColor, 1.0)`, color never scaled by alpha), so
+ *     the caller must pass unpremultipliedAlpha=true here. Omitting this
+ *     bit for straight-alpha source data causes the runtime to composite
+ *     as though the color were already premultiplied, double-darkening any
+ *     partially-transparent texel (opaque texels at alpha=1.0 are
+ *     unaffected either way, which is why this bug was invisible for the
+ *     table/cubes themselves but fully hid passthrough at the alpha=0
+ *     cleared background).
+ */
+uint64_t bz_quest_projection_layer_flags(bool unpremultipliedAlpha);
+
+/* Exposed (not just used internally by bz_quest_pure.c) so callers building
+ * XrCompositionLayerFlags directly - see bz_quest_renderer.c - can
+ * _Static_assert these mirrored literals still match the real
+ * XR_COMPOSITION_LAYER_*_BIT constants from openxr.h at compile time,
+ * catching any future spec/header drift instead of silently diverging. */
+#define BZ_QUEST_XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT_VALUE 0x00000002ULL
+#define BZ_QUEST_XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT_VALUE 0x00000004ULL
+
+/*
+ * Picks the ALooper_pollOnce() timeout (milliseconds; -1 means "block
+ * indefinitely") bz_quest_host.c's android_main loop should use this
+ * iteration.
+ *
+ * Returns 0 (poll without blocking, spending CPU to keep the loop spinning)
+ * if EITHER `wantsXrEventPolling` or `xrSessionRunning` is true; returns -1
+ * (block until the next real Android input/lifecycle event, costing
+ * nothing) only when both are false.
+ *
+ * `xrSessionRunning` alone is not sufficient: xrPollEvent (called from
+ * bz_quest_renderer_frame -> bz_quest_xr_poll_events) is the *only* way to
+ * observe XR_SESSION_STATE_READY and drive xrBeginSession - and that call
+ * only happens after ALooper_pollOnce returns. If the loop only polled
+ * without blocking while a session was already running, an app resumed
+ * from the background (androidResumed=true, xrSessionRunning still false
+ * because xrBeginSession hasn't run yet) would have ALooper_pollOnce block
+ * indefinitely (-1) waiting for an Android event that may never arrive
+ * (e.g. no touch/key input), starving xrPollEvent forever and never
+ * observing the READY event that would start the session - a permanent
+ * hang after every resume with no user input. Polling non-blocking
+ * whenever the app is resumed closes that race, matching the lifecycle
+ * pattern OpenXR-SDK-Source's hello_xr sample uses (poll non-blocking
+ * whenever the app is not fully backgrounded, not only once a session is
+ * confirmed running).
+ *
+ * `wantsXrEventPolling` must be `androidResumed && rendererInitSucceeded`
+ * at the call site, not `androidResumed` alone - if renderer init failed
+ * (see bz_quest_host.c's bz_quest_ensure_renderer_init()), there is no XR
+ * instance/session to poll events for, so spinning at a 0ms timeout while
+ * merely resumed would be a pure busy-loop with nothing to do, violating
+ * the "no busy loop" requirement for that failure case.
+ */
+int bz_quest_looper_timeout_millis(bool wantsXrEventPolling, bool xrSessionRunning);
+
 #ifdef __cplusplus
 }
 #endif

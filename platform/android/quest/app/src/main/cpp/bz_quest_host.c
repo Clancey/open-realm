@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "bz_quest_log.h"
+#include "bz_quest_pure.h"
 #include "platform/tabletop/bridge/bz_tabletop_lifecycle.h"
 
 /* ---------------------------------------------------------------------- */
@@ -92,6 +93,13 @@ typedef struct bzQuestAppState_s {
     bzQuestRenderer_t renderer;
     bool rendererReady;
     bool initAttempted;
+    /* Set true on APP_CMD_RESUME, false on APP_CMD_PAUSE (and starts false -
+     * android_native_app_glue delivers START before RESUME, so init always
+     * runs before this can ever be true). Needed because
+     * xrSessionRunning alone is not enough to decide the looper poll
+     * timeout - see bz_quest_looper_timeout_millis()'s comment in
+     * bz_quest_pure.h for the exact hang this closes. */
+    bool androidResumed;
 } bzQuestAppState_t;
 
 /*
@@ -153,12 +161,14 @@ static void bz_quest_handle_cmd(struct android_app *app, int32_t cmd) {
             break;
         case APP_CMD_RESUME:
             BZ_QUEST_LOGI("APP_CMD_RESUME");
+            state->androidResumed = true;
             if (state->rendererReady && !state->renderer.passthrough.started) {
                 bz_quest_passthrough_start(&state->renderer.xr, &state->renderer.passthrough);
             }
             break;
         case APP_CMD_PAUSE:
             BZ_QUEST_LOGI("APP_CMD_PAUSE");
+            state->androidResumed = false;
             if (state->rendererReady) {
                 bz_quest_passthrough_pause(&state->renderer.xr, &state->renderer.passthrough);
             }
@@ -189,20 +199,29 @@ void android_main(struct android_app *app) {
      * one source per call instead of silently coalescing several - see
      * android/looper.h). Loop calling it once per iteration instead.
      *
-     * Timeout choice: block indefinitely (-1) whenever there is no active
-     * OpenXR session to drive frames for (renderer not ready yet, or the
-     * session isn't in a running state - e.g. the app is backgrounded and
-     * XR_SESSION_STATE is SYNCHRONIZED/IDLE) so this thread costs nothing
-     * while idle; poll without blocking (0) whenever frames must keep
-     * flowing, matching the OpenXR spec's requirement that a running
-     * session's xrWaitFrame/xrBeginFrame/xrEndFrame keep being called in
-     * lockstep. This is the "no busy loop" requirement from
-     * docs/quest-tabletop.md: the loop never spins fetching Android events
-     * back-to-back with a zero timeout unless real per-frame OpenXR work
-     * follows immediately after. */
+     * Timeout choice: bz_quest_looper_timeout_millis() (see its comment in
+     * bz_quest_pure.h) blocks indefinitely (-1) only while the app is both
+     * fully backgrounded (or the renderer never initialized) AND has no
+     * OpenXR session running, so this thread costs nothing while truly
+     * idle; it polls without blocking (0) whenever EITHER is true. Gating
+     * solely on "session running" (as an earlier draft of this loop did)
+     * is wrong: xrPollEvent is only reachable from inside
+     * bz_quest_renderer_frame, itself only called after ALooper_pollOnce
+     * returns - so an app resumed from the background but not yet RUNNING
+     * (xrBeginSession hasn't fired yet, because the READY event hasn't
+     * been polled yet) would otherwise block forever waiting for an
+     * Android input event that may never come, permanently starving
+     * xrPollEvent and never starting the session. `wantsXrEventPolling`
+     * requires both `androidResumed` and `rendererReady` - if renderer
+     * init failed there is no XR instance/session to poll events for, so
+     * merely being resumed must not spin the loop. This is still the
+     * "no busy loop" requirement from docs/quest-tabletop.md: the loop
+     * never spins with a zero timeout while fully backgrounded or while
+     * there is genuinely nothing to poll. */
     while (!app->destroyRequested) {
         bool rendering = state.rendererReady && bz_quest_xr_is_session_running(&state.renderer.xr);
-        int timeoutMillis = rendering ? 0 : -1;
+        bool wantsXrEventPolling = state.androidResumed && state.rendererReady;
+        int timeoutMillis = bz_quest_looper_timeout_millis(wantsXrEventPolling, rendering);
 
         int events;
         struct android_poll_source *source;

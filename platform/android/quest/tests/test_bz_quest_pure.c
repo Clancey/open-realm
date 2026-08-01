@@ -208,6 +208,53 @@ static void test_passthrough_not_capable(void) {
     ASSERT(!bz_quest_passthrough_capable(0, 0x1));
 }
 
+/* Regression test for the "projection layer fully occludes passthrough"
+ * bug: without XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT set, the
+ * compositor ignores the layer's alpha channel entirely and treats it as
+ * fully opaque. This bit must always be present, unconditionally. */
+static void test_projection_layer_flags_always_includes_blend_source_alpha(void) {
+    const uint64_t kBlendTextureSourceAlphaBit = 0x00000002ULL;
+    ASSERT((bz_quest_projection_layer_flags(false) & kBlendTextureSourceAlphaBit) != 0);
+    ASSERT((bz_quest_projection_layer_flags(true) & kBlendTextureSourceAlphaBit) != 0);
+}
+
+/* tabletop_frag.frag writes straight (non-premultiplied) alpha - see that
+ * file's and bz_quest_pure.h's comments - so the renderer must request
+ * unpremultipliedAlpha=true, which must set
+ * XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT. Also checks the false
+ * case is NOT set, so a future accidental "always OR it in" regression
+ * would fail this test too. */
+static void test_projection_layer_flags_unpremultiplied_bit_matches_argument(void) {
+    const uint64_t kUnpremultipliedAlphaBit = 0x00000004ULL;
+    ASSERT((bz_quest_projection_layer_flags(true) & kUnpremultipliedAlphaBit) != 0);
+    ASSERT((bz_quest_projection_layer_flags(false) & kUnpremultipliedAlphaBit) == 0);
+}
+
+/* Regression test for the "resumed app hangs forever before session
+ * reaches RUNNING" race: xrPollEvent only runs after ALooper_pollOnce
+ * returns, so the loop must poll non-blocking whenever the app is resumed
+ * (and the renderer initialized successfully), not only once a session is
+ * already confirmed running - see bz_quest_pure.h's comment on
+ * bz_quest_looper_timeout_millis(). */
+static void test_looper_timeout_polls_when_wants_polling_but_not_yet_running(void) {
+    ASSERT_EQ_INT(bz_quest_looper_timeout_millis(/*wantsXrEventPolling=*/true, /*xrSessionRunning=*/false), 0);
+}
+
+static void test_looper_timeout_polls_when_running_but_not_wants_polling_flag(void) {
+    /* Defensive: a running session must keep polling even if some caller
+     * ever forgot to flip the wantsXrEventPolling flag back - session-
+     * running frames must never stall regardless of that bookkeeping. */
+    ASSERT_EQ_INT(bz_quest_looper_timeout_millis(/*wantsXrEventPolling=*/false, /*xrSessionRunning=*/true), 0);
+}
+
+static void test_looper_timeout_polls_when_both_true(void) {
+    ASSERT_EQ_INT(bz_quest_looper_timeout_millis(/*wantsXrEventPolling=*/true, /*xrSessionRunning=*/true), 0);
+}
+
+static void test_looper_timeout_blocks_when_fully_backgrounded(void) {
+    ASSERT_EQ_INT(bz_quest_looper_timeout_millis(/*wantsXrEventPolling=*/false, /*xrSessionRunning=*/false), -1);
+}
+
 void run_bz_quest_pure_tests(void) {
     RUN_TEST(test_fov_projection_normal);
     RUN_TEST(test_fov_projection_asymmetric);
@@ -227,4 +274,10 @@ void run_bz_quest_pure_tests(void) {
     RUN_TEST(test_passthrough_not_capable);
     RUN_TEST(test_xr_version_to_vk_api_version_normal);
     RUN_TEST(test_xr_version_to_vk_api_version_ignores_patch);
+    RUN_TEST(test_projection_layer_flags_always_includes_blend_source_alpha);
+    RUN_TEST(test_projection_layer_flags_unpremultiplied_bit_matches_argument);
+    RUN_TEST(test_looper_timeout_polls_when_wants_polling_but_not_yet_running);
+    RUN_TEST(test_looper_timeout_polls_when_running_but_not_wants_polling_flag);
+    RUN_TEST(test_looper_timeout_polls_when_both_true);
+    RUN_TEST(test_looper_timeout_blocks_when_fully_backgrounded);
 }
