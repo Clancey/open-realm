@@ -64,6 +64,7 @@
 
 #include <stdint.h>
 
+#include "bz_quest_wc3_fog.h"
 #include "bz_quest_wc3_render.h"
 
 #ifdef __cplusplus
@@ -94,6 +95,15 @@ typedef void (*bzQuestWc3ModelReadyFn)(const bzQuestWc3Model_t *model, void *use
 typedef void (*bzQuestWc3TextureReadyFn)(const char *identity, uint32_t width, uint32_t height,
                                          uint32_t rowBytes, const uint8_t *pixels,
                                          uint32_t dataBytes, void *userdata);
+
+typedef struct {
+    bool available;
+    uint32_t width, height;
+    uint32_t targetMode; /* raw bzTTActionTarget_t value; mode only, no transported point/entity payload exists */
+    bzQuestWc3FogBounds_t bounds;
+    uint8_t visible[BZ_QUEST_WC3_FOG_MAX_CELLS];
+    uint8_t explored[BZ_QUEST_WC3_FOG_MAX_CELLS];
+} bzQuestWc3FogCapture_t;
 
 typedef struct {
     bzQuestWc3ModelReadyFn onModelReady;
@@ -150,6 +160,28 @@ void bz_quest_wc3_capture_frame(const bzQuestWc3CaptureCallbacks_t *callbacks,
  * absolute epoch is irrelevant - only the msec delta across frames matters,
  * exactly as desktop's own free-running tick counter never resets mid-game.
  */
+
+/*
+ * Independent fog-snapshot retain/copy/release helper for layer 5D. Mirrors
+ * bz_quest_wc3_capture_frame()'s "each call site retains its own immutable
+ * snapshot" discipline exactly: this function does its own BZ_TT_Latest()/
+ * Release() pair rather than sharing a retained handle with the model/terrain
+ * capture paths, because a one-generation skew across those unrelated call
+ * sites is immaterial while shared lifetime bookkeeping would add complexity.
+ *
+ * On success, copies one full fog generation (dimensions, map bounds, visible
+ * plane, explored plane, and the player's current target MODE flag) into `out`
+ * and returns true. Returns false - after fully clearing `out` and releasing
+ * the snapshot on every branch - when no fog buffer is currently published, no
+ * map bounds accompany the fog, the ABI version mismatches, or the fog grid
+ * exceeds bz_quest_wc3_fog.h's real Warcraft III "Huge" map cap.
+ *
+ * `targetMode` is copied for completeness/documentation only: the transport ABI
+ * exposes no matching target point or target entity id for POINT/ENTITY mode,
+ * so layer 5D does NOT render a target marker from it.
+ */
+bool bz_quest_wc3_capture_fog(bzQuestWc3FogCapture_t *out);
+
 uint32_t bz_quest_wc3_render_clock_msec(void);
 
 #ifdef __cplusplus

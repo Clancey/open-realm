@@ -78,6 +78,7 @@ bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer
 
     if (!bz_quest_vk_wc3_create(vk, &renderer->wc3)) goto fail;
     if (!bz_quest_vk_wc3_terrain_create(vk, &renderer->wc3Terrain)) goto fail;
+    if (!bz_quest_vk_wc3_fog_create(vk, &renderer->wc3Fog)) goto fail;
 
     BZ_QUEST_LOGI("renderer init complete");
     return true;
@@ -167,11 +168,19 @@ static bool bz_quest_renderer_render_warcraft_target(
     VkRect2D scissor = {{0, 0}, {width, height}};
     vkCmdSetScissor(target->commandBuffer, 0, 1, &scissor);
 
+    /* Fog overlay is intentionally recorded BETWEEN opaque and blended draws:
+     * it darkens already-rendered opaque terrain/models without needing a
+     * second scene-color target, while later blended terrain/model passes keep
+     * their existing subsystem-local sort/alpha behavior. Selection markers run
+     * last so they stay readable atop fogged content but still depth-test
+     * against the opaque geometry already in the depth buffer. */
     bz_quest_vk_wc3_terrain_record_opaque(&renderer->wc3Terrain, target->commandBuffer, viewProj, cameraWorldPos,
                                           terrainList);
     bz_quest_vk_wc3_record_opaque(&renderer->wc3, target->commandBuffer, viewProj, cameraWorldPos, wc3List);
+    bz_quest_vk_wc3_fog_record_overlay(&renderer->wc3Fog, target->commandBuffer, viewProj);
     bz_quest_vk_wc3_terrain_record_blended(&renderer->wc3Terrain, target->commandBuffer, viewProj, terrainList);
     bz_quest_vk_wc3_record_blended(&renderer->wc3, target->commandBuffer, viewProj, wc3List);
+    bz_quest_vk_wc3_fog_record_selection(&renderer->wc3Fog, target->commandBuffer, viewProj, wc3List);
 
     vkCmdEndRenderPass(target->commandBuffer);
     if (vkEndCommandBuffer(target->commandBuffer) != VK_SUCCESS) {
@@ -231,6 +240,7 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
     if (haveViews) {
         bz_quest_vk_wc3_capture_and_upload(&renderer->wc3, &wc3RenderList);
         bz_quest_vk_wc3_terrain_capture_and_upload(&renderer->wc3Terrain, &terrainRenderList);
+        bz_quest_vk_wc3_fog_capture_and_upload(&renderer->wc3Fog);
     }
 
     if (haveViews) {
@@ -250,7 +260,8 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
             bool rendered = false;
             if (!bz_quest_renderer_build_mvp(&views[i], mvp)) {
                 haveViews = false;
-            } else if (wc3RenderList.count > 0 || terrainRenderList.count > 0) {
+            } else if (wc3RenderList.count > 0 || terrainRenderList.count > 0 ||
+                       bz_quest_vk_wc3_fog_has_overlay(&renderer->wc3Fog)) {
                 /* Warcraft III terrain and/or models exist this frame: record
                  * both into one shared eye render pass, interleaving terrain
                  * opaque -> model opaque -> terrain blended -> model blended.
@@ -317,6 +328,7 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
 }
 
 void bz_quest_renderer_shutdown(bzQuestRenderer_t *renderer) {
+    bz_quest_vk_wc3_fog_destroy(&renderer->wc3Fog);
     bz_quest_vk_wc3_terrain_destroy(&renderer->wc3Terrain);
     bz_quest_vk_wc3_destroy(&renderer->wc3);
     bz_quest_passthrough_destroy(&renderer->xr, &renderer->passthrough);

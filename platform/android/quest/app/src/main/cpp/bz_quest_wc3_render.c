@@ -102,7 +102,13 @@ void bz_quest_wc3_build_render_list(const bzQuestWc3EntityInput_t *entities, uin
         bzQuestWc3RenderItem_t *item = &outList->items[outList->count++];
         memcpy(item->modelIdentity, entity->modelIdentity, sizeof(item->modelIdentity));
         bz_quest_wc3_build_world_matrix(entity, item->world);
+        item->radius = entity->radius;
+        item->tintR = entity->tintR;
+        item->tintG = entity->tintG;
+        item->tintB = entity->tintB;
+        item->tintA = entity->tintA;
         item->frame = entity->frame;
+        item->selected = entity->selected;
         memcpy(item->teamColorTextureIdentity, entity->teamColorTextureIdentity,
               sizeof(item->teamColorTextureIdentity));
         memcpy(item->teamGlowTextureIdentity, entity->teamGlowTextureIdentity,

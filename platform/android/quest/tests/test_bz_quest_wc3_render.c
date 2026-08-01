@@ -227,6 +227,9 @@ static void make_entity(bzQuestWc3EntityInput_t *e, const char *identity) {
     memset(e, 0, sizeof(*e));
     e->category = 2;
     e->footprintX = e->footprintY = 1.0f;
+    e->radius = 50.0f;
+    e->tintR = 1.0f;
+    e->tintA = 1.0f;
     if (identity) strncpy(e->modelIdentity, identity, sizeof(e->modelIdentity) - 1);
 }
 
@@ -281,6 +284,28 @@ static void test_render_list_rewrites_stale_state(void) {
 
     ASSERT_EQ_INT(list.count, 1);
     ASSERT_EQ_INT(list.overflowCount, 0);
+}
+
+static void test_render_list_carries_selection_radius_and_tint(void) {
+    bzQuestWc3EntityInput_t entities[1];
+    make_entity(&entities[0], "units/human/footman/footman.mdx");
+    entities[0].selected = true;
+    entities[0].radius = 72.0f;
+    entities[0].tintR = 0.25f;
+    entities[0].tintG = 0.5f;
+    entities[0].tintB = 0.75f;
+    entities[0].tintA = 0.9f;
+
+    bzQuestWc3RenderList_t list;
+    bz_quest_wc3_build_render_list(entities, 1, &list);
+
+    ASSERT_EQ_INT(list.count, 1);
+    ASSERT(list.items[0].selected);
+    ASSERT_EQ_FLOAT(list.items[0].radius, 72.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(list.items[0].tintR, 0.25f, 0.0001f);
+    ASSERT_EQ_FLOAT(list.items[0].tintG, 0.5f, 0.0001f);
+    ASSERT_EQ_FLOAT(list.items[0].tintB, 0.75f, 0.0001f);
+    ASSERT_EQ_FLOAT(list.items[0].tintA, 0.9f, 0.0001f);
 }
 
 /* ------------------------------------------------------------------ */
@@ -488,6 +513,7 @@ void run_bz_quest_wc3_render_tests(void) {
     RUN_TEST(test_render_list_one_item_per_entity_even_for_shared_models);
     RUN_TEST(test_render_list_reports_overflow_without_dropping_count);
     RUN_TEST(test_render_list_rewrites_stale_state);
+    RUN_TEST(test_render_list_carries_selection_radius_and_tint);
     RUN_TEST(test_identity_equal_matches_identical_strings);
     RUN_TEST(test_identity_equal_rejects_different_strings);
     RUN_TEST(test_model_anim_free_null_is_a_no_op);

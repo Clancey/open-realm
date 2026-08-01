@@ -357,8 +357,11 @@ typedef struct {
     float originX, originY, originZ; /* engine space: X, Y (north), Z (up) */
     float angle;                     /* engine-space yaw, radians */
     float footprintX, footprintY;    /* bzTTAssetMetadata_t.footprint_x/y */
+    float radius;                    /* bzTTEntity_t.radius - authoritative selection/UI circle radius */
+    float tintR, tintG, tintB, tintA; /* bzTTAssetMetadata_t.tint_* - authoritative team-color RGBA */
     uint32_t category;               /* bzTTAssetCategory_t */
     uint32_t frame;                  /* bzTTEntity_t.frame (msec) - authoritative animation time, see bz_quest_wc3_anim.h */
+    bool selected;                   /* bzTTEntity_t.selected - authoritative selection flag for marker overlays */
     /* This entity's own resolved team-color/glow textures (empty iff
      * registration failed or the provider has no team texture for this
      * team_color) - resolved PER ENTITY, not per model, because the same
@@ -379,15 +382,19 @@ typedef struct {
  * a fully-built column-major world matrix (engine space -> target Y-up
  * right-handed space), matching bz_quest_pure.h's bz_quest_mat4_multiply()
  * layout so bz_quest_vk_wc3.c can multiply it against the eye's
- * view*projection matrix with the same helper. `frame`/team-texture
- * identities are carried through unconverted from bzQuestWc3EntityInput_t
- * for bz_quest_vk_wc3.c's per-frame pose/bone-palette build and team-texture
- * binding - this file never touches animation/material state itself, only
- * passes the entity's own already-resolved values through untouched. */
+ * view*projection matrix with the same helper. `frame`, `selected`,
+ * `radius`, `tint*`, and team-texture identities are carried through
+ * unconverted from bzQuestWc3EntityInput_t for bz_quest_vk_wc3.c's per-frame
+ * pose/bone-palette build, fog/selection overlay, and team-texture binding -
+ * this file never touches animation/material state itself, only passes the
+ * entity's own already-resolved values through untouched. */
 typedef struct {
     char modelIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
     float world[16];
+    float radius;
+    float tintR, tintG, tintB, tintA;
     uint32_t frame;
+    bool selected;
     char teamColorTextureIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
     char teamGlowTextureIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
 } bzQuestWc3RenderItem_t;

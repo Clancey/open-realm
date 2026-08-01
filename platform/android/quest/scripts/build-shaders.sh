@@ -69,6 +69,10 @@ compile_one tabletop_vert vertex vert
 compile_one tabletop_frag fragment frag
 compile_one warcraft_vert vertex vert
 compile_one warcraft_frag fragment frag
+compile_one warcraft_fog_vert vertex vert
+compile_one warcraft_fog_frag fragment frag
+compile_one warcraft_marker_vert vertex vert
+compile_one warcraft_marker_frag fragment frag
 compile_one terrain_vert vertex vert
 compile_one terrain_frag fragment frag
 
@@ -82,6 +86,10 @@ GEN_HEADER="$OUT_DIR/bz_quest_shaders_generated.h"
     cat "$OUT_DIR/tabletop_frag.spv.h"
     cat "$OUT_DIR/warcraft_vert.spv.h"
     cat "$OUT_DIR/warcraft_frag.spv.h"
+    cat "$OUT_DIR/warcraft_fog_vert.spv.h"
+    cat "$OUT_DIR/warcraft_fog_frag.spv.h"
+    cat "$OUT_DIR/warcraft_marker_vert.spv.h"
+    cat "$OUT_DIR/warcraft_marker_frag.spv.h"
     cat "$OUT_DIR/terrain_vert.spv.h"
     cat "$OUT_DIR/terrain_frag.spv.h"
     echo "#endif /* BZ_QUEST_SHADERS_GENERATED_H */"

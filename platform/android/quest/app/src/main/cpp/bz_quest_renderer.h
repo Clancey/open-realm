@@ -15,6 +15,7 @@
 #include "bz_quest_passthrough.h"
 #include "bz_quest_vk.h"
 #include "bz_quest_vk_wc3.h"
+#include "bz_quest_vk_wc3_fog.h"
 #include "bz_quest_vk_wc3_terrain.h"
 #include "bz_quest_wc3_render.h"
 #include "bz_quest_xr.h"
@@ -32,6 +33,7 @@ typedef struct bzQuestRenderer_s {
      * header comment for why. */
     bzQuestVkWc3_t wc3;
     bzQuestVkWc3Terrain_t wc3Terrain;
+    bzQuestVkWc3Fog_t wc3Fog;
 } bzQuestRenderer_t;
 
 /*

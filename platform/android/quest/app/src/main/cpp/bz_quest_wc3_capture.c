@@ -883,8 +883,14 @@ void bz_quest_wc3_capture_frame(const bzQuestWc3CaptureCallbacks_t *callbacks,
                 in->angle = entity.angle;
                 in->footprintX = metadata.footprint_x;
                 in->footprintY = metadata.footprint_y;
+                in->radius = entity.radius;
+                in->tintR = metadata.tint_r;
+                in->tintG = metadata.tint_g;
+                in->tintB = metadata.tint_b;
+                in->tintA = metadata.tint_a;
                 in->category = metadata.category;
                 in->frame = entity.frame;
+                in->selected = entity.selected;
                 in->teamColorTextureIdentity[0] = '\0';
                 in->teamGlowTextureIdentity[0] = '\0';
                 strncpy(in->modelIdentity, identity, sizeof(in->modelIdentity) - 1);
@@ -937,6 +943,71 @@ void bz_quest_wc3_capture_frame(const bzQuestWc3CaptureCallbacks_t *callbacks,
 
     bz_quest_wc3_build_render_list(entityInputs, entityInputCount, outRenderList);
     BZ_TTSnapshot_Release(snap);
+}
+
+bool bz_quest_wc3_capture_fog(bzQuestWc3FogCapture_t *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+
+    const bzTTSnapshot_t *snap = BZ_TT_Latest();
+    if (!snap) return false;
+    if (BZ_TTSnapshot_AbiVersion(snap) != BZ_TABLETOP_ABI_VERSION) {
+        BZ_TTSnapshot_Release(snap);
+        return false;
+    }
+
+    const bzTTPlayer_t *player = BZ_TTSnapshot_Player(snap);
+    out->targetMode = player ? (uint32_t)player->target : (uint32_t)BZ_TT_ACTION_TARGET_NONE;
+    if (out->targetMode != (uint32_t)BZ_TT_ACTION_TARGET_NONE) {
+        char detail[48];
+        snprintf(detail, sizeof(detail), "target-mode-%u-no-location", out->targetMode);
+        LOG_ONCE("<process>", detail,
+                 "bz_quest_wc3_capture: target mode %u is authoritative but has no transported point/entity payload; "
+                 "layer 5D draws no Quest target marker from it\n",
+                 out->targetMode);
+    }
+
+    if (!BZ_TTSnapshot_FogDimensions(snap, &out->width, &out->height)) {
+        BZ_TTSnapshot_Release(snap);
+        return false;
+    }
+    if (!bz_quest_wc3_fog_grid_supported(out->width, out->height)) {
+        LOG_ONCE("<process>", "fog-grid-too-large",
+                 "bz_quest_wc3_capture: fog grid %ux%u exceeds Quest layer 5D's real Warcraft III cap (%ux%u) - fog unavailable this frame\n",
+                 out->width, out->height, (uint32_t)BZ_QUEST_WC3_FOG_MAX_CELLS_PER_AXIS,
+                 (uint32_t)BZ_QUEST_WC3_FOG_MAX_CELLS_PER_AXIS);
+        BZ_TTSnapshot_Release(snap);
+        return false;
+    }
+
+    bzTTBox2_t bounds;
+    if (!BZ_TTSnapshot_MapBounds(snap, &bounds)) {
+        LOG_ONCE("<process>", "fog-bounds-missing",
+                 "bz_quest_wc3_capture: fog grid %ux%u arrived with no map bounds - fog unavailable this frame\n",
+                 out->width, out->height);
+        BZ_TTSnapshot_Release(snap);
+        return false;
+    }
+    out->bounds.minX = bounds.min_x;
+    out->bounds.minY = bounds.min_y;
+    out->bounds.maxX = bounds.max_x;
+    out->bounds.maxY = bounds.max_y;
+
+    uint32_t cells = bz_quest_wc3_fog_cell_count(out->width, out->height);
+    uint32_t visibleBytes = BZ_TTSnapshot_FogVisible(snap, out->visible, cells);
+    uint32_t exploredBytes = BZ_TTSnapshot_FogExplored(snap, out->explored, cells);
+    if (visibleBytes != cells || exploredBytes != cells) {
+        LOG_ONCE("<process>", "fog-copy-mismatch",
+                 "bz_quest_wc3_capture: fog copy returned %u/%u visible bytes and %u/%u explored bytes - fog unavailable this frame\n",
+                 visibleBytes, cells, exploredBytes, cells);
+        memset(out, 0, sizeof(*out));
+        BZ_TTSnapshot_Release(snap);
+        return false;
+    }
+
+    out->available = true;
+    BZ_TTSnapshot_Release(snap);
+    return true;
 }
 
 uint32_t bz_quest_wc3_render_clock_msec(void) {

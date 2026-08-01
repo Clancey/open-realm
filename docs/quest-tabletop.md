@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D
 
-This document tracks layers 5A/5B/5C of a stacked Meta Quest port:
+This document tracks layers 5A/5B/5C/5D of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -37,7 +37,7 @@ This document tracks layers 5A/5B/5C of a stacked Meta Quest port:
   `bz_tabletop_assets.h` terrain ABI, Quest-local pure/capture/Vulkan modules,
   and one shared per-eye render pass interleaving terrain opaque -> model
   opaque -> terrain blended -> model blended.
-- **Layer 5C (this layer, `clancey-quest-model-animation`)**: adds
+- **Layer 5C (`clancey-quest-model-animation`)**: adds
   authoritative Warcraft III **model animation** on top of 5A's static
   models — skeletal/vertex hierarchy, sequence/global-sequence pose
   sampling, GPU (vertex-shader) skinning, and the dynamic material state
@@ -45,10 +45,18 @@ This document tracks layers 5A/5B/5C of a stacked Meta Quest port:
   doodad needs. See
   "[Layer 5C: Warcraft III model animation](#layer-5c-warcraft-iii-model-animation-bz_quest_wc3_anim-bz_quest_wc3_capturec-bz_quest_vk_wc3c)"
   below for full scope, ABI decision, ownership, and evidence.
+- **Layer 5D (this layer, `clancey-quest-fog-selection-overlay`)**: adds
+  authoritative Warcraft III **fog-of-war visibility/exploration** compositing
+  plus **selection marker overlays** on top of 5B/5C's terrain+model pass,
+  reusing only snapshot state already present in `bz_tabletop_transport.h` and
+  asset metadata already present in `bz_tabletop_assets.h`. See
+  "[Layer 5D: Warcraft III fog-of-war + selection overlays](#layer-5d-warcraft-iii-fog-of-war--selection-overlays-bz_quest_wc3_fogh-bz_quest_vk_wc3_fogc)"
+  below for full scope, ownership, and evidence.
 
-**These layers still do not render fog of war, selection decals, particles/
-effects, command-card/HUD surfaces, and still do not poll gameplay input,
-play audio, or stage WC3 data onto the device.** See
+**These layers now render fog of war and per-entity selection markers, but
+still do not render particles/effects or command-card/HUD surfaces, and still
+do not poll gameplay input, play audio, or stage WC3 data onto the device.**
+See
 [Current limitations](#current-limitations) and
 `bz_quest_host.c`'s compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by
 a `#error` until its real implementation lands) — `BZ_QUEST_ENABLE_ENGINE_START`
@@ -89,6 +97,9 @@ platform/android/quest/
                                  # destroy + composition layer
       bz_quest_renderer.h/.c    # glues xr+vk+passthrough+scene into one
                                  # init()/frame()/shutdown() the host calls
+      bz_quest_vk_wc3_fog.h/.c  # Vulkan fog-mask image + selection-marker
+                                 # mesh/pipelines/descriptors, owned once per
+                                 # renderer instance
       bz_quest_data.h/.c        # Warcraft III data-dir resolution + engine
                                  # argv construction (layer 4, host-tested,
                                  # no Android/OpenXR/Vulkan deps)
@@ -116,6 +127,7 @@ platform/android/quest/
   scripts/
     verify-native-lib.sh         # forbidden-dependency/ABI/entry-point check
     test-source-sync.sh          # Make -> CMake source-list sync-contract test
+    test-wc3-fog-selection-layout.sh # structural layer-5D shader/layout/order check
     build-shaders.sh             # GLSL -> SPIR-V -> embedded-C-header pipeline
     bin2c.c                      # host tool: SPIR-V binary -> aligned C uint32_t array
   tests/
@@ -123,7 +135,8 @@ platform/android/quest/
     test_bz_quest_scene.c        # bz_quest_scene.c unit tests (host-buildable)
     test_bz_quest_data.c         # bz_quest_data.c unit tests (layer 4, host-buildable)
     test_bz_quest_frame.c        # bz_quest_frame.c unit tests (layer 4, host-buildable)
-    test_bz_quest_pure_main.c    # runs the four suites above, wired into `make test`
+    test_bz_quest_wc3_fog.c      # layer-5D pure fog/selection math tests
+    test_bz_quest_pure_main.c    # runs the pure Quest host-test suites, wired into `make test`
     test_bz_quest_bridge.c       # bz_quest_bridge.c tests (layer 4) linking the
                                  # REAL bz_tabletop_lifecycle.c/bz_runtime.c,
                                  # exactly like games/warcraft-3/tests/
@@ -209,11 +222,16 @@ make test-quest-source-sync
 # bz_quest_scene.c (projection/view-matrix math, format/extension/
 # passthrough-capability selection, procedural scene generator), (layer 4)
 # bz_quest_data.c/bz_quest_frame.c (data-dir/argv resolution, diagnostic
-# frame descriptor + throttled-log decision), PLUS (layer 5A)
-# bz_quest_wc3_render.c/bz_quest_wc3_cache.c (coordinate/scale math,
-# render-list construction, GPU-cache hit/miss/eviction/shutdown
-# bookkeeping - see "Layer 5A" below). Runs as part of `make test`.
+# frame descriptor + throttled-log decision), PLUS the layer-5A/5B/5C/5D
+# pure Warcraft helpers (render/world-matrix, generic cache, terrain math,
+# animation sampling, and fog packing/cell/marker math). Runs as part of
+# `make test`.
 make test-quest-host-tests
+
+# Layer 5D structural grep test for the fog/selection shader interface,
+# one-byte fog image format, explicit row-length upload path, and shared
+# eye-pass draw ordering. Runs as part of `make test` and `make quest`.
+make test-quest-wc3-fog-selection-layout
 
 # Layer 4: bz_quest_bridge.c tests linking the REAL
 # platform/tabletop/bridge/bz_tabletop_lifecycle.c and common/bz_runtime.c
@@ -330,6 +348,7 @@ test`, none of which need Gradle/NDK/Quest hardware:
 | `bz_quest_scene.c` | `tests/test_bz_quest_scene.c` | Procedural test-scene generator (unchanged from layer 3). |
 | `bz_quest_data.c` | `tests/test_bz_quest_data.c` | Default-dir construction, override read/validate (normal + every documented rejection: relative path, disallowed characters, oversized, empty), full resolve fallback order, and argv construction (normal + undersized-buffer/NULL-arg error paths) — 22 tests, pure, real temp dirs via `mkdtemp()`. |
 | `bz_quest_frame.c` | `tests/test_bz_quest_frame.c` | Reset value, `bz_quest_frame_from_values()` field copy/truncation/ABI-mismatch detection, and every `bz_quest_frame_should_log()` cache-hit/cache-miss branch (identical frame never logs; status/lifecycle-state/lifecycle-error changes each log; a bare `generation` advance — in *any* status, including `OK` — never logs, including across ~190 simulated consecutive engine frames, guarding against the per-frame-log regression fixed in PR #19's review pass) — 15 tests, pure, no I/O. |
+| `bz_quest_wc3_fog.c` | `tests/test_bz_quest_wc3_fog.c` | Three-state fog classification, row-major cell indexing, world<->cell conversion (including rectangular/non-chunk-multiple grids), 0/128/255 texture packing with and without row padding, content-based dirty-check hit/miss, selection-marker matrix/tint generation, and zero-dimension rejection paths. |
 | `bz_quest_bridge.c` | `tests/test_bz_quest_bridge.c` | Valid-override start reaches `RUNNING`; missing-data start reaches `FAILED` with the engine's own error surfaced; invalid-override start reaches `FAILED` *before* any `bzTabletopLifecycle_t` exists; a second `start()` on an already-attempted instance is rejected; suspend/resume forward correctly (and are safe no-ops before a start or after a stop); `stop()` is idempotent and safe pre-start; `destroy()` then a fresh `start()` on the same storage succeeds; `is_terminal()` is correct for every bridge state — 10 tests, **linking the real** `bz_tabletop_lifecycle.c`/`common/bz_runtime.c` (not a stub), 67 assertions. |
 
 `bz_quest_bridge.c`'s tests are the one suite in this table that needs
@@ -1888,6 +1907,141 @@ session - do not report any of these as confirmed:
   across frames, matching 5A's own documented "CPU decode recurs every
   frame" trade-off for geometry) - untestable without a device to profile.
 
+## Layer 5D: Warcraft III fog-of-war + selection overlays (`bz_quest_wc3_fog.h`/`bz_quest_vk_wc3_fog.c`)
+
+Layer 5D adds only two presentation features on top of 5B/5C's existing
+terrain+model renderer: authoritative fog-of-war visibility/exploration
+compositing, and authoritative per-entity selection markers. It does **not**
+add particles/effects, command-card/HUD surfaces, gameplay/controller input,
+audio, data staging, hand tracking, billboarding, TXAN, or KMTF.
+
+### Authoritative fog/selection state flow
+
+1. `bz_quest_wc3_capture.c`'s new `bz_quest_wc3_capture_fog()` does its own
+   independent `BZ_TT_Latest()` / `BZ_TTSnapshotRelease()` retain/copy/release
+   cycle, matching `bz_quest_wc3_capture_frame()`'s pre-existing "each call site
+   owns one snapshot copy" rule rather than threading a borrowed snapshot
+   pointer across subsystems.
+2. From that snapshot, it reads only already-existing transport fields:
+   `BZ_TTSnapshot_FogDimensions()`, `BZ_TTSnapshot_FogVisible()`,
+   `BZ_TTSnapshot_FogExplored()`, `BZ_TTSnapshot_MapBounds()`, and
+   `BZ_TTSnapshot_Player(0)`'s `target` mode. No transport ABI field or version
+   changed for this layer.
+3. Per-entity selection/tint data stays in the existing frame-capture path:
+   `bzTTEntity_t.selected` and `bzTTEntity_t.radius` are copied into the
+   Quest-local `bzQuestWc3EntityInput_t` / `bzQuestWc3RenderItem_t`, alongside
+   `bzTTAssetMetadata_t.tint_r/g/b/a` from
+   `BZ_TTA_ResolveEntityMetadata()`. No hardcoded team-color table exists on the
+   Quest side; the asset ABI's resolved tint stays authoritative.
+4. `bz_quest_wc3_fog.c` is the pure, host-testable layer. It classifies each
+   cell into exactly the desktop client's existing three-state model:
+   VISIBLE (`visible!=0`), EXPLORED_NOT_VISIBLE (`visible==0 && explored!=0`),
+   or UNSEEN (`visible==0 && explored==0`), and packs those states to the same
+   `client/cl_parse.c` byte convention the desktop client already uses:
+   `255`, `128`, and `0` respectively.
+5. The same pure module owns cell/world conversion using the Warcraft III game
+   constant `FOW_CELL_SIZE = TILE_SIZE / FOW_CELLS_PER_TILE_SIDE = 64.0f`
+   (`common/common.h`, `games/warcraft-3/common/mapinfo.h`). Cell centers map
+   to `bounds.min + (cell + 0.5) * 64`, matching `games/warcraft-3/game/g_fow.c`'s
+   floor-based world->cell rule.
+6. `bz_quest_vk_wc3_fog.c` owns the one persistent GPU fog image, the one
+   persistent procedural marker mesh, and the fog/marker pipelines. It calls
+   `bz_quest_wc3_capture_fog()` once per renderable frame, recreates the fog
+   image only when dimensions change, and re-uploads pixel data only when a
+   content compare against its own last-uploaded bytes says the packed fog mask
+   actually changed. `BZ_TTSnapshot_Generation()` is intentionally **not** used
+   as the upload gate because the transport increments it every client frame,
+   even when fog bytes are identical.
+
+### Coordinate-space note (inherited, not fixed here)
+
+Fog cells and selection markers intentionally follow the **existing entity**
+world convention from `bz_quest_wc3_build_world_matrix()`: translation is the
+raw engine position with the established `(x,z,y)` swap, and no terrain-style
+map-centering or compression is applied. This means layer 5D inherits the
+already-reviewed 5B/5C mismatch where entities/fog live in raw world units but
+terrain lives in a compressed centered box. This layer does **not** try to
+"fix" that mismatch; doing so here would create a third convention instead of
+faithfully following the authoritative entity/fog coordinates the snapshot and
+server-side fog grid already use.
+
+### GPU representation and draw order
+
+- Fog uses one `VK_FORMAT_R8_UNORM` sampled 2D image, not RGBA8: the source
+  data is already exactly one desktop-parity byte per cell (`0/128/255`), so a
+  four-channel texture would waste 3 bytes/texel and add no information.
+- Upload goes through one persistent host-visible staging buffer plus
+  `VkBufferImageCopy.bufferRowLength`, so padded-row uploads stay correct when
+  the image width is not already naturally aligned.
+- The shared eye render pass order is now: terrain opaque -> model opaque ->
+  fog overlay -> terrain blended -> model blended -> selection markers.
+  The fog pass darkens already-rendered opaque Warcraft content without needing
+  a second scene-color target; selection markers draw last so they remain
+  readable, but their pipeline still depth-tests against the existing opaque
+  depth buffer and uses a tiny world-space lift epsilon to avoid floor z-fight.
+- When `BZ_TTSnapshot_FogDimensions()` reports false, the fog image is torn
+  down and no overlay draws that frame; the renderer never leaves a stale
+  "last map's fog" texture bound after unload/reset.
+
+### Selection overlay design
+
+Markers are Quest-owned procedural annulus geometry (32 segments, fixed inner
+radius ratio) built once at renderer init, then transformed per selected
+entity. The pure helper builds a trivial uniform-scale world matrix where local
+radius `1.0` becomes authoritative world radius `bzTTEntity_t.radius`; there is
+no extra diorama/category fudge factor because `g_monster.c` / `g_spawn.c`
+already treat that transport radius as the real UI/selection circle radius.
+The marker shader is flat-tinted from the per-entity `tint_r/g/b/a` metadata.
+
+### Supported vs. unsupported fog/selection behavior
+
+| Behavior | Status |
+|---|---|
+| Visibility/exploration compositing from `BZ_TTSnapshot_FogVisible()` + `FogExplored()` | Supported |
+| Desktop-parity three-state bytes (`255` visible, `128` explored-not-visible, `0` unseen) | Supported |
+| Rectangular/non-square fog grids and padded-row GPU uploads | Supported |
+| Content-based dirty check (identical fog bytes do not re-upload) | Supported |
+| Per-entity selection rings from `bzTTEntity_t.selected` + `bzTTEntity_t.radius` | Supported |
+| Per-entity tint from `bzTTAssetMetadata_t.tint_*` | Supported |
+| Player `target` mode rendering | **Not implemented.** `bzTTPlayer_t.target` is only a mode enum; the transport ABI exposes no authoritative point or entity payload to draw, so this layer logs once and deliberately renders nothing rather than fabricating a target location. |
+| Terrain/entity coordinate-space reconciliation | **Not implemented.** The pre-existing raw-entity-vs-compressed-terrain mismatch is inherited unchanged from 5B/5C; fixing it is a separate rendering-space task, not part of this overlay slice. |
+
+### Tests and build wiring
+
+- `platform/android/quest/tests/test_bz_quest_wc3_fog.c` adds host coverage for
+  all new pure branches: the three cell states, row-major indexing, first/last
+  edge-cell round trips, rectangular grids, non-chunk-multiple grids, padded
+  and non-padded packing, dirty-check hit/miss and length mismatch, marker
+  transform/tint generation for multiple inputs, and zero-dimension rejection.
+- `platform/android/quest/tests/test_bz_quest_wc3_render.c` adds passthrough
+  coverage that the render-list builder preserves `selected`, `radius`, and the
+  resolved tint fields on each `bzQuestWc3RenderItem_t`.
+- `platform/android/quest/scripts/test-wc3-fog-selection-layout.sh` (wired into
+  `make test` and `make quest` as `test-quest-wc3-fog-selection-layout`) guards
+  the layer-5D shader/source registration, `VK_FORMAT_R8_UNORM`, explicit
+  `bufferRowLength` upload path, and the shared render-pass ordering.
+- `platform/android/quest/build.mk`'s `test-quest-host-tests` target now builds
+  `bz_quest_wc3_fog.c` / `test_bz_quest_wc3_fog.c` alongside the earlier pure
+  Quest modules, and the shader build pipeline now regenerates the four new
+  `warcraft_fog_*` / `warcraft_marker_*` SPIR-V headers automatically.
+
+### Acceptance gates
+
+This layer was **not** verified on a physical Quest device and was **not**
+verified with a real loaded Warcraft III map in this environment:
+
+- `bz_quest_host.c` still calls `bz_quest_bridge_start(..., NULL)`, so no map is
+  selected at process start; the transport can therefore remain in the
+  "no fog buffer yet / no entities yet" state here even though the renderer path
+  now exists.
+- No physical Quest device was connected, so there was no human visual check of
+  real fog darkening, selection-ring placement, or depth interaction against
+  real terrain/buildings.
+- Verification for this slice is therefore limited to host tests, structural
+  source checks, and the real native APK build/dependency inspection - **not**
+  an on-device visual acceptance run, and **not** proof against retail ROC/TFT
+  map data.
+
 ## Manifest requirements
 
 Unchanged from layer 2: `AndroidManifest.xml`'s NativeActivity metadata,
@@ -1929,10 +2083,12 @@ optional:
   fallback is explicit, not silent" above) — this was never observed
   rendering real Warcraft geometry on a live snapshot in this environment
   (see "Hardware/data-only acceptance procedure" below).
-- No terrain (see "Layer 5B" instead), no fog of war, no selection decals,
-  no particles/effects, no command-card/HUD surfaces — see "Layer 5A" and
-  "Layer 5C" above for the exact, deliberate scope boundaries (skeletal/
-  sequence animation IS now supported — see "Layer 5C" above).
+- Terrain (layer 5B), model animation (layer 5C), fog of war, and per-entity
+  selection markers (layer 5D) are now all present; particles/effects,
+  command-card/HUD surfaces, and any renderable player target-point/entity
+  overlay are still out of scope — see the layer sections above for the exact,
+  deliberate boundaries and the evidence for the "target mode has no location"
+  no-op.
 - No lighting model at all (fully unlit shader) — see "Shader/pipeline"
   above for why this was a deliberate scope decision, not a bug.
 - `replaceable_id 0` (direct/non-team), `1` (team color), and `2` (team
