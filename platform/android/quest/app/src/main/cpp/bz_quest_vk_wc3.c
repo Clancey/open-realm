@@ -948,6 +948,9 @@ typedef struct {
     float distanceSq;
 } BlendedDraw_t;
 
+static BlendedDraw_t s_blendedDraws[BZ_QUEST_WC3_MAX_RENDER_ITEMS * BZ_QUEST_WC3_MAX_GEOSETS_PER_MODEL];
+static uint32_t s_blendedDrawCount;
+
 static float distance_sq(const float world[16], const float cameraWorldPos[3]) {
     float dx = world[12] - cameraWorldPos[0];
     float dy = world[13] - cameraWorldPos[1];
@@ -998,6 +1001,56 @@ static void draw_layer(VkCommandBuffer cmd, bzQuestVkWc3_t *vk3, const bzQuestVk
     vkCmdPushConstants(cmd, vk3->pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 16,
                       sizeof(float) * 4, materialParams);
     vkCmdDrawIndexed(cmd, geoset->indexCount, 1, geoset->indexOffset, 0, 0);
+}
+
+void bz_quest_vk_wc3_record_opaque(bzQuestVkWc3_t *vk3, VkCommandBuffer cmd, const float viewProj[16],
+                                   const float cameraWorldPos[3], const bzQuestWc3RenderList_t *list) {
+    s_blendedDrawCount = 0;
+    for (uint32_t i = 0; i < list->count; i++) {
+        const bzQuestWc3RenderItem_t *item = &list->items[i];
+        void *modelHandle = cache_find(&vk3->modelCache, item->modelIdentity);
+        if (!modelHandle) continue;
+        const bzQuestVkWc3Model_t *model = (const bzQuestVkWc3Model_t *)modelHandle;
+
+        float mvp[16];
+        bz_quest_mat4_multiply(viewProj, item->world, mvp);
+        for (uint32_t g = 0; g < model->meta.geosetCount; g++) {
+            const bzQuestWc3Geoset_t *geoset = &model->meta.geosets[g];
+            for (uint32_t l = 0; l < geoset->layerCount; l++) {
+                const bzQuestWc3LayerDesc_t *layer = &geoset->layers[l];
+                if (layer->unsupported) continue;
+                if (layer->blendMode < BZ_QUEST_TTA_BLEND_ALPHA) {
+                    draw_layer(cmd, vk3, model, geoset, layer, mvp);
+                    continue;
+                }
+                if (s_blendedDrawCount >= sizeof(s_blendedDraws) / sizeof(s_blendedDraws[0])) continue;
+                s_blendedDraws[s_blendedDrawCount].itemIndex = i;
+                s_blendedDraws[s_blendedDrawCount].geosetIndex = g;
+                s_blendedDraws[s_blendedDrawCount].layerIndex = l;
+                s_blendedDraws[s_blendedDrawCount].distanceSq = distance_sq(item->world, cameraWorldPos);
+                s_blendedDrawCount++;
+            }
+        }
+    }
+    if (s_blendedDrawCount > 1)
+        qsort(s_blendedDraws, s_blendedDrawCount, sizeof(s_blendedDraws[0]),
+              compare_blended_draw_farthest_first);
+}
+
+void bz_quest_vk_wc3_record_blended(bzQuestVkWc3_t *vk3, VkCommandBuffer cmd, const float viewProj[16],
+                                    const bzQuestWc3RenderList_t *list) {
+    for (uint32_t i = 0; i < s_blendedDrawCount; i++) {
+        const BlendedDraw_t *bd = &s_blendedDraws[i];
+        const bzQuestWc3RenderItem_t *item = &list->items[bd->itemIndex];
+        void *modelHandle = cache_find(&vk3->modelCache, item->modelIdentity);
+        if (!modelHandle) continue;
+        const bzQuestVkWc3Model_t *model = (const bzQuestVkWc3Model_t *)modelHandle;
+        const bzQuestWc3Geoset_t *geoset = &model->meta.geosets[bd->geosetIndex];
+        const bzQuestWc3LayerDesc_t *layer = &geoset->layers[bd->layerIndex];
+        float mvp[16];
+        bz_quest_mat4_multiply(viewProj, item->world, mvp);
+        draw_layer(cmd, vk3, model, geoset, layer, mvp);
+    }
 }
 
 bool bz_quest_vk_wc3_render_target(bzQuestVkWc3_t *vk3, uint32_t viewIndex, uint32_t imageIndex,
@@ -1054,60 +1107,11 @@ bool bz_quest_vk_wc3_render_target(bzQuestVkWc3_t *vk3, uint32_t viewIndex, uint
     vkCmdSetScissor(target->commandBuffer, 0, 1, &scissor);
 
     /* Two-pass draw order: every OPAQUE/TRANSPARENT (alpha-tested) layer
-     * first (arbitrary order - depth test/write makes ordering immaterial),
-     * then every genuinely-blended layer (ALPHA/ADDITIVE/ADD_ALPHA/
-     * MODULATE/MODULATE_2X) back-to-front by *entity* distance to camera -
-     * see this file's header comment for the MDLX_IsBlendedLayer()
-     * evidence this reproduces. Entity-level (not per-triangle) sorting is
-     * a documented granularity limit - see docs/quest-tabletop.md. */
-    static BlendedDraw_t s_blendedDraws[BZ_QUEST_WC3_MAX_RENDER_ITEMS * BZ_QUEST_WC3_MAX_GEOSETS_PER_MODEL];
-    uint32_t blendedCount = 0;
-
-    for (uint32_t i = 0; i < list->count; i++) {
-        const bzQuestWc3RenderItem_t *item = &list->items[i];
-        void *modelHandle = cache_find(&vk3->modelCache, item->modelIdentity);
-        if (!modelHandle) continue; /* not yet uploaded - transient */
-        const bzQuestVkWc3Model_t *model = (const bzQuestVkWc3Model_t *)modelHandle;
-
-        float mvp[16];
-        bz_quest_mat4_multiply(viewProj, item->world, mvp);
-
-        for (uint32_t g = 0; g < model->meta.geosetCount; g++) {
-            const bzQuestWc3Geoset_t *geoset = &model->meta.geosets[g];
-            for (uint32_t l = 0; l < geoset->layerCount; l++) {
-                const bzQuestWc3LayerDesc_t *layer = &geoset->layers[l];
-                if (layer->unsupported) continue;
-                bool blended = layer->blendMode >= BZ_QUEST_TTA_BLEND_ALPHA;
-                if (!blended) {
-                    draw_layer(target->commandBuffer, vk3, model, geoset, layer, mvp);
-                } else if (blendedCount <
-                          sizeof(s_blendedDraws) / sizeof(s_blendedDraws[0])) {
-                    s_blendedDraws[blendedCount].itemIndex = i;
-                    s_blendedDraws[blendedCount].geosetIndex = g;
-                    s_blendedDraws[blendedCount].layerIndex = l;
-                    s_blendedDraws[blendedCount].distanceSq = distance_sq(item->world, cameraWorldPos);
-                    blendedCount++;
-                }
-            }
-        }
-    }
-
-    if (blendedCount > 1) {
-        qsort(s_blendedDraws, blendedCount, sizeof(s_blendedDraws[0]),
-             compare_blended_draw_farthest_first);
-    }
-    for (uint32_t i = 0; i < blendedCount; i++) {
-        const BlendedDraw_t *bd = &s_blendedDraws[i];
-        const bzQuestWc3RenderItem_t *item = &list->items[bd->itemIndex];
-        void *modelHandle = cache_find(&vk3->modelCache, item->modelIdentity);
-        if (!modelHandle) continue;
-        const bzQuestVkWc3Model_t *model = (const bzQuestVkWc3Model_t *)modelHandle;
-        const bzQuestWc3Geoset_t *geoset = &model->meta.geosets[bd->geosetIndex];
-        const bzQuestWc3LayerDesc_t *layer = &geoset->layers[bd->layerIndex];
-        float mvp[16];
-        bz_quest_mat4_multiply(viewProj, item->world, mvp);
-        draw_layer(target->commandBuffer, vk3, model, geoset, layer, mvp);
-    }
+     * first, then every genuinely-blended layer back-to-front by entity
+     * distance to camera. Entity-level (not per-triangle) sorting is the
+     * documented granularity limit - see docs/quest-tabletop.md. */
+    bz_quest_vk_wc3_record_opaque(vk3, target->commandBuffer, viewProj, cameraWorldPos, list);
+    bz_quest_vk_wc3_record_blended(vk3, target->commandBuffer, viewProj, list);
 
     vkCmdEndRenderPass(target->commandBuffer);
     if (vkEndCommandBuffer(target->commandBuffer) != VK_SUCCESS) {

@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layer 5A
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B
 
-This is layer 5A of a stacked Meta Quest port:
+This document tracks layers 5A/5B of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -32,11 +32,16 @@ This is layer 5A of a stacked Meta Quest port:
   resource ownership/caching/upload. See
   "[Layer 5A: static Warcraft III model rendering](#layer-5a-static-warcraft-iii-model-rendering-bz_quest_wc3_c-bz_quest_vk_wc3c)"
   below for full scope, ownership, and evidence.
+- **Layer 5B (`clancey-quest-renderer-terrain`)**: adds Warcraft III terrain
+  rendering (ground layers, cliffs, water) using the shipped
+  `bz_tabletop_assets.h` terrain ABI, Quest-local pure/capture/Vulkan modules,
+  and one shared per-eye render pass interleaving terrain opaque -> model
+  opaque -> terrain blended -> model blended.
 
-**This layer still does not render terrain, skeletal/sequence animation, fog
-of war, selection decals, particles/effects, command-card/HUD surfaces, and
-still does not poll gameplay input, play audio, or stage WC3 data onto the
-device.** See [Current limitations](#current-limitations) and
+**These layers still do not render skeletal/sequence animation, fog of war,
+selection decals, particles/effects, command-card/HUD surfaces, and still do
+not poll gameplay input, play audio, or stage WC3 data onto the device.** See
+[Current limitations](#current-limitations) and
 `bz_quest_host.c`'s compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by
 a `#error` until its real implementation lands) — `BZ_QUEST_ENABLE_ENGINE_START`
 and `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` were layer 4's two seams;
@@ -1388,6 +1393,40 @@ renderer, and vice versa.
   still true and still load-bearing for `CMakeLists.txt`'s
   `find_package(OpenXR REQUIRED CONFIG)` — see layer 2's original
   verification of `org.khronos.openxr:openxr_loader_for_android:1.1.49`.
+
+## Layer 5B: Warcraft III terrain rendering (`bz_quest_wc3_terrain*.c`/`bz_quest_vk_wc3_terrain.c`)
+
+Layer 5B adds only terrain: ground splat layers, cliffs, and water, all built
+from `platform/bridge/bz_tabletop_assets.h`'s already-shipped terrain ABI. The
+module split mirrors 5A exactly:
+
+| File | Kind | Owns |
+|------|------|------|
+| [`bz_quest_wc3_terrain.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_terrain.c) | pure, host-testable | Terrain scale validation, chunk grid/bounds math, surface-layer UV selection, water/cliff detection, chunk mesh emission, and stable chunk/texture keys. |
+| [`bz_quest_wc3_terrain_capture.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_terrain_capture.c) | impure, ABI-calling | The one retain/copy/release walk over `BZ_TTA_LatestTerrain()`/`BZ_TTTerrain_*()`/`BZ_TTA_RegisterTerrainTexture()`/`BZ_TTAsset_*()`. Detects same-generation terrain cheaply and skips rebuild work there. |
+| [`bz_quest_vk_wc3_terrain.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_vk_wc3_terrain.c) | impure, Vulkan-calling | Owns terrain-only descriptor set layout/pool/sampler/pipeline layout/shaders/staging buffer/upload command buffer plus one chunk cache and one texture cache, fully separate from both `bz_quest_vk.c` and `bz_quest_vk_wc3.c`. |
+| [`shaders/terrain_vert.vert`/`terrain_frag.frag`](../platform/android/quest/app/src/main/cpp/shaders/terrain_vert.vert) | GLSL, compiled by `build-shaders.sh` | Unlit textured terrain draw with per-vertex RGBA so water can preserve its authoritative corner alpha. |
+
+`bz_quest_renderer.c` now captures models and terrain once per frame, then
+records both into one shared per-eye render pass in this fixed order:
+
+1. terrain opaque (base ground + cliffs)
+2. model opaque
+3. terrain blended (extra splat layers + water)
+4. model blended
+
+Terrain uses the same generic FIFO cache implementation as 5A, but its
+generation-lifetime differs: when the terrain identity changes, the module
+`vkDeviceWaitIdle()`s and resets both terrain caches wholesale instead of
+trying to reuse old chunk/image entries across maps. That is deliberate: model
+assets can repeat across frames and maps, but terrain chunk geometry cannot.
+
+`test_bz_quest_wc3_terrain.c` host-covers the pure chunk builder's critical
+paths: scale rejection, 32x32 tail-chunk clamping, authoritative quad winding,
+ground splat atlas selection, water opacity, cliff detection/material fallback,
+and stable cache-key generation. The existing descriptor-pool headroom script
+now structurally checks the terrain texture descriptor pool's required
+`capacity + 1` spare slot too.
 
 ## Manifest requirements
 

@@ -179,6 +179,20 @@ bool bz_quest_vk_wc3_create(const bzQuestVk_t *vk, bzQuestVkWc3_t *out);
 void bz_quest_vk_wc3_capture_and_upload(bzQuestVkWc3_t *vk3, bzQuestWc3RenderList_t *outRenderList);
 
 /*
+ * Records only the non-blended MDX layers into an already-begun render pass
+ * and gathers the blended pass's back-to-front draw list for a later
+ * bz_quest_vk_wc3_record_blended() call. Calling these two functions back to
+ * back reproduces bz_quest_vk_wc3_render_target()'s previous monolithic draw
+ * order exactly; the split exists so bz_quest_renderer.c can interleave
+ * terrain opaque -> model opaque -> terrain blended -> model blended in one
+ * shared eye render pass.
+ */
+void bz_quest_vk_wc3_record_opaque(bzQuestVkWc3_t *vk3, VkCommandBuffer cmd, const float viewProj[16],
+                                   const float cameraWorldPos[3], const bzQuestWc3RenderList_t *list);
+void bz_quest_vk_wc3_record_blended(bzQuestVkWc3_t *vk3, VkCommandBuffer cmd, const float viewProj[16],
+                                    const bzQuestWc3RenderList_t *list);
+
+/*
  * Records draws for every item in `list` into the target's already-begun
  * render pass instance (viewIndex/imageIndex identify the same
  * bzQuestVkTarget_t bz_quest_vk_render_target() would use - see

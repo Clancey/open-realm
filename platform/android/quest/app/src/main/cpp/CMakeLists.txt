@@ -208,6 +208,8 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tabletop_frag.frag"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/warcraft_vert.vert"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/warcraft_frag.frag"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_vert.vert"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_frag.frag"
     COMMENT "bz_quest: compiling GLSL shaders to SPIR-V and embedding as C headers"
     VERBATIM
 )
@@ -238,9 +240,12 @@ add_library(bz_quest_native SHARED
     bz_quest_snapshot.c
     bz_quest_bridge.c
     bz_quest_wc3_render.c
+    bz_quest_wc3_terrain.c
     bz_quest_wc3_cache.c
     bz_quest_wc3_capture.c
+    bz_quest_wc3_terrain_capture.c
     bz_quest_vk_wc3.c
+    bz_quest_vk_wc3_terrain.c
 )
 add_dependencies(bz_quest_native bz_quest_shaders)
 target_compile_definitions(bz_quest_native PRIVATE

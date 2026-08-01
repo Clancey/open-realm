@@ -77,6 +77,7 @@ bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer
     if (!bz_quest_passthrough_start(xr, &renderer->passthrough)) goto fail;
 
     if (!bz_quest_vk_wc3_create(vk, &renderer->wc3)) goto fail;
+    if (!bz_quest_vk_wc3_terrain_create(vk, &renderer->wc3Terrain)) goto fail;
 
     BZ_QUEST_LOGI("renderer init complete");
     return true;
@@ -107,6 +108,88 @@ static bool bz_quest_renderer_build_mvp(const XrView *view, float outMvp[16]) {
                                     view->fov.angleDown, 0.05f, 100.0f, projMatrix))
         return false;
     bz_quest_mat4_multiply(projMatrix, viewMatrix, outMvp);
+    return true;
+}
+
+/* One shared eye render pass for terrain+models, preserving each subsystem's
+ * own opaque-before-blended discipline while making the blended-vs-blended
+ * ordering limit explicit: terrain blended draws sort within terrain, model
+ * blended draws sort within models, and the two systems are interleaved only
+ * at the subsystem granularity (terrain blended first, model blended second),
+ * matching bz_quest_vk_wc3.c's existing documented entity-level transparency
+ * limit rather than pretending to do a global per-triangle merge sort. */
+static bool bz_quest_renderer_render_warcraft_target(
+    bzQuestRenderer_t *renderer, uint32_t viewIndex, uint32_t imageIndex, uint32_t width, uint32_t height,
+    const float viewProj[16], const float cameraWorldPos[3], const bzQuestWc3TerrainRenderList_t *terrainList,
+    const bzQuestWc3RenderList_t *wc3List) {
+    const bzQuestVk_t *vk = &renderer->vk;
+    if (viewIndex >= BZ_QUEST_VIEW_COUNT || imageIndex >= vk->targetCount[viewIndex]) {
+        BZ_QUEST_LOGE("bz_quest_renderer: render target view=%u image=%u out of range", viewIndex, imageIndex);
+        return false;
+    }
+    const bzQuestVkTarget_t *target = &vk->targets[viewIndex][imageIndex];
+
+    if (vkWaitForFences(vk->device, 1, &target->fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        BZ_QUEST_LOGE("bz_quest_renderer: vkWaitForFences failed");
+        return false;
+    }
+    if (vkResetFences(vk->device, 1, &target->fence) != VK_SUCCESS) {
+        BZ_QUEST_LOGE("bz_quest_renderer: vkResetFences failed");
+        return false;
+    }
+    if (vkResetCommandBuffer(target->commandBuffer, 0) != VK_SUCCESS) {
+        BZ_QUEST_LOGE("bz_quest_renderer: vkResetCommandBuffer failed");
+        return false;
+    }
+
+    VkCommandBufferBeginInfo beginInfo = {0};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(target->commandBuffer, &beginInfo) != VK_SUCCESS) {
+        BZ_QUEST_LOGE("bz_quest_renderer: vkBeginCommandBuffer failed");
+        return false;
+    }
+
+    VkClearValue clearValues[2] = {0};
+    clearValues[1].depthStencil.depth = 1.0f;
+    VkRenderPassBeginInfo renderPassBeginInfo = {0};
+    renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassBeginInfo.renderPass = vk->renderPass;
+    renderPassBeginInfo.framebuffer = target->framebuffer;
+    renderPassBeginInfo.renderArea.extent.width = width;
+    renderPassBeginInfo.renderArea.extent.height = height;
+    renderPassBeginInfo.clearValueCount = 2;
+    renderPassBeginInfo.pClearValues = clearValues;
+    vkCmdBeginRenderPass(target->commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+    VkViewport viewport = {0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f};
+    vkCmdSetViewport(target->commandBuffer, 0, 1, &viewport);
+    VkRect2D scissor = {{0, 0}, {width, height}};
+    vkCmdSetScissor(target->commandBuffer, 0, 1, &scissor);
+
+    bz_quest_vk_wc3_terrain_record_opaque(&renderer->wc3Terrain, target->commandBuffer, viewProj, cameraWorldPos,
+                                          terrainList);
+    bz_quest_vk_wc3_record_opaque(&renderer->wc3, target->commandBuffer, viewProj, cameraWorldPos, wc3List);
+    bz_quest_vk_wc3_terrain_record_blended(&renderer->wc3Terrain, target->commandBuffer, viewProj, terrainList);
+    bz_quest_vk_wc3_record_blended(&renderer->wc3, target->commandBuffer, viewProj, wc3List);
+
+    vkCmdEndRenderPass(target->commandBuffer);
+    if (vkEndCommandBuffer(target->commandBuffer) != VK_SUCCESS) {
+        BZ_QUEST_LOGE("bz_quest_renderer: vkEndCommandBuffer failed");
+        return false;
+    }
+    VkSubmitInfo submitInfo = {0};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &target->commandBuffer;
+    if (vkQueueSubmit(vk->queue, 1, &submitInfo, target->fence) != VK_SUCCESS) {
+        BZ_QUEST_LOGE("bz_quest_renderer: vkQueueSubmit failed");
+        return false;
+    }
+    if (vkWaitForFences(vk->device, 1, &target->fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        BZ_QUEST_LOGE("bz_quest_renderer: vkWaitForFences (post-submit) failed");
+        return false;
+    }
     return true;
 }
 
@@ -142,8 +225,13 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
      * missed upload - the same models/textures are captured again (and
      * uploaded then) the next frame that does render. */
     bzQuestWc3RenderList_t wc3RenderList;
+    bzQuestWc3TerrainRenderList_t terrainRenderList;
     memset(&wc3RenderList, 0, sizeof(wc3RenderList));
-    if (haveViews) bz_quest_vk_wc3_capture_and_upload(&renderer->wc3, &wc3RenderList);
+    memset(&terrainRenderList, 0, sizeof(terrainRenderList));
+    if (haveViews) {
+        bz_quest_vk_wc3_capture_and_upload(&renderer->wc3, &wc3RenderList);
+        bz_quest_vk_wc3_terrain_capture_and_upload(&renderer->wc3Terrain, &terrainRenderList);
+    }
 
     if (haveViews) {
         for (uint32_t i = 0; i < BZ_QUEST_VIEW_COUNT; i++) {
@@ -162,29 +250,28 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
             bool rendered = false;
             if (!bz_quest_renderer_build_mvp(&views[i], mvp)) {
                 haveViews = false;
-            } else if (wc3RenderList.count > 0) {
-                /* Warcraft III render items exist this frame: render them,
-                 * not the procedural diagnostic scene (see this file's
-                 * header comment and bz_quest_vk_wc3.h's contract). `mvp`
-                 * here is already exactly this eye's view*projection matrix
-                 * with an implicit identity model - see
-                 * bz_quest_renderer_build_mvp()'s own comment - matching
-                 * bz_quest_vk_wc3_render_target()'s `viewProj` parameter. */
+            } else if (wc3RenderList.count > 0 || terrainRenderList.count > 0) {
+                /* Warcraft III terrain and/or models exist this frame: record
+                 * both into one shared eye render pass, interleaving terrain
+                 * opaque -> model opaque -> terrain blended -> model blended.
+                 * `mvp` is this eye's view*projection matrix; models apply
+                 * their world matrix inside bz_quest_vk_wc3.c, terrain bakes
+                 * world position directly into its vertices. */
                 const float cameraWorldPos[3] = {
                     views[i].pose.position.x,
                     views[i].pose.position.y,
                     views[i].pose.position.z,
                 };
-                rendered = bz_quest_vk_wc3_render_target(&renderer->wc3, i, imageIndex,
-                                                         swapchain->width, swapchain->height, mvp,
-                                                         cameraWorldPos, &wc3RenderList);
+                rendered = bz_quest_renderer_render_warcraft_target(
+                    renderer, i, imageIndex, swapchain->width, swapchain->height, mvp, cameraWorldPos,
+                    &terrainRenderList, &wc3RenderList);
                 if (!rendered) haveViews = false;
             } else {
                 /* No valid Warcraft render items yet (e.g. no snapshot,
-                 * still connecting, or every entity's model/texture is
-                 * still uploading) - render the existing procedural test
-                 * scene as an explicit diagnostic, never a silent
-                 * unsupported-asset fallback. */
+                 * still connecting, or every terrain chunk/model/texture is
+                 * still uploading) - render the existing procedural test scene
+                 * as an explicit diagnostic, never a silent unsupported-asset
+                 * fallback. */
                 rendered = bz_quest_vk_render_target(vk, i, imageIndex, swapchain->width,
                                                      swapchain->height, mvp);
                 if (!rendered) haveViews = false;
@@ -230,6 +317,7 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
 }
 
 void bz_quest_renderer_shutdown(bzQuestRenderer_t *renderer) {
+    bz_quest_vk_wc3_terrain_destroy(&renderer->wc3Terrain);
     bz_quest_vk_wc3_destroy(&renderer->wc3);
     bz_quest_passthrough_destroy(&renderer->xr, &renderer->passthrough);
     bz_quest_vk_destroy(&renderer->vk);

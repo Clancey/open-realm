@@ -69,6 +69,8 @@ compile_one tabletop_vert vertex vert
 compile_one tabletop_frag fragment frag
 compile_one warcraft_vert vertex vert
 compile_one warcraft_frag fragment frag
+compile_one terrain_vert vertex vert
+compile_one terrain_frag fragment frag
 
 # --- Umbrella header the CMake build/renderer #includes -------------------
 GEN_HEADER="$OUT_DIR/bz_quest_shaders_generated.h"
@@ -80,6 +82,8 @@ GEN_HEADER="$OUT_DIR/bz_quest_shaders_generated.h"
     cat "$OUT_DIR/tabletop_frag.spv.h"
     cat "$OUT_DIR/warcraft_vert.spv.h"
     cat "$OUT_DIR/warcraft_frag.spv.h"
+    cat "$OUT_DIR/terrain_vert.spv.h"
+    cat "$OUT_DIR/terrain_frag.spv.h"
     echo "#endif /* BZ_QUEST_SHADERS_GENERATED_H */"
 } > "$GEN_HEADER"
 

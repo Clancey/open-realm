@@ -15,6 +15,7 @@
 #include "bz_quest_passthrough.h"
 #include "bz_quest_vk.h"
 #include "bz_quest_vk_wc3.h"
+#include "bz_quest_vk_wc3_terrain.h"
 #include "bz_quest_wc3_render.h"
 #include "bz_quest_xr.h"
 
@@ -30,6 +31,7 @@ typedef struct bzQuestRenderer_s {
      * resources entirely separately from `vk` above - see bz_quest_vk_wc3.h's
      * header comment for why. */
     bzQuestVkWc3_t wc3;
+    bzQuestVkWc3Terrain_t wc3Terrain;
 } bzQuestRenderer_t;
 
 /*
