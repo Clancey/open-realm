@@ -156,12 +156,22 @@ static bzQuestWc3Quat_t quat_sqlerp(const bzQuestWc3Quat_t *a, const bzQuestWc3Q
         if (prevKF) *out = prevKF->value;                                                                  \
     }
 
+static float float_lerp(const float *a, const float *b, float t) { return lerpf(*a, *b, t); }
+static float float_bezier(const float *a, const float *b, const float *c, const float *d, float t) {
+    return bezierf(*a, *b, *c, *d, t);
+}
+static float float_hermite(const float *a, const float *b, const float *c, const float *d, float t) {
+    return hermitef(*a, *b, *c, *d, t);
+}
+
 BZ_QUEST_WC3_DEFINE_SAMPLE(sample_vec3, bzQuestWc3Vec3Key_t, bzQuestWc3Vec3_t, vec3_lerp, vec3_bezier,
                           vec3_hermite)
 /* Both HERMITE and BEZIER map to quat_sqlerp - r_mdx_interpolation.c:86-88 (see this file's
  * header comment) - not a distinct quaternion bezier/hermite formula. */
 BZ_QUEST_WC3_DEFINE_SAMPLE(sample_quat, bzQuestWc3QuatKey_t, bzQuestWc3Quat_t, quat_slerp, quat_sqlerp,
                           quat_sqlerp)
+BZ_QUEST_WC3_DEFINE_SAMPLE(sample_float, bzQuestWc3FloatKey_t, float, float_lerp, float_bezier,
+                          float_hermite)
 
 void bz_quest_wc3_sample_vec3_track(const bzQuestWc3Track_t *track, uint32_t intervalStartMsec,
                                     uint32_t intervalEndMsec, uint32_t sampleTimeMsec,
@@ -194,6 +204,17 @@ void bz_quest_wc3_sample_quat_track(const bzQuestWc3Track_t *track, uint32_t int
     }
     sample_quat(track->quatKeys, track->keyCount, track->interp, intervalStartMsec, intervalEndMsec,
                sampleTimeMsec, outValue);
+}
+
+void bz_quest_wc3_sample_float_track(const bzQuestWc3Track_t *track, uint32_t intervalStartMsec,
+                                     uint32_t intervalEndMsec, uint32_t sampleTimeMsec,
+                                     float defaultValue, float *outValue) {
+    if (track->keyCount == 0) {
+        *outValue = defaultValue;
+        return;
+    }
+    sample_float(track->floatKeys, track->keyCount, track->interp, intervalStartMsec, intervalEndMsec,
+                sampleTimeMsec, outValue);
 }
 
 void bz_quest_wc3_resolve_track_interval(const bzQuestWc3Track_t *track, uint32_t seqStartMsec,

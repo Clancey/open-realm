@@ -81,6 +81,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "bz_quest_wc3_anim.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -118,21 +120,47 @@ enum {
      * BZ_TTSnapshot_EntitiesOverflowCount() contract for the same reason. */
     BZ_QUEST_WC3_MAX_RENDER_ITEMS = 1024, /* matches BZ_TT_MAX_ENTITIES */
     BZ_QUEST_WC3_MAX_UNIQUE_MODELS_PER_FRAME = 128,
+    /* Real MDX sequence/global-sequence counts are single digits to a few
+     * dozen (a handful of shipped units exceed ~24 sequences); 64 is a
+     * generous multiple - a model exceeding it is truncated with a logged
+     * reason (see bz_quest_wc3_capture.c), never silently mis-indexed. */
+    BZ_QUEST_WC3_MAX_SEQUENCES_PER_MODEL = 64,
+    BZ_QUEST_WC3_MAX_GLOBAL_SEQUENCES_PER_MODEL = 64,
+    /* Per-frame cap on the number of distinct (render item, geoset) pairs
+     * that get a freshly-computed pose/bone-palette this frame - see
+     * bz_quest_vk_wc3.h's BZ_QUEST_VK_WC3_MAX_SKINNED_DRAWS_PER_FRAME (this
+     * constant lives here, not there, because bz_quest_wc3_capture.c's
+     * pure-adjacent bounds-checking code also needs it and must not #include
+     * the Vulkan-aware bz_quest_vk_wc3.h). A scene exceeding this many
+     * simultaneously-animated geosets in one frame is a pathological case
+     * far beyond any real Warcraft III map on Quest hardware - the excess
+     * draws are logged once and fall back to an identity bone palette
+     * (still drawn, just not skinned that frame - never a dropped/frozen
+     * draw, per this slice's "never silently demote" rule). */
+    BZ_QUEST_WC3_MAX_SKINNED_DRAWS_PER_FRAME = 256,
 };
 
 /* One material layer, already resolved to a concrete texture identity by the
  * impure capture step (see bz_quest_wc3_capture.h) - this module never talks
- * to the asset ABI itself. `textureIdentity` is empty and `unsupported` is
- * true when the layer's replaceable_id could not be resolved to a supported
- * texture role for this slice (see bz_quest_wc3_capture.h's replaceable-id
- * contract) - callers must log once per unique (model identity, geoset,
- * layer) and skip drawing that layer, never substitute another texture. */
+ * to the asset ABI itself. Exactly one of three states holds: (1) a direct
+ * (replaceable_id 0) texture - `textureIdentity` set, `teamColor`/`teamGlow`
+ * false; (2) a team-color/glow (replaceable_id 1/2) texture - `teamColor` or
+ * `teamGlow` true, `textureIdentity` left empty because the concrete texture
+ * is per-ENTITY (each entity's own team_color), not per-model - the renderer
+ * must instead use the draw's own bzQuestWc3RenderItem_t::teamColorTexture
+ * Identity/teamGlowTextureIdentity (see that struct's comment); (3)
+ * `unsupported` true for any other replaceable_id (a per-entity image
+ * override - out of scope for this slice, see bz_quest_wc3_capture.h) -
+ * callers must log once per unique (model identity, geoset, layer) and skip
+ * drawing that layer, never substitute another texture. */
 typedef struct {
     uint32_t blendMode;   /* bzTTBlendMode_t - see platform/bridge/bz_tabletop_assets.h */
     uint32_t flags;       /* raw MDX layer shading bits - see games/warcraft-3/renderer/mdx/r_mdx.h:27-35 */
     float alpha;
-    bool unsupported;     /* true: replaceable_id was not 0 (direct)/1 (team color)/2 (team glow) */
-    char textureIdentity[BZ_QUEST_WC3_MAX_IDENTITY]; /* empty iff unsupported */
+    bool unsupported;     /* true: replaceable_id was not 0/1/2 (per-entity image override, deferred) */
+    bool teamColor;       /* true: replaceable_id 1 - resolve via the render item's team color texture */
+    bool teamGlow;        /* true: replaceable_id 2 - resolve via the render item's team glow texture */
+    char textureIdentity[BZ_QUEST_WC3_MAX_IDENTITY]; /* empty iff unsupported/teamColor/teamGlow */
 } bzQuestWc3LayerDesc_t;
 
 /* One geoset's vertex/index range within its model's combined vertex/index
@@ -152,11 +180,121 @@ typedef struct {
  * unmodified (MDX UVs are already the target 2D texture-space convention;
  * no evidence any conversion is needed - WarcraftAssetAdapter.swift copies
  * geoset UVs verbatim with no transform). */
+/* Bone skin: up to 4 (node-index, weight) pairs into THIS GEOSET's own
+ * matrix palette (bzQuestWc3StoredGeosetAnim_t::paletteNodeIndex below) -
+ * mirrors platform/bridge/bz_tabletop_assets.h's bzTTVertexSkin_t exactly
+ * (BZ_TTA_MAX_VERTEX_BONES == 4), copied through unresolved (boneIndex is a
+ * *palette-local* slot 0..matrixPaletteCount-1, never a global node index -
+ * see bz_quest_wc3_capture.c). boneWeight is 0..255 (matches the ABI's own
+ * byte-weight convention - r_mdx_geoset.c's vertex-skin weights are already
+ * byte-normalized, no float conversion needed until the GPU skin sums them
+ * as weight/255.0). Every geoset always has >=1 valid bone (per
+ * bzTTGeosetInfo_t's own "always has a resolved skin + matrix palette"
+ * guarantee - see bz_quest_wc3_capture.c) - so this field is populated for
+ * EVERY vertex of EVERY geoset, animated or not (boneIndex[0]=0,
+ * boneWeight[0]=255, rest zero, for a geoset with no real BONE hierarchy),
+ * letting one GPU-skinning vertex shader handle both cases uniformly rather
+ * than needing a separate static-model pipeline variant. */
 typedef struct {
     float position[3];
     float normal[3];
     float uv[2];
+    uint8_t boneIndex[4];
+    uint8_t boneWeight[4];
 } bzQuestWc3Vertex_t;
+
+/* ---------------------------------------------------------------------- */
+/* Persistent per-model animation data (arena-owned, heap-allocated once per */
+/* unique animated model - see bz_quest_wc3_capture.c and this file's       */
+/* bzQuestWc3ModelMeta_t::anim comment below).                             */
+/* ---------------------------------------------------------------------- */
+
+/* One node channel's keyframe data, sized to the model's REAL key count
+ * (never BZ_QUEST_WC3_MAX_KEYS_PER_TRACK) and pointing into the owning
+ * model's single arena allocation - unlike bz_quest_wc3_anim.h's
+ * bzQuestWc3Track_t (a fixed-size, stack/static-friendly struct meant for
+ * one entity's transient per-frame pose build), this is the space-efficient
+ * form actually retained in the Vulkan model cache across frames (see this
+ * file's header comment on why a fixed-size-array-per-model design would
+ * cost ~2.3MB * BZ_QUEST_WC3_MAX_UNIQUE_MODELS_PER_FRAME here). Exactly one
+ * of vec3Keys/quatKeys/floatKeys is non-NULL, matching which channel this
+ * track belongs to (translation/scale -> vec3Keys, rotation -> quatKeys,
+ * geoset alpha -> floatKeys). keyCount==0 means "no track" (all three
+ * pointers NULL) - callers fall back to the pure module's own identity
+ * defaults, exactly as bz_quest_wc3_anim.h's Track_t does. */
+typedef struct {
+    uint32_t keyCount;
+    bzQuestWc3Interp_t interp;
+    uint32_t globalSequence; /* BZ_QUEST_WC3_NO_GLOBAL_SEQUENCE, or a globalSeqDurations[] index */
+    const bzQuestWc3Vec3Key_t *vec3Keys;
+    const bzQuestWc3QuatKey_t *quatKeys;
+    const bzQuestWc3FloatKey_t *floatKeys;
+} bzQuestWc3StoredTrack_t;
+
+/* One MDX node - parentIndex already resolved from the ABI's raw object_id/
+ * parent_id to this array's own 0-based index (mirroring platform/bridge/
+ * bz_tabletop_assets.c's node_index_for_object_id() convention - see
+ * bz_quest_wc3_capture.c), or BZ_QUEST_WC3_NO_PARENT for a root node. */
+typedef struct {
+    uint32_t parentIndex;
+    bzQuestWc3Vec3_t pivot;
+    bzQuestWc3StoredTrack_t translation, rotation, scale;
+} bzQuestWc3StoredNode_t;
+
+/* One sequence's [startMsec,endMsec) interval - the entity's authoritative
+ * bzTTEntity_t.frame is matched against these to find the active sequence,
+ * mirroring R_FindSequenceAtTime (r_mdx_anim.c) exactly - see
+ * bz_quest_wc3_capture.c. */
+typedef struct {
+    uint32_t startMsec, endMsec;
+} bzQuestWc3StoredSeqRange_t;
+
+/* One geoset's dynamic-material animation state: alpha (GEOA/KGAO - a
+ * scalar multiplied into every layer's own resolved alpha, kept separate
+ * from and multiplicative with layer alpha per games/warcraft-3/renderer/
+ * mdx/r_mdx_geoset.c's MDLX_EvaluateGeosetColor()/MDLX_EvaluateLayerAlpha()
+ * split - see bz_quest_wc3_capture.c) and this geoset's own resolved
+ * (already node-index-remapped by the ABI - see platform/bridge/
+ * bz_tabletop_assets.h's BZ_TTAsset_CopyGeosetMatrixPalette doc comment)
+ * bone-palette node-index list, consumed by
+ * bz_quest_wc3_build_bone_palette(). `paletteNodeIndexCount` is always >= 1
+ * (the ABI guarantees every geoset has a resolved palette - see this file's
+ * bzQuestWc3Vertex_t comment). */
+typedef struct {
+    bool hasAlphaTrack;
+    float staticAlpha; /* used verbatim when !hasAlphaTrack, matches bzTTGeosetAnimInfo_t::static_alpha */
+    bzQuestWc3StoredTrack_t alphaTrack; /* meaningful iff hasAlphaTrack; floatKeys populated */
+    uint32_t paletteNodeIndexCount;
+    const uint32_t *paletteNodeIndices;
+} bzQuestWc3StoredGeosetAnim_t;
+
+/* Top-level persistent per-model animation data: one heap arena backs every
+ * pointer below (nodes/sequences/globalSeqDurations/geosetAnims and every
+ * key array they point into), allocated by a first ABI-Info()-only sizing
+ * pass and filled by a second pass of real ABI Copy*() calls straight into
+ * arena-relative addresses (see bz_quest_wc3_capture.c) - one malloc(), one
+ * free(), sized to the model's REAL data rather than any fixed worst-case
+ * cap. `geosetAnims`/`geosetAnimCount` is index-aligned with the owning
+ * bzQuestWc3ModelMeta_t::geosets[] array (same index means same geoset). */
+typedef struct {
+    void *arena;
+    uint32_t nodeCount;
+    const bzQuestWc3StoredNode_t *nodes;
+    uint32_t sequenceCount;
+    const bzQuestWc3StoredSeqRange_t *sequences;
+    uint32_t globalSeqDurationCount;
+    const uint32_t *globalSeqDurations;
+    uint32_t geosetAnimCount;
+    const bzQuestWc3StoredGeosetAnim_t *geosetAnims;
+} bzQuestWc3ModelAnim_t;
+
+/*
+ * Frees `anim->arena` and `anim` itself (a single two-step release for the
+ * single-allocation arena design above) - safe to call with anim == NULL
+ * (no-op), matching this project's other release-function conventions
+ * (e.g. BZ_TTAsset_Release's NULL-safety).
+ */
+void bz_quest_wc3_model_anim_free(bzQuestWc3ModelAnim_t *anim);
 
 /* Small, persistent per-model metadata - what the Vulkan GPU cache actually
  * retains across frames (see bz_quest_wc3_cache.h): geoset vertex/index
@@ -172,6 +310,16 @@ typedef struct {
     uint32_t indexCount;
     uint32_t geosetCount;
     bzQuestWc3Geoset_t geosets[BZ_QUEST_WC3_MAX_GEOSETS_PER_MODEL];
+    /* NULL for a model with no animation data at all (e.g. decode found zero
+     * nodes, or ABI info calls reported nothing to copy) - such a model is
+     * still drawn via the same GPU-skinning pipeline using each geoset's own
+     * trivial (>=1 entry, node-0-bound) palette (see bz_quest_wc3_capture.c
+     * and this file's bzQuestWc3Vertex_t comment); `anim` only carries the
+     * REAL keyframe/hierarchy data needed to move that palette away from
+     * identity. Owned by the model's own Vulkan cache entry (see
+     * bz_quest_vk_wc3.c's model_cache_create()/model_cache_destroy()) - one
+     * heap arena per unique model, freed exactly once on cache eviction. */
+    bzQuestWc3ModelAnim_t *anim;
 } bzQuestWc3ModelMeta_t;
 
 /* A fully-resolved, renderer-owned copy of one Warcraft model's static
@@ -210,6 +358,19 @@ typedef struct {
     float angle;                     /* engine-space yaw, radians */
     float footprintX, footprintY;    /* bzTTAssetMetadata_t.footprint_x/y */
     uint32_t category;               /* bzTTAssetCategory_t */
+    uint32_t frame;                  /* bzTTEntity_t.frame (msec) - authoritative animation time, see bz_quest_wc3_anim.h */
+    /* This entity's own resolved team-color/glow textures (empty iff
+     * registration failed or the provider has no team texture for this
+     * team_color) - resolved PER ENTITY, not per model, because the same
+     * model shared by two different-team entities needs two different
+     * concrete textures for its replaceable_id 1/2 layers (see
+     * bz_quest_wc3_capture.c and bzQuestWc3LayerDesc_t::teamColor/teamGlow).
+     * Left as plain identity strings (not a raw team_color index) so this
+     * file and bz_quest_vk_wc3.c never need their own copy of the ABI's
+     * team_color->texture resolution rule - capture.c (the one file that
+     * legitimately calls BZ_TTA_RegisterTeamTexture) already did it. */
+    char teamColorTextureIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
+    char teamGlowTextureIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
     char modelIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
 } bzQuestWc3EntityInput_t;
 
@@ -218,10 +379,17 @@ typedef struct {
  * a fully-built column-major world matrix (engine space -> target Y-up
  * right-handed space), matching bz_quest_pure.h's bz_quest_mat4_multiply()
  * layout so bz_quest_vk_wc3.c can multiply it against the eye's
- * view*projection matrix with the same helper. */
+ * view*projection matrix with the same helper. `frame`/team-texture
+ * identities are carried through unconverted from bzQuestWc3EntityInput_t
+ * for bz_quest_vk_wc3.c's per-frame pose/bone-palette build and team-texture
+ * binding - this file never touches animation/material state itself, only
+ * passes the entity's own already-resolved values through untouched. */
 typedef struct {
     char modelIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
     float world[16];
+    uint32_t frame;
+    char teamColorTextureIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
+    char teamGlowTextureIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
 } bzQuestWc3RenderItem_t;
 
 typedef struct {

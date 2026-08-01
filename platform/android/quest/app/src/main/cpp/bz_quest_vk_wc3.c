@@ -315,6 +315,10 @@ static void model_cache_destroy(void *handle, void *userdata) {
     if (m->indexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(vk3->vk->device, m->indexBuffer, NULL);
     if (m->vertexMemory != VK_NULL_HANDLE) vkFreeMemory(vk3->vk->device, m->vertexMemory, NULL);
     if (m->indexMemory != VK_NULL_HANDLE) vkFreeMemory(vk3->vk->device, m->indexMemory, NULL);
+    /* Releases the bzQuestWc3ModelAnim_t arena transferred into this entry
+     * by model_cache_create()'s `out->meta = model->meta` copy - see
+     * model_ready_cb's ownership-transfer comment. NULL-safe. */
+    bz_quest_wc3_model_anim_free((bzQuestWc3ModelAnim_t *)m->meta.anim);
     free(m);
 }
 
@@ -549,11 +553,26 @@ static void texture_cache_destroy(void *handle, void *userdata) {
 
 static void model_ready_cb(const bzQuestWc3Model_t *model, void *userdata) {
     bzQuestVkWc3_t *vk3 = (bzQuestVkWc3_t *)userdata;
-    if (cache_find(&vk3->modelCache, model->meta.identity)) return; /* already resident */
+    if (cache_find(&vk3->modelCache, model->meta.identity)) {
+        /* Already resident. bz_quest_wc3_capture.c's per-frame dedup only
+         * spans one frame (see its s_seenModelConfigIndex comment), so
+         * decode_model() unconditionally rebuilds a fresh
+         * bzQuestWc3ModelAnim_t arena every time an already-cached model is
+         * re-offered - this offering's copy is surplus (the resident cache
+         * entry already owns its own arena from its original upload - see
+         * model_cache_create's `out->meta = model->meta` ownership
+         * transfer) and must be released here, or it leaks. */
+        bz_quest_wc3_model_anim_free((bzQuestWc3ModelAnim_t *)model->meta.anim);
+        return;
+    }
     if (vk3->newModelUploadsThisFrame >= BZ_QUEST_VK_WC3_MAX_NEW_MODEL_UPLOADS_PER_FRAME) {
         /* Bounded per this file's header comment - picked up next frame,
          * since bz_quest_wc3_capture.c's per-frame dedup resets every
-         * call, so a still-uncached model is offered again next frame. */
+         * call, so a still-uncached model is offered again next frame.
+         * This offering's arena is never handed to model_cache_create, so
+         * it must be released here (see the "already resident" comment
+         * above). */
+        bz_quest_wc3_model_anim_free((bzQuestWc3ModelAnim_t *)model->meta.anim);
         return;
     }
     bzQuestWc3CacheKey_t key;
@@ -564,8 +583,16 @@ static void model_ready_cb(const bzQuestWc3Model_t *model, void *userdata) {
     void *handle = NULL;
     if (bz_quest_wc3_cache_acquire(&vk3->modelCache, &key, &handle)) {
         vk3->newModelUploadsThisFrame++;
+        /* Success: model_cache_create() copied `model->meta` (including the
+         * meta.anim pointer) into the new persistent cache entry by value -
+         * ownership of the arena is now that cache entry's, released by
+         * model_cache_destroy() on eviction/shutdown. Do not free here. */
     } else {
         BZ_QUEST_LOGE("bz_quest_vk_wc3: model '%s' GPU upload failed", model->meta.identity);
+        /* model_cache_create() failed before ever allocating a cache entry
+         * to transfer ownership into - this offering's arena is otherwise
+         * unowned and must be released here. */
+        bz_quest_wc3_model_anim_free((bzQuestWc3ModelAnim_t *)model->meta.anim);
     }
     vk3->pendingModel = NULL;
 }
@@ -598,6 +625,17 @@ static void texture_ready_cb(const char *identity, uint32_t width, uint32_t heig
     vk3->pendingTexturePixels = NULL;
 }
 
+/*
+ * Forward-declared here (defined later in this file, alongside draw_layer()/
+ * record_opaque()/record_blended() - its actual consumers - since it
+ * depends on types/helpers declared in between): computes this frame's
+ * authoritative per-(render item, geoset) bone palette and geoset alpha.
+ * Called once per frame from bz_quest_vk_wc3_capture_and_upload() below,
+ * never from record_opaque()/record_blended() (which run once per eye) -
+ * see this function's full doc comment at its definition.
+ */
+static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3RenderList_t *list);
+
 void bz_quest_vk_wc3_capture_and_upload(bzQuestVkWc3_t *vk3, bzQuestWc3RenderList_t *outRenderList) {
     vk3->newModelUploadsThisFrame = 0;
     vk3->newTextureUploadsThisFrame = 0;
@@ -607,6 +645,15 @@ void bz_quest_vk_wc3_capture_and_upload(bzQuestVkWc3_t *vk3, bzQuestWc3RenderLis
     callbacks.onTextureReady = texture_ready_cb;
     callbacks.textureUserdata = vk3;
     bz_quest_wc3_capture_frame(&callbacks, outRenderList);
+    /* Runs exactly once per frame here (not once per eye - see
+     * bz_quest_vk_wc3.h's paletteSlotsUsedThisFrame doc comment), after the
+     * model-cache upload pass above so every resident model's animation
+     * data is reachable via cache_find() for record_opaque()/
+     * record_blended() (called once per eye, later) to consume via
+     * s_paletteByteOffset/s_geosetAlpha - see build_frame_dynamic_
+     * material()'s own doc comment, defined further below in this file
+     * (forward-declared just above). */
+    build_frame_dynamic_material(vk3, outRenderList);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -677,15 +724,28 @@ static VkPipeline create_pipeline_variant(bzQuestVkWc3_t *vk3, uint32_t blendMod
     stages[1].pName = "main";
 
     VkVertexInputBindingDescription binding = {0, sizeof(bzQuestWc3Vertex_t), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attrs[2] = {
+    /* Bone index (location 2) is VK_FORMAT_R8G8B8A8_UINT (read as GLSL
+     * uvec4, unnormalized) and bone weight (location 3) is
+     * VK_FORMAT_R8G8B8A8_UNORM (read as GLSL vec4, hardware-normalized
+     * 0..255 -> 0.0..1.0) - this exactly reproduces the desktop engine's
+     * own vertex-attribute format for the same two fields:
+     * renderer/r_buffer.c:87-88's `glVertexAttribPointer(attrib_skin1, 4,
+     * GL_UNSIGNED_BYTE, GL_FALSE, ...)` (unnormalized) and
+     * `glVertexAttribPointer(attrib_boneWeight1, 4, GL_UNSIGNED_BYTE,
+     * GL_TRUE, ...)` (normalized) respectively - see warcraft_vert.vert's
+     * header comment for the matching skinning formula
+     * (renderer/r_shader.c:227-229). */
+    VkVertexInputAttributeDescription attrs[4] = {
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bzQuestWc3Vertex_t, position)},
         {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(bzQuestWc3Vertex_t, uv)},
+        {2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(bzQuestWc3Vertex_t, boneIndex)},
+        {3, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(bzQuestWc3Vertex_t, boneWeight)},
     };
     VkPipelineVertexInputStateCreateInfo vertexInput = {0};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInput.vertexBindingDescriptionCount = 1;
     vertexInput.pVertexBindingDescriptions = &binding;
-    vertexInput.vertexAttributeDescriptionCount = 2;
+    vertexInput.vertexAttributeDescriptionCount = 4;
     vertexInput.pVertexAttributeDescriptions = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {0};
@@ -786,6 +846,148 @@ static VkPipeline get_or_create_pipeline_variant(bzQuestVkWc3_t *vk3, uint32_t b
 }
 
 /* ---------------------------------------------------------------------- */
+/* Bone-palette dynamic-offset UBO (layer 5C GPU skinning)                 */
+/* ---------------------------------------------------------------------- */
+
+/* Creates out->paletteDescriptorSetLayout/Pool/Set, out->paletteBuffer/
+ * Memory (persistently mapped), and out->paletteSlotStride - see
+ * bzQuestVkWc3_t's paletteBuffer doc comment. Must run before pipeline
+ * layout creation (which references paletteDescriptorSetLayout). Slot 0 is
+ * written here, once, as BZ_QUEST_WC3_MAX_MATRIX_PALETTE identity matrices
+ * - the permanent fallback for static geometry / budget overflow (see
+ * BZ_QUEST_VK_WC3_PALETTE_SLOT_COUNT's doc comment). Fails loudly (never
+ * silently clamps) if the device's own minUniformBufferOffsetAlignment
+ * makes one slot exceed maxUniformBufferRange - that would mean this
+ * slice's fixed 128-mat4 palette size is not supported by this device at
+ * all, which no per-frame code path could work around. */
+static bool create_palette_resources(bzQuestVkWc3_t *out) {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(out->vk->physicalDevice, &props);
+    VkDeviceSize unaligned = (VkDeviceSize)BZ_QUEST_WC3_MAX_MATRIX_PALETTE * sizeof(float) * 16;
+    VkDeviceSize align = props.limits.minUniformBufferOffsetAlignment;
+    /* Round unaligned up to the next multiple of align (align is always a
+     * power of two per the Vulkan spec) - the same "round up to alignment"
+     * idiom used throughout this codebase's own buffer-packing code. */
+    VkDeviceSize slotStride = align > 0 ? ((unaligned + align - 1) / align) * align : unaligned;
+    if (slotStride > props.limits.maxUniformBufferRange) {
+        BZ_QUEST_LOGE("bz_quest_vk_wc3: one bone-palette slot (%llu bytes, aligned from %llu) "
+                      "exceeds this device's maxUniformBufferRange (%u) - cannot skin models",
+                      (unsigned long long)slotStride, (unsigned long long)unaligned,
+                      (uint32_t)props.limits.maxUniformBufferRange);
+        return false;
+    }
+    out->paletteSlotStride = slotStride;
+
+    VkDescriptorSetLayoutBinding binding = {0};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {0};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &binding;
+    if (vkCreateDescriptorSetLayout(out->vk->device, &layoutInfo, NULL,
+                                    &out->paletteDescriptorSetLayout) != VK_SUCCESS) {
+        BZ_QUEST_LOGE("bz_quest_vk_wc3: vkCreateDescriptorSetLayout (palette) failed");
+        return false;
+    }
+
+    {
+        /* Exactly one set, ever - unlike the per-texture pool, this set is
+         * reused across every draw via a different dynamic offset per
+         * vkCmdBindDescriptorSets call, so no per-model/per-texture
+         * allocation churn or descriptor-pool-headroom concern applies
+         * here (contrast BZ_QUEST_VK_WC3_TEXTURE_DESCRIPTOR_POOL_CAPACITY's
+         * doc comment in bz_quest_vk_wc3.h). */
+        VkDescriptorPoolSize poolSize = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1};
+        VkDescriptorPoolCreateInfo poolInfo = {0};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = 1;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        if (vkCreateDescriptorPool(out->vk->device, &poolInfo, NULL, &out->paletteDescriptorPool) !=
+            VK_SUCCESS) {
+            BZ_QUEST_LOGE("bz_quest_vk_wc3: vkCreateDescriptorPool (palette) failed");
+            return false;
+        }
+    }
+
+    {
+        VkBufferCreateInfo bufferInfo = {0};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = out->paletteSlotStride * BZ_QUEST_VK_WC3_PALETTE_SLOT_COUNT;
+        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(out->vk->device, &bufferInfo, NULL, &out->paletteBuffer) != VK_SUCCESS) {
+            BZ_QUEST_LOGE("bz_quest_vk_wc3: vkCreateBuffer (palette) failed");
+            return false;
+        }
+        VkMemoryRequirements memReq;
+        vkGetBufferMemoryRequirements(out->vk->device, out->paletteBuffer, &memReq);
+        uint32_t memoryTypeIndex = 0;
+        if (!find_memory_type(out->vk->physicalDevice, memReq.memoryTypeBits,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                              &memoryTypeIndex))
+            return false;
+        VkMemoryAllocateInfo allocInfo = {0};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memReq.size;
+        allocInfo.memoryTypeIndex = memoryTypeIndex;
+        if (vkAllocateMemory(out->vk->device, &allocInfo, NULL, &out->paletteMemory) != VK_SUCCESS) {
+            BZ_QUEST_LOGE("bz_quest_vk_wc3: vkAllocateMemory (palette) failed");
+            return false;
+        }
+        if (vkBindBufferMemory(out->vk->device, out->paletteBuffer, out->paletteMemory, 0) != VK_SUCCESS) {
+            BZ_QUEST_LOGE("bz_quest_vk_wc3: vkBindBufferMemory (palette) failed");
+            return false;
+        }
+        if (vkMapMemory(out->vk->device, out->paletteMemory, 0, bufferInfo.size, 0,
+                        &out->paletteMapped) != VK_SUCCESS) {
+            BZ_QUEST_LOGE("bz_quest_vk_wc3: vkMapMemory (palette) failed");
+            return false;
+        }
+    }
+
+    {
+        VkDescriptorSetAllocateInfo allocInfo = {0};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = out->paletteDescriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &out->paletteDescriptorSetLayout;
+        if (vkAllocateDescriptorSets(out->vk->device, &allocInfo, &out->paletteDescriptorSet) !=
+            VK_SUCCESS) {
+            BZ_QUEST_LOGE("bz_quest_vk_wc3: vkAllocateDescriptorSets (palette) failed");
+            return false;
+        }
+        VkDescriptorBufferInfo bufInfo = {out->paletteBuffer, 0, out->paletteSlotStride};
+        VkWriteDescriptorSet write = {0};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = out->paletteDescriptorSet;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        write.pBufferInfo = &bufInfo;
+        vkUpdateDescriptorSets(out->vk->device, 1, &write, 0, NULL);
+    }
+
+    /* Slot 0: BZ_QUEST_WC3_MAX_MATRIX_PALETTE identity mat4s, written once
+     * and never touched again - see BZ_QUEST_VK_WC3_PALETTE_SLOT_COUNT's
+     * doc comment. bz_quest_mat4_multiply's column-major layout means an
+     * identity mat4 is just 1.0 at v[0],v[5],v[10],v[15] and 0.0 elsewhere. */
+    {
+        float *identitySlot = (float *)out->paletteMapped;
+        memset(identitySlot, 0, (size_t)out->paletteSlotStride);
+        for (uint32_t b = 0; b < BZ_QUEST_WC3_MAX_MATRIX_PALETTE; b++) {
+            float *m = identitySlot + (size_t)b * 16;
+            m[0] = m[5] = m[10] = m[15] = 1.0f;
+        }
+    }
+
+    return true;
+}
+
+/* ---------------------------------------------------------------------- */
 /* Create / destroy                                                        */
 /* ---------------------------------------------------------------------- */
 
@@ -846,6 +1048,8 @@ bool bz_quest_vk_wc3_create(const bzQuestVk_t *vk, bzQuestVkWc3_t *out) {
         }
     }
 
+    if (!create_palette_resources(out)) goto fail;
+
     if (!create_shader_module(vk->device, g_bz_quest_warcraft_vert_spv, g_bz_quest_warcraft_vert_spv_len,
                               &out->vertexShader))
         goto fail;
@@ -866,10 +1070,16 @@ bool bz_quest_vk_wc3_create(const bzQuestVk_t *vk, bzQuestVkWc3_t *out) {
         ranges[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         ranges[1].offset = sizeof(float) * 16;
         ranges[1].size = sizeof(float) * 4;
+        /* Set 0 = per-texture combined-image-sampler (existing 5A layout),
+         * set 1 = the shared bone-palette dynamic-offset UBO (see
+         * bzQuestVkWc3_t's paletteDescriptorSetLayout doc comment) - both
+         * bound together by draw_layer()'s single vkCmdBindDescriptorSets
+         * call. */
+        VkDescriptorSetLayout setLayouts[2] = {out->descriptorSetLayout, out->paletteDescriptorSetLayout};
         VkPipelineLayoutCreateInfo layoutCreateInfo = {0};
         layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        layoutCreateInfo.setLayoutCount = 1;
-        layoutCreateInfo.pSetLayouts = &out->descriptorSetLayout;
+        layoutCreateInfo.setLayoutCount = 2;
+        layoutCreateInfo.pSetLayouts = setLayouts;
         layoutCreateInfo.pushConstantRangeCount = 2;
         layoutCreateInfo.pPushConstantRanges = ranges;
         if (vkCreatePipelineLayout(vk->device, &layoutCreateInfo, NULL, &out->pipelineLayout) !=
@@ -966,11 +1176,244 @@ static int compare_blended_draw_farthest_first(const void *a, const void *b) {
     return 0;
 }
 
+/* ---------------------------------------------------------------------- */
+/* Per-frame bone-palette / geoset-alpha build (layer 5C dynamic material) */
+/* ---------------------------------------------------------------------- */
+
+/* This file's own copy of capture.c's log-once idiom (see that file's
+ * LOG_ONCE macro) - deliberately file-local rather than shared, matching
+ * this project's existing convention of one dedup table per translation
+ * unit (each file's own diagnostics are about that file's own decisions). */
+enum { BZ_QUEST_VK_WC3_MAX_LOGGED_KEYS = 256 };
+static char s_vkWc3LoggedKeys[BZ_QUEST_VK_WC3_MAX_LOGGED_KEYS][BZ_QUEST_WC3_MAX_IDENTITY + 32];
+static uint32_t s_vkWc3LoggedKeyCount;
+
+static bool vk_wc3_log_once(const char *identity, const char *detail) {
+    char key[BZ_QUEST_WC3_MAX_IDENTITY + 32];
+    snprintf(key, sizeof(key), "%s|%s", identity, detail);
+    for (uint32_t i = 0; i < s_vkWc3LoggedKeyCount; i++)
+        if (strcmp(s_vkWc3LoggedKeys[i], key) == 0) return false;
+    if (s_vkWc3LoggedKeyCount < BZ_QUEST_VK_WC3_MAX_LOGGED_KEYS) {
+        strncpy(s_vkWc3LoggedKeys[s_vkWc3LoggedKeyCount], key, sizeof(s_vkWc3LoggedKeys[0]) - 1);
+        s_vkWc3LoggedKeyCount++;
+    }
+    return true;
+}
+#define VK_WC3_LOG_ONCE(identity, detail, ...)                                                       \
+    do {                                                                                             \
+        if (vk_wc3_log_once((identity), (detail))) fprintf(stderr, __VA_ARGS__);                     \
+    } while (0)
+
+/* Per-(render item, geoset) results of this frame's dynamic-material build,
+ * consumed by draw_layer() via record_opaque()/record_blended() below.
+ * paletteByteOffset is always a valid offset into vk3->paletteBuffer (slot 0
+ * - the identity palette - for a static model, a no-active-sequence entity,
+ * or a per-frame skinned-draw-budget overflow; see build_frame_dynamic_
+ * material()'s doc comment). geosetAlpha defaults to 1.0 (no modulation)
+ * under the same fallback conditions. Sized/indexed identically to
+ * s_blendedDraws above: one slot per (item index, geoset index) pair. */
+static VkDeviceSize s_paletteByteOffset[BZ_QUEST_WC3_MAX_RENDER_ITEMS][BZ_QUEST_WC3_MAX_GEOSETS_PER_MODEL];
+static float s_geosetAlpha[BZ_QUEST_WC3_MAX_RENDER_ITEMS][BZ_QUEST_WC3_MAX_GEOSETS_PER_MODEL];
+
+/* Pose-build scratch storage - too large for one stack frame (~2.6MB, see
+ * bz_quest_wc3_render.h's bzQuestWc3Model_t scratch-buffer size rationale,
+ * the same class of concern) - reused sequentially across items within one
+ * frame (this function is single-threaded, one item at a time). */
+static bzQuestWc3Node_t s_poseNodesScratch[BZ_QUEST_WC3_MAX_NODES_PER_MODEL];
+static float s_poseNodeMatricesScratch[BZ_QUEST_WC3_MAX_NODES_PER_MODEL][16];
+static float s_posePaletteScratch[BZ_QUEST_WC3_MAX_MATRIX_PALETTE][16];
+
+/* Converts one arena-backed, real-key-count bzQuestWc3StoredTrack_t into the
+ * pure module's fixed-size bzQuestWc3Track_t (see bz_quest_wc3_render.h's
+ * bzQuestWc3StoredTrack_t doc comment on why these are two different
+ * struct shapes for the same data). keyCount is clamped to
+ * BZ_QUEST_WC3_MAX_KEYS_PER_TRACK as defense-in-depth; the ABI itself
+ * already bounds every track to this same cap (see bz_quest_wc3_capture.c's
+ * build_model_anim() sizing pass), so this is never expected to truncate
+ * real data. */
+static void convert_stored_track(const bzQuestWc3StoredTrack_t *stored, bzQuestWc3Track_t *out) {
+    out->keyCount = stored->keyCount < BZ_QUEST_WC3_MAX_KEYS_PER_TRACK ? stored->keyCount
+                                                                       : BZ_QUEST_WC3_MAX_KEYS_PER_TRACK;
+    out->interp = stored->interp;
+    out->globalSequence = stored->globalSequence;
+    if (stored->vec3Keys)
+        for (uint32_t k = 0; k < out->keyCount; k++) out->vec3Keys[k] = stored->vec3Keys[k];
+    if (stored->quatKeys)
+        for (uint32_t k = 0; k < out->keyCount; k++) out->quatKeys[k] = stored->quatKeys[k];
+    if (stored->floatKeys)
+        for (uint32_t k = 0; k < out->keyCount; k++) out->floatKeys[k] = stored->floatKeys[k];
+}
+
+/* Finds the sequence whose [startMsec,endMsec) contains frameMsec, mirroring
+ * R_FindSequenceAtTime's own [start,end) contract exactly (see
+ * bz_quest_wc3_render.h's bzQuestWc3StoredSeqRange_t doc comment). Returns
+ * false (no active sequence) if none matches - callers must not call
+ * bz_quest_wc3_build_pose() in that case (its own doc comment). */
+static bool find_active_sequence(const bzQuestWc3ModelAnim_t *anim, uint32_t frameMsec,
+                                 uint32_t *outStartMsec, uint32_t *outEndMsec) {
+    for (uint32_t s = 0; s < anim->sequenceCount; s++) {
+        if (frameMsec >= anim->sequences[s].startMsec && frameMsec < anim->sequences[s].endMsec) {
+            *outStartMsec = anim->sequences[s].startMsec;
+            *outEndMsec = anim->sequences[s].endMsec;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Looks up one track's global-sequence duration, treating an out-of-range
+ * globalSequence index as BZ_QUEST_WC3_NO_GLOBAL_SEQUENCE's "0, unused"
+ * placeholder (bz_quest_wc3_resolve_track_interval only reads this value
+ * when track->globalSequence is itself in range, so an out-of-range index
+ * never reaches this fallback in practice - defense-in-depth only, same
+ * spirit as bz_quest_wc3_build_pose()'s own out-of-range handling). */
+static uint32_t global_seq_duration_for_track(const bzQuestWc3ModelAnim_t *anim, uint32_t globalSequence) {
+    if (globalSequence == BZ_QUEST_WC3_NO_GLOBAL_SEQUENCE || globalSequence >= anim->globalSeqDurationCount)
+        return 0;
+    return anim->globalSeqDurations[globalSequence];
+}
+
+/* The permanent identity-palette slot's byte offset (slot 0 - see
+ * BZ_QUEST_VK_WC3_PALETTE_SLOT_COUNT's doc comment and
+ * create_palette_resources()'s slot-0 write). */
+static VkDeviceSize palette_identity_slot_offset(void) { return 0; }
+
+/*
+ * Computes this frame's authoritative per-(render item, geoset) bone
+ * palette and geoset alpha, writing results into vk3->paletteMapped (skinned
+ * slots 1..N) and s_paletteByteOffset/s_geosetAlpha (the lookup tables
+ * record_opaque()/record_blended() read via draw_layer()). Must run once per
+ * frame (not once per eye - see bz_quest_vk_wc3.h's paletteSlotsUsedThisFrame
+ * doc comment), after the model cache upload pass so every resident model's
+ * bzQuestWc3ModelAnim_t* is reachable via cache_find(). For each item's each
+ * geoset:
+ *   - model->meta.anim == NULL (genuinely static model, no MDX animation
+ *     data at all - see bz_quest_wc3_capture.c's build_model_anim() "no
+ *     tracks anywhere" early-out): identity slot, alpha 1.0.
+ *   - No sequence contains item->frame (data/logic issue upstream - a valid
+ *     entity should always have an active sequence, e.g. "stand"): logged
+ *     once per model identity, identity slot, alpha 1.0 (bz_quest_wc3_
+ *     build_pose() must not be called without a resolved sequence interval -
+ *     its own doc comment - and sampling a real alpha track needs the same
+ *     interval, so this is the one case where even a `hasAlphaTrack==false`
+ *     geoset's otherwise-time-independent staticAlpha is skipped too, for a
+ *     single consistent "no authoritative time available" fallback).
+ *   - Skinned-draw budget (BZ_QUEST_VK_WC3_PALETTE_SLOT_COUNT - 1 slots)
+ *     exceeded: logged once per model identity, identity slot (never a
+ *     dropped/frozen draw - the geoset still draws, just unposed), real
+ *     geoset alpha still applied (alpha sampling is not slot-bounded).
+ */
+static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3RenderList_t *list) {
+    vk3->paletteSlotsUsedThisFrame = 0;
+    uint32_t renderClockMsec = bz_quest_wc3_render_clock_msec();
+
+    for (uint32_t i = 0; i < list->count; i++) {
+        const bzQuestWc3RenderItem_t *item = &list->items[i];
+        void *modelHandle = cache_find(&vk3->modelCache, item->modelIdentity);
+        if (!modelHandle) continue;
+        const bzQuestVkWc3Model_t *model = (const bzQuestVkWc3Model_t *)modelHandle;
+        const bzQuestWc3ModelAnim_t *anim = (const bzQuestWc3ModelAnim_t *)model->meta.anim;
+
+        if (!anim) {
+            for (uint32_t g = 0; g < model->meta.geosetCount; g++) {
+                s_paletteByteOffset[i][g] = palette_identity_slot_offset();
+                s_geosetAlpha[i][g] = 1.0f;
+            }
+            continue;
+        }
+
+        uint32_t seqStartMsec = 0, seqEndMsec = 0;
+        bool haveSequence = find_active_sequence(anim, item->frame, &seqStartMsec, &seqEndMsec);
+        if (!haveSequence) {
+            VK_WC3_LOG_ONCE(item->modelIdentity, "no-active-sequence",
+                            "bz_quest_vk_wc3: entity frame=%u matches no sequence in model '%s' - "
+                            "drawing with identity pose\n",
+                            item->frame, item->modelIdentity);
+            for (uint32_t g = 0; g < model->meta.geosetCount; g++) {
+                s_paletteByteOffset[i][g] = palette_identity_slot_offset();
+                s_geosetAlpha[i][g] = 1.0f;
+            }
+            continue;
+        }
+
+        uint32_t nodeCount = anim->nodeCount < BZ_QUEST_WC3_MAX_NODES_PER_MODEL
+                                 ? anim->nodeCount
+                                 : BZ_QUEST_WC3_MAX_NODES_PER_MODEL;
+        for (uint32_t n = 0; n < nodeCount; n++) {
+            const bzQuestWc3StoredNode_t *sn = &anim->nodes[n];
+            s_poseNodesScratch[n].parentIndex = sn->parentIndex;
+            s_poseNodesScratch[n].pivot = sn->pivot;
+            convert_stored_track(&sn->translation, &s_poseNodesScratch[n].translation);
+            convert_stored_track(&sn->rotation, &s_poseNodesScratch[n].rotation);
+            convert_stored_track(&sn->scale, &s_poseNodesScratch[n].scale);
+        }
+        bz_quest_wc3_build_pose(s_poseNodesScratch, nodeCount, seqStartMsec, seqEndMsec, item->frame,
+                                renderClockMsec, anim->globalSeqDurations, anim->globalSeqDurationCount,
+                                s_poseNodeMatricesScratch);
+
+        for (uint32_t g = 0; g < model->meta.geosetCount; g++) {
+            if (g >= anim->geosetAnimCount) {
+                s_paletteByteOffset[i][g] = palette_identity_slot_offset();
+                s_geosetAlpha[i][g] = 1.0f;
+                continue;
+            }
+            const bzQuestWc3StoredGeosetAnim_t *ga = &anim->geosetAnims[g];
+
+            float alpha = ga->staticAlpha;
+            if (ga->hasAlphaTrack) {
+                bzQuestWc3Track_t alphaTrack;
+                convert_stored_track(&ga->alphaTrack, &alphaTrack);
+                uint32_t gsd = global_seq_duration_for_track(anim, alphaTrack.globalSequence);
+                uint32_t intervalStart, intervalEnd, sampleTime;
+                bz_quest_wc3_resolve_track_interval(&alphaTrack, seqStartMsec, seqEndMsec, item->frame,
+                                                    renderClockMsec, gsd, &intervalStart, &intervalEnd,
+                                                    &sampleTime);
+                bz_quest_wc3_sample_float_track(&alphaTrack, intervalStart, intervalEnd, sampleTime,
+                                                ga->staticAlpha, &alpha);
+            }
+            s_geosetAlpha[i][g] = alpha;
+
+            if (ga->paletteNodeIndexCount == 0) {
+                s_paletteByteOffset[i][g] = palette_identity_slot_offset();
+                continue;
+            }
+            if (vk3->paletteSlotsUsedThisFrame >= BZ_QUEST_VK_WC3_PALETTE_SLOT_COUNT - 1) {
+                VK_WC3_LOG_ONCE(item->modelIdentity, "palette-budget-exceeded",
+                                "bz_quest_vk_wc3: more than %u skinned draws in one frame - "
+                                "some geosets will draw with an identity pose\n",
+                                (uint32_t)(BZ_QUEST_VK_WC3_PALETTE_SLOT_COUNT - 1));
+                s_paletteByteOffset[i][g] = palette_identity_slot_offset();
+                continue;
+            }
+            uint32_t slot = 1 + vk3->paletteSlotsUsedThisFrame++;
+            bz_quest_wc3_build_bone_palette(ga->paletteNodeIndices, ga->paletteNodeIndexCount,
+                                            s_poseNodeMatricesScratch, nodeCount, s_posePaletteScratch);
+            VkDeviceSize byteOffset = (VkDeviceSize)slot * vk3->paletteSlotStride;
+            memcpy((uint8_t *)vk3->paletteMapped + byteOffset, s_posePaletteScratch,
+                  sizeof(float) * 16 * BZ_QUEST_WC3_MAX_MATRIX_PALETTE);
+            s_paletteByteOffset[i][g] = byteOffset;
+        }
+    }
+}
+
 static void draw_layer(VkCommandBuffer cmd, bzQuestVkWc3_t *vk3, const bzQuestVkWc3Model_t *model,
                        const bzQuestWc3Geoset_t *geoset, const bzQuestWc3LayerDesc_t *layer,
-                       const float mvp[16]) {
+                       const bzQuestWc3RenderItem_t *item, const float mvp[16],
+                       VkDeviceSize paletteByteOffset, float geosetAlpha) {
     if (layer->unsupported) return; /* logged once already at capture time */
-    void *texHandle = cache_find(&vk3->textureCache, layer->textureIdentity);
+    /* Team-color/glow layers resolve their concrete texture from the DRAW's
+     * own render item (per-entity, per-team_color), never the model's own
+     * baked texture identity - see bzQuestWc3LayerDesc_t's teamColor/
+     * teamGlow doc comment and bzQuestWc3RenderItem_t's teamColorTexture
+     * Identity/teamGlowTextureIdentity doc comment. An empty identity here
+     * means team-texture resolution failed for this entity this frame
+     * (capture.c's BZ_TTA_RegisterTeamTexture() call site) - skip the draw,
+     * do not fall back to an unrelated texture. */
+    const char *textureIdentity = layer->textureIdentity;
+    if (layer->teamColor) textureIdentity = item->teamColorTextureIdentity;
+    else if (layer->teamGlow) textureIdentity = item->teamGlowTextureIdentity;
+    if (textureIdentity[0] == '\0') return;
+    void *texHandle = cache_find(&vk3->textureCache, textureIdentity);
     if (!texHandle) return; /* not yet uploaded - transient, picked up a future frame */
     const bzQuestVkWc3Texture_t *tex = (const bzQuestVkWc3Texture_t *)texHandle;
 
@@ -986,8 +1429,16 @@ static void draw_layer(VkCommandBuffer cmd, bzQuestVkWc3_t *vk3, const bzQuestVk
     if (pipeline == VK_NULL_HANDLE) return;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk3->pipelineLayout, 0, 1,
-                           &tex->descriptorSet, 0, NULL);
+    /* Set 0: this draw's texture (per-model/per-team-texture descriptor set,
+     * unchanged from 5A). Set 1: the shared bone-palette buffer (one
+     * descriptor set, reused every draw - see create_palette_resources()'s
+     * doc comment), addressed by a per-draw dynamic offset - this is the
+     * ONLY thing that varies per draw for this binding, so both sets are
+     * bound together in one call with a single dynamic offset for set 1. */
+    VkDescriptorSet sets[2] = {tex->descriptorSet, vk3->paletteDescriptorSet};
+    uint32_t dynamicOffset = (uint32_t)paletteByteOffset;
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk3->pipelineLayout, 0, 2, sets, 1,
+                           &dynamicOffset);
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &model->vertexBuffer, &offset);
     vkCmdBindIndexBuffer(cmd, model->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
@@ -995,8 +1446,12 @@ static void draw_layer(VkCommandBuffer cmd, bzQuestVkWc3_t *vk3, const bzQuestVk
                       mvp);
     /* alpha cutoff 0.5 only for BZ_TTA_BLEND_TRANSPARENT (alpha-key) - see
      * renderer/r_shader.c:308 and warcraft_vert.vert's push-constant doc
-     * comment; 0.0 for every other blend mode never discards. */
-    float materialParams[4] = {layer->alpha,
+     * comment; 0.0 for every other blend mode never discards. Geoset alpha
+     * (GEOA/KGAO) is folded into layer alpha here, CPU-side, matching
+     * MDLX_EvaluateGeosetColor()/MDLX_EvaluateLayerAlpha()'s own
+     * multiplicative combination (r_mdx_geoset.c) - no fragment shader
+     * change needed. */
+    float materialParams[4] = {layer->alpha * geosetAlpha,
                               layer->blendMode == BZ_QUEST_TTA_BLEND_TRANSPARENT ? 0.5f : 0.0f, 0.0f, 0.0f};
     vkCmdPushConstants(cmd, vk3->pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 16,
                       sizeof(float) * 4, materialParams);
@@ -1020,7 +1475,8 @@ void bz_quest_vk_wc3_record_opaque(bzQuestVkWc3_t *vk3, VkCommandBuffer cmd, con
                 const bzQuestWc3LayerDesc_t *layer = &geoset->layers[l];
                 if (layer->unsupported) continue;
                 if (layer->blendMode < BZ_QUEST_TTA_BLEND_ALPHA) {
-                    draw_layer(cmd, vk3, model, geoset, layer, mvp);
+                    draw_layer(cmd, vk3, model, geoset, layer, item, mvp, s_paletteByteOffset[i][g],
+                              s_geosetAlpha[i][g]);
                     continue;
                 }
                 if (s_blendedDrawCount >= sizeof(s_blendedDraws) / sizeof(s_blendedDraws[0])) continue;
@@ -1049,7 +1505,8 @@ void bz_quest_vk_wc3_record_blended(bzQuestVkWc3_t *vk3, VkCommandBuffer cmd, co
         const bzQuestWc3LayerDesc_t *layer = &geoset->layers[bd->layerIndex];
         float mvp[16];
         bz_quest_mat4_multiply(viewProj, item->world, mvp);
-        draw_layer(cmd, vk3, model, geoset, layer, mvp);
+        draw_layer(cmd, vk3, model, geoset, layer, item, mvp, s_paletteByteOffset[bd->itemIndex][bd->geosetIndex],
+                  s_geosetAlpha[bd->itemIndex][bd->geosetIndex]);
     }
 }
 
@@ -1162,5 +1619,17 @@ void bz_quest_vk_wc3_destroy(bzQuestVkWc3_t *vk3) {
     if (vk3->descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, vk3->descriptorPool, NULL);
     if (vk3->descriptorSetLayout != VK_NULL_HANDLE)
         vkDestroyDescriptorSetLayout(device, vk3->descriptorSetLayout, NULL);
+    /* Bone-palette resources (layer 5C) - reverse order of
+     * create_palette_resources(): unmap before freeing memory, destroy the
+     * buffer before the memory it's bound to, destroy the pool (which
+     * implicitly frees paletteDescriptorSet) before the layout it was
+     * allocated from. */
+    if (vk3->paletteMapped) vkUnmapMemory(device, vk3->paletteMemory);
+    if (vk3->paletteBuffer != VK_NULL_HANDLE) vkDestroyBuffer(device, vk3->paletteBuffer, NULL);
+    if (vk3->paletteMemory != VK_NULL_HANDLE) vkFreeMemory(device, vk3->paletteMemory, NULL);
+    if (vk3->paletteDescriptorPool != VK_NULL_HANDLE)
+        vkDestroyDescriptorPool(device, vk3->paletteDescriptorPool, NULL);
+    if (vk3->paletteDescriptorSetLayout != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(device, vk3->paletteDescriptorSetLayout, NULL);
     memset(vk3, 0, sizeof(*vk3));
 }

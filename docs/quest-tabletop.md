@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C
 
-This document tracks layers 5A/5B of a stacked Meta Quest port:
+This document tracks layers 5A/5B/5C of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -37,15 +37,23 @@ This document tracks layers 5A/5B of a stacked Meta Quest port:
   `bz_tabletop_assets.h` terrain ABI, Quest-local pure/capture/Vulkan modules,
   and one shared per-eye render pass interleaving terrain opaque -> model
   opaque -> terrain blended -> model blended.
+- **Layer 5C (this layer, `clancey-quest-model-animation`)**: adds
+  authoritative Warcraft III **model animation** on top of 5A's static
+  models — skeletal/vertex hierarchy, sequence/global-sequence pose
+  sampling, GPU (vertex-shader) skinning, and the dynamic material state
+  (geoset alpha, team color/glow layer selection) an animated unit/building/
+  doodad needs. See
+  "[Layer 5C: Warcraft III model animation](#layer-5c-warcraft-iii-model-animation-bz_quest_wc3_anim-bz_quest_wc3_capturec-bz_quest_vk_wc3c)"
+  below for full scope, ABI decision, ownership, and evidence.
 
-**These layers still do not render skeletal/sequence animation, fog of war,
-selection decals, particles/effects, command-card/HUD surfaces, and still do
-not poll gameplay input, play audio, or stage WC3 data onto the device.** See
+**These layers still do not render fog of war, selection decals, particles/
+effects, command-card/HUD surfaces, and still do not poll gameplay input,
+play audio, or stage WC3 data onto the device.** See
 [Current limitations](#current-limitations) and
 `bz_quest_host.c`'s compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by
 a `#error` until its real implementation lands) — `BZ_QUEST_ENABLE_ENGINE_START`
 and `BZ_QUEST_ENABLE_BRIDGE_SNAPSHOTS` were layer 4's two seams;
-`BZ_QUEST_ENABLE_WC3_RENDERER` is the one seam *this* layer replaces with a
+`BZ_QUEST_ENABLE_WC3_RENDERER` is the one seam *layer 5A* replaces with a
 real implementation (`BZ_QUEST_ENABLE_INPUT`, `BZ_QUEST_ENABLE_AUDIO`, and
 `BZ_QUEST_ENABLE_DATA_STAGING` remain `#error`-gated for a later layer).
 
@@ -1216,16 +1224,17 @@ variant rather than failing to draw.
 
 ### Supported vs. unsupported material behavior
 
-- **Supported**: `replaceable_id == 0` (direct/non-team texture) layers,
-  `BZ_TTA_PIXEL_RGBA8` format, `BZ_TTA_ORIGIN_TOP_LEFT` origin, up to
-  `BZ_QUEST_WC3_MAX_TEXTURE_DIM` (2048px) per axis / `BZ_QUEST_WC3_MAX_TEXTURE_BYTES`
-  (16MB) total.
+- **Supported**: `replaceable_id` 0 (direct/non-team texture), 1 (team
+  color), and 2 (team glow, layer 5C added 1/2 — see "Layer 5C: Warcraft
+  III model animation" above), `BZ_TTA_PIXEL_RGBA8` format,
+  `BZ_TTA_ORIGIN_TOP_LEFT` origin, up to `BZ_QUEST_WC3_MAX_TEXTURE_DIM`
+  (2048px) per axis / `BZ_QUEST_WC3_MAX_TEXTURE_BYTES` (16MB) total.
 - **Explicitly unsupported this slice** (each logged once per unique
   identity/detail via `bz_quest_wc3_capture.c`'s `LOG_ONCE`, the affected
   layer/geoset skipped — never silently demoted to another mode or
   substituted with a different texture):
-  - `replaceable_id` 1/2 (team color/team glow) and any per-entity texture
-    override — deferred to a later layer (`bz_quest_wc3_capture.h`'s "texture
+  - Any `replaceable_id` outside `{0,1,2}` (a per-entity image override) —
+    deferred to a later layer (`bz_quest_wc3_capture.h`'s "texture
     decode policy" comment).
   - Any texture in a pixel format other than RGBA8, or with an origin other
     than top-left.
@@ -1513,6 +1522,310 @@ helper (see the subsections above). The existing descriptor-pool headroom
 script now structurally checks the terrain texture descriptor pool's required
 `capacity + 1` spare slot too.
 
+## Layer 5C: Warcraft III model animation (`bz_quest_wc3_anim*`/`bz_quest_wc3_capture.c`/`bz_quest_vk_wc3.c`)
+
+Layer 5C adds authoritative **model animation** on top of 5A's static-model
+rendering: skeletal/vertex/geoset hierarchy, sequence and global-sequence
+pose sampling, GPU (vertex-shader) skinning, and the dynamic material state
+an animated unit/building/doodad needs (geoset visibility/alpha, team-color/
+glow layer selection carried over from 5A's per-entity resolution). Explicitly
+out of scope for this slice (each a real, logged gap, not an oversight - see
+"Supported vs. unsupported animated behavior" below): camera-facing billboard
+node override, texture-coordinate animation (TXAN) and material texture-ID
+keyframes (KMTF), particles/effects, fog of war, selection decals, command-
+card/HUD surfaces, gameplay input, audio, and data staging.
+
+### Authoritative animation-state flow
+
+Pose is derived **only** from data the authoritative snapshot/asset ABI
+already exposes for this entity/model this frame - never a Quest-invented
+wall clock:
+
+1. `bz_quest_wc3_capture.c`'s `build_model_anim()` decodes a model's
+   **immutable** animation data (node hierarchy/pivots, translation/
+   rotation/scale tracks, sequence `[start_msec,end_msec)` ranges, global-
+   sequence durations, per-geoset alpha tracks) once per model identity, via
+   a two-pass ABI walk (`BZ_TTAsset_NodeInfo()`/`BZ_TTAsset_NodeTrackInfo()`/
+   `BZ_TTAsset_SequenceInfo()`/`BZ_TTAsset_GlobalSequenceInfo()`/
+   `BZ_TTAsset_GeosetAnimInfo()` for sizing, then the matching `Copy*Keys()`
+   calls into one arena) - this is the SAME retained `bzTTAsset_t` 5A already
+   acquires for static geometry, so no extra asset acquire/release round trip
+   is introduced.
+2. Each frame, `bz_quest_vk_wc3.c`'s `build_frame_dynamic_material()` reads
+   the entity's own authoritative `bzTTEntity_t.frame` (msec) - the same
+   snapshot field 5A already threads through `bzQuestWc3RenderItem_t` -
+   and finds the active sequence by `[start_msec,end_msec)` matching
+   (`find_active_sequence()`), mirroring desktop's `R_FindSequenceAtTime`
+   exactly (see `bz_quest_wc3_anim.h`'s evidence comment). If no sequence
+   matches (a genuinely invalid/upstream data condition - a valid entity
+   always has an active sequence), the geoset falls back to an identity
+   palette and `staticAlpha`/1.0 rather than guessing a sequence, and this is
+   logged once per model identity (`"no-active-sequence"`).
+3. For a **global** sequence track (`bzTTTrackInfo_t.global_sequence !=
+   UINT32_MAX`), sampling instead uses `bz_quest_wc3_render_clock_msec()` -
+   a Quest-owned `CLOCK_MONOTONIC` render clock (never entity/sequence time,
+   never `CLOCK_REALTIME`) - modulo the global sequence's own duration, per
+   `bz_quest_wc3_anim.h`'s evidence comment (transcribed from
+   `r_mdx_anim.c:34-41`'s `tr.viewDef.time`/`SDL_GetTicks()` convention:
+   global sequences are a render-driven ambient loop, e.g. a banner
+   flapping, not gameplay-authoritative state - not a Quest invention).
+4. `bz_quest_wc3_build_pose()` (pure, `bz_quest_wc3_anim.c`) samples every
+   node's translation/rotation/scale track at the resolved time, builds each
+   node's pivot-relative local matrix, then composes global matrices down
+   the parent chain (`global = parent_global * local`, root nodes have no
+   parent). `bz_quest_wc3_build_bone_palette()` then maps each geoset's
+   resolved bone-palette node-index list (already node-index-remapped by the
+   ABI - see `BZ_TTAsset_CopyGeosetMatrixPalette`'s doc comment) into the
+   final per-geoset matrix palette the GPU consumes.
+5. The palette is written into the persistently-mapped bone-palette UBO and
+   bound via a per-draw dynamic offset; the vertex shader does the actual
+   skinning (see "GPU skinning" below) - the CPU never transforms a single
+   vertex.
+
+No step above samples wall-clock time for entity-driven (non-global)
+animation; the only clock read is the Quest render clock, and only for the
+global-sequence case the desktop renderer itself also drives from a
+render-side clock, not simulation time.
+
+### ABI decision: extended in place (v2 → v3), not tunneled
+
+Before writing any code, the existing v2 ABI
+(`platform/bridge/bz_tabletop_assets.h`/`.c`) was audited against every piece
+of data this slice's scope needs. It already exposed static geometry/
+materials (5A) and terrain (5B), but exposed **no** node hierarchy, keyframe
+tracks, sequence/global-sequence timing, or per-geoset alpha animation data
+at all - there was concrete evidence of a real gap, not a convenience
+preference, so the smallest possible versioned extension was added
+(`46e348f`, `BZ_TABLETOP_ASSETS_ABI_VERSION` 2u → 3u):
+
+- `bzTTSequenceInfo_t`/`BZ_TTAsset_SequenceInfo()` - name, `[start_msec,
+  end_msec)`, move speed, flags, rarity, sync point, bounds.
+- `bzTTNodeInfo_t`/`BZ_TTAsset_NodeInfo()` - name, raw MDX `object_id`/
+  `parent_id` (resolved to array indices by the ABI's own
+  `node_index_for_object_id()` before this slice ever sees them), flags
+  (unfiltered - see "billboarding" below), pivot, initial translation/
+  rotation (quaternion)/scale.
+- `bzTTTrackInfo_t`/`BZ_TTAsset_NodeTrackInfo()` + `BZ_TTAsset_CopyNode
+  TranslationKeys()`/`CopyNodeRotationKeys()`/`CopyNodeScaleKeys()` - key
+  count, interpolation type (`bzTTKeyInterp_t`, matches `MODELKEYTRACKTYPE`
+  exactly), global-sequence index (`UINT32_MAX` = none), and the actual
+  vec3/quaternion keyframe arrays (value + in/out tangents for HERMITE/
+  BEZIER).
+- `BZ_TTAsset_GlobalSequenceInfo()` - duration in msec, indexed by
+  `bzTTTrackInfo_t.global_sequence`.
+- `bzTTGeosetAnimInfo_t`/`BZ_TTAsset_GeosetAnimInfo()` +
+  `BZ_TTAsset_CopyGeosetAlphaKeys()` - per-geoset static alpha (used
+  verbatim when the geoset has no alpha track) or an animated float track,
+  plus the geoset's already node-index-remapped bone-palette node-index
+  list (`BZ_TTAsset_CopyGeosetMatrixPalette()`) and per-vertex skin weights
+  (`bzTTVertexSkin_t`/`BZ_TTAsset_CopyGeosetVertexSkin()`).
+
+Every accessor returns raw, POD, engine-agnostic data (msec/floats/quaternion
+components/plain index arrays) - **no Vulkan handle, no engine pointer, no
+Quest-specific type** crosses the ABI boundary, keeping the extension a true
+shared contract rather than a tunnel. The **producer** side
+(`games/warcraft-3/visionos/wc3_mdx_decode.c` - the single shared MDX decoder
+linked into both the visionOS app and this Quest build, despite its
+directory name; see `games/warcraft-3/game.mk`'s `test-bz-tabletop-assets`
+schema, which links it directly) was updated so both platforms decode from
+the same real MDX data with no divergent parsing. The version bump is
+enforced by `BZ_TTA_ERR_ABI_VERSION` and covered by `games/warcraft-3/tests/
+test_bz_tabletop_assets.c`'s compatibility/error tests against a purpose-
+built synthetic `rigged_anim` MDX fixture (`tools/mdxgen.c`) with a real bone
+hierarchy, keyframed tracks, a global sequence, and a geoset alpha track -
+these tests pass unchanged, confirming visionOS's existing static-model
+consumption path (which never reads the new node/track/geoset-anim
+accessors - grepped `WarcraftAssetAdapter.swift`, no reference) stays green
+against the extended ABI. **Quest's `bz_quest_wc3_capture.c` (this layer) is
+the first and only real *consumer* of the new animation accessors** -
+visionOS's own Swift rendering stack does not read them (its skeletal
+animation support was already confirmed non-functional/stub before this
+slice began, and fixing that is out of this Quest-focused task's scope); no
+Swift file was touched by this slice.
+
+### Immutable animation asset cache
+
+`bzQuestWc3ModelAnim_t` (`bz_quest_wc3_render.h`) is the Quest-owned,
+retained-handle cache of a model's immutable animation data: **one** heap
+arena backs every pointer field (nodes/sequences/global-sequence durations/
+geoset-anim tracks and every keyframe array they reference), sized to the
+model's *real* data by a first Info()-only sizing pass and filled by a
+second pass of real `Copy*()` calls straight into arena-relative addresses -
+one `malloc()`, one `free()`, no fixed worst-case over-allocation.
+`bz_quest_wc3_model_anim_free()` releases both in the correct order and is
+NULL-safe (a genuinely static/non-animated model has `meta.anim == NULL` and
+this is always a valid, cheap no-op).
+
+**Ownership-transfer bug found and fixed this slice**: `decode_model()`
+rebuilds a fresh `bzQuestWc3ModelAnim_t` arena on every call (it has no
+"already decoded" check of its own - see `bz_quest_wc3_capture.h`'s
+documented CPU-decode-recurs-every-frame trade-off, inherited from 5A), but
+`bz_quest_vk_wc3.c`'s `model_ready_cb()` only *moves* that pointer into the
+persistent GPU cache entry on a genuine cache **miss**; on every other path
+(cache hit, upload-budget deferral, create failure) the freshly-decoded arena
+was previously silently discarded with no `free()` at all - a real per-frame
+leak for every model touched after its first frame. Fixed by calling
+`bz_quest_wc3_model_anim_free(model->meta.anim)` on every one of those
+non-success paths, and by `model_cache_destroy()` freeing the *cached*
+entry's arena on eviction/shutdown. `platform/android/quest/scripts/
+test-wc3-bone-palette-layout.sh` structurally guards this contract (no host-
+buildable Vulkan cache is available to exercise it dynamically), and
+`test_bz_quest_wc3_render.c`'s `test_model_anim_free_null_is_a_no_op`/
+`test_model_anim_free_releases_arena_and_struct` host-cover the release
+function itself (NULL-safety and the real single-allocation free path).
+
+### GPU skinning: vertex-shader, not CPU
+
+Chosen because it is the **only** path the reviewed desktop renderer itself
+uses (`renderer/r_shader.c`/`renderer/r_buffer.c` - there is no CPU-skinning
+code path in this codebase to fall back to), and because every geoset -
+animated or static - always has a *resolved* bone-palette node-index list
+per the ABI's own guarantee (`BZ_TTAsset_CopyGeosetMatrixPalette`'s doc
+comment), so a static model's geoset just resolves to an all-identity
+palette: **one** shader/pipeline path draws both, with no separate static/
+skinned pipeline variant to keep in sync.
+
+- **Vertex attributes** (`bzQuestWc3Vertex_t`, `bz_quest_wc3_render.h`):
+  `boneIndex[4]` (`VK_FORMAT_R8G8B8A8_UINT` - raw, unnormalized bone
+  indices) and `boneWeight[4]` (`VK_FORMAT_R8G8B8A8_UNORM` - hardware-
+  normalized 0..255 → 0.0..1.0), matching the exact GL attribute formats
+  `renderer/r_buffer.c`'s `i_boneIndex1`/`i_boneWeight1` use
+  (`GL_UNSIGNED_BYTE`/`GL_FALSE` for the index, `GL_UNSIGNED_BYTE`/`GL_TRUE`
+  for the weight) - transcribed, not guessed.
+- **Skinning formula** (`shaders/warcraft_vert.vert`): `skinned +=
+  (uBonePalette.bones[inBoneIndex[i]] * pos4) * inBoneWeight[i]` for `i` in
+  `0..3`, no lookup-index offset (desktop's `uFirstBoneLookupIndex` is
+  always `0.0` for MDX geometry) - a per-vertex weighted sum of up to 4 bone
+  transforms, exactly the desktop formula.
+- **Bone-palette UBO** (`bz_quest_vk_wc3.c`'s `create_palette_resources()`):
+  one `VkDescriptorSetLayout` (set 1, binding 0,
+  `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`, vertex stage only), one
+  descriptor set allocated **once**, bound with a different dynamic offset
+  per draw - not one set per skinned draw. Backing storage is a single
+  `HOST_VISIBLE|HOST_COHERENT`, persistently-mapped `VkBuffer` (this data
+  changes every frame; a device-local buffer plus a staging round trip
+  would cost a second GPU copy for no benefit here, unlike the model/
+  texture data 5A uploads once and reuses for many frames).
+  `paletteSlotStride` is `BZ_QUEST_WC3_MAX_MATRIX_PALETTE` (128) mat4s
+  (8192 bytes) **rounded up to the device's own**
+  `VkPhysicalDeviceLimits::minUniformBufferOffsetAlignment` at `create()`
+  time (queried via `vkGetPhysicalDeviceProperties()`, never hardcoded),
+  and checked against `VkPhysicalDeviceLimits::maxUniformBufferRange` with
+  a **hard `create()` failure** (never a silent clamp) if the aligned
+  stride would exceed it. Slot 0 is permanently reserved as an all-identity
+  palette, written once at `create()` time; slots 1..
+  `BZ_QUEST_WC3_MAX_SKINNED_DRAWS_PER_FRAME` serve the frame's real skinned
+  draws, reset to unused at the top of every
+  `bz_quest_vk_wc3_capture_and_upload()` call. A geoset that overflows this
+  per-frame budget binds slot 0 (identity) and is logged once per model
+  identity (`"palette-budget-exceeded"`) - never silently frozen/dropped.
+- `build_frame_dynamic_material()` runs **exactly once per frame** (inside
+  `bz_quest_vk_wc3_capture_and_upload()`, after the model-cache upload pass
+  so newly-uploaded models are already resolvable), never once per eye -
+  a mistake made and corrected during this slice's implementation (see this
+  file's own doc comment on the forward-declaration/call-site history).
+
+`test-wc3-bone-palette-layout.sh` structurally guards every one of the
+bullet points above against silent regression (device-limit derivation, the
+"+1 identity slot" constant, the exact vertex attribute formats, the
+descriptor type, and the anim-arena ownership contract) directly from the
+checked-in source, since no NDK/Gradle/Vulkan device is available in this
+development environment to exercise `create_palette_resources()` /
+`build_frame_dynamic_material()` dynamically.
+
+### Supported vs. unsupported animated behavior
+
+| Behavior | Status |
+|---|---|
+| Skeletal hierarchy, translation/rotation/scale keyframes, all 4 interpolation modes (NONE/LINEAR/HERMITE/BEZIER) | Supported - `bz_quest_wc3_anim.c`, 26 host tests |
+| Sequence selection from authoritative `bzTTEntity_t.frame` | Supported |
+| Global sequences (render-clock-driven, wraps modulo duration+1) | Supported |
+| Non-looping clamp / before-first-key / past-last-key wraparound, missing tracks, out-of-range/cyclic parent indices | Supported - degrades to identity/root rather than hanging or crashing |
+| Per-geoset bone-palette resolution, static-model identity-palette fallback | Supported |
+| Geoset alpha animation (`GEOA`/`KGAO`, multiplicative with layer alpha) | Supported |
+| Team-color/glow texture selection per entity (carried over from 5A's per-entity resolved identities) | Supported |
+| Camera-facing billboard nodes (`MDLXNODE_Billboarded`, `r_mdx.h:49`) | **Not implemented.** A billboarded node still poses correctly via its normal parent-chain hierarchy transform (everything this slice claims), it just does not additionally face the viewer each frame - that needs this frame's view orientation threaded into pose building, which no authoritative snapshot/ABI field exposes. Logged once per model identity (`"node-billboard-unsupported"`), never silently dropped. |
+| Texture-coordinate animation (TXAN) / material texture-ID keyframes (KMTF) | **Not exposed by the ABI at all** - `platform/bridge/bz_tabletop_assets.h` has no TXAN/KMTF accessor of any kind, so there is nothing to detect or diagnose at runtime (unlike billboarding, where the raw flag *is* exposed but unused). This is a genuine ABI scope boundary, not a silently-ignored track: no evidence surfaced that any currently-scoped model requires it, so no ABI extension was added speculatively. |
+| Replaceable_id 1/2 (team color/glow) and per-entity image overrides for **static** (non-animated) layers | Same 5A scope boundary, unchanged - see "Supported vs. unsupported material behavior" above. |
+
+### Tests
+
+- `platform/android/quest/tests/test_bz_quest_wc3_anim.c` - 26 host tests for
+  the pure pose-math module: track sampling with/without a track present
+  (translation/scale/alpha defaults), all 4 interpolation modes against
+  hand-derived expected values, exact-key-hit, before-first-key clamp,
+  single-key hold, past-last-key wraparound (and the boundary case where the
+  first key sits exactly at the wrap interval start), quaternion slerp,
+  global-sequence-uses-render-clock vs. non-global-uses-entity-frame, node
+  local matrix (no tracks/translation-only/pivot-preserving rotation),
+  hierarchy composition (child inherits parent, root-alone, cyclic-parent
+  degrades to root rather than hanging, out-of-range parent treated as
+  root), and bone-palette mapping (including out-of-range node index
+  falling back to identity).
+- `games/warcraft-3/tests/test_bz_tabletop_assets.c` - ABI v3
+  compatibility/error tests against the `rigged_anim` synthetic MDX fixture
+  (real bone hierarchy, keyframed tracks, a global sequence, a geoset alpha
+  track), covering every new accessor's success and malformed/absent-data
+  paths.
+- `test_bz_quest_wc3_render.c`'s two new tests
+  (`test_model_anim_free_null_is_a_no_op`/
+  `test_model_anim_free_releases_arena_and_struct`) cover the anim-arena
+  release function's NULL-safety and real single-allocation free path.
+- `platform/android/quest/scripts/test-wc3-bone-palette-layout.sh`
+  (new this layer, wired into `make test`/`make quest` as
+  `test-quest-wc3-bone-palette-layout`) structurally guards the bone-palette
+  UBO layout, vertex attribute formats, descriptor type, and anim-arena
+  ownership contract described above - no host-buildable Vulkan device
+  exists in this environment to exercise `bz_quest_vk_wc3.c`'s device-limit
+  queries or descriptor/buffer creation dynamically, so (mirroring
+  `test-wc3-descriptor-pool-headroom.sh`'s established technique) this
+  script greps the real source for the specific properties those runtime
+  calls depend on.
+- Cache hit/miss, eviction, and shutdown/release for the *generic* GPU cache
+  machinery the anim-bearing model cache entry rides on top of are already
+  covered by `test_bz_quest_wc3_cache.c`'s 28 existing tests (unchanged this
+  layer - `bz_quest_wc3_cache.c` itself has no animation-specific logic, it
+  is a generic identity-keyed create/destroy cache reused as-is).
+  `bz_quest_wc3_capture.c` (the one impure, ABI-calling translation unit
+  that decodes animation data) has **no direct unit test**, matching the
+  pre-existing, reviewed 5A precedent documented in its own header comment
+  (`bz_quest_snapshot.c`'s same trade-off) - it is reviewed by inspection,
+  not a fake-ABI test harness, and its call sites into the pure/tested
+  `bz_quest_wc3_anim.c` module carry the actual sampling/hierarchy logic.
+- `make test-quest-host-tests`: 4040/4040 assertions (up from 4038/4038 at
+  the end of layer 5B; the delta is the two new
+  `test_bz_quest_wc3_render.c` anim-free tests - `bz_quest_wc3_anim.c`'s own
+  26 tests were added earlier in this same branch's development and are
+  already included in the 4038 baseline).
+
+### Acceptance gates (adds to "Hardware-only acceptance gates" above)
+
+Everything in "Hardware-only acceptance gates" above still applies
+unchanged; additionally, **none** of the following was verified against
+real retail Warcraft III animated model data or a physical device this
+session - do not report any of these as confirmed:
+
+- Whether a real animated MDX model (skeleton, keyframed sequences, a
+  global sequence, geoset alpha) actually decodes end to end through
+  `bz_quest_wc3_capture.c`'s `build_model_anim()` and produces a visually
+  correct pose on-device - only the synthetic `rigged_anim` mdxgen fixture
+  (via `test_bz_tabletop_assets.c`) and hand-derived pure-math test cases
+  (via `test_bz_quest_wc3_anim.c`) were exercised in this environment.
+- Whether `create_palette_resources()`'s device-limit queries
+  (`minUniformBufferOffsetAlignment`/`maxUniformBufferRange`) and the
+  bone-palette UBO/descriptor set actually succeed and bind correctly
+  against the real Adreno GPU driver Quest ships - only compiled
+  (`make quest-assemble-debug`) and structurally checked
+  (`test-wc3-bone-palette-layout.sh`), never executed against a runtime.
+- Real visual correctness of any animated model's pose, sequence timing,
+  team-color selection, or geoset alpha fade on real hardware - only
+  provable by a human wearing the headset with a real map and real staged
+  `War3.mpq`/`War3x.mpq` data loaded, neither of which was available here.
+- Per-frame CPU cost of `build_frame_dynamic_material()`'s pose-math re-run
+  for every touched model every frame (this slice does not cache poses
+  across frames, matching 5A's own documented "CPU decode recurs every
+  frame" trade-off for geometry) - untestable without a device to profile.
+
 ## Manifest requirements
 
 Unchanged from layer 2: `AndroidManifest.xml`'s NativeActivity metadata,
@@ -1554,16 +1867,18 @@ optional:
   fallback is explicit, not silent" above) — this was never observed
   rendering real Warcraft geometry on a live snapshot in this environment
   (see "Hardware/data-only acceptance procedure" below).
-- No terrain, no skeletal/sequence animation, no fog of war, no selection
-  decals, no particles/effects, no command-card/HUD surfaces — see "Layer
-  5A: static Warcraft III model rendering" above for the exact, deliberate
-  scope boundary.
+- No terrain (see "Layer 5B" instead), no fog of war, no selection decals,
+  no particles/effects, no command-card/HUD surfaces — see "Layer 5A" and
+  "Layer 5C" above for the exact, deliberate scope boundaries (skeletal/
+  sequence animation IS now supported — see "Layer 5C" above).
 - No lighting model at all (fully unlit shader) — see "Shader/pipeline"
   above for why this was a deliberate scope decision, not a bug.
-- Only `replaceable_id == 0` (direct/non-team) textures are supported —
-  team color/glow and per-entity texture overrides are logged once and
-  skipped, not substituted — see "Supported vs. unsupported material
-  behavior" above.
+- `replaceable_id 0` (direct/non-team), `1` (team color), and `2` (team
+  glow) textures are all supported (team color/glow added in layer 5C —
+  see "ABI decision"/"Supported vs. unsupported animated behavior" above);
+  any *other* replaceable_id (a per-entity image override) is still logged
+  once and skipped, not substituted — see "Supported vs. unsupported
+  material behavior" above.
 - Transparency ordering is per-entity (by world-translation distance to the
   eye), not per-triangle — see "Draw ordering / transparency" above.
 - No gameplay controller input reaches the engine (no `BZ_TabletopSubmit*`
@@ -1571,10 +1886,15 @@ optional:
 - No Vulkan multiview, MSAA, or fixed foveation (`XR_FB_foveation`) — see
   "Vulkan render pass/pipeline/targets" above for why this is an explicit,
   documented seam rather than an oversight.
-- The tabletop ABI was **not** widened — `bzTTSnapshot_t`/asset ABI v3 is
-  consumed as-is; no concrete evidence surfaced during this layer's
-  implementation that an essential datum for this layer's scope (static
-  geometry/material rendering) is missing from it.
+- The tabletop asset ABI **was** widened once, in layer 5C: `bzTTAsset_t`
+  went from v2 (layers 5A/5B's static geometry/materials + terrain) to v3
+  (node hierarchy/keyframe tracks/sequences/global sequences/geoset alpha),
+  after concrete evidence showed v2 exposed no animation data whatsoever —
+  see "ABI decision: extended in place (v2 → v3), not tunneled" above. No
+  further widening has occurred since; camera-facing billboarding and
+  texture-coordinate/material-ID animation (TXAN/KMTF) remain outside the
+  ABI's exposed surface — see "Layer 5C"'s "Supported vs. unsupported
+  animated behavior" table above.
 
 ### Hardware-only acceptance gates
 
@@ -1777,6 +2097,70 @@ device.
   visual correctness of any rendered model, and per-frame upload-budget
   tuning against a real map's data volume.
 
+### What *was* verified this session (layer 5C)
+
+- The ABI v2 → v3 extension in `platform/bridge/bz_tabletop_assets.h`/`.c`
+  and the shared MDX producer update in
+  `games/warcraft-3/visionos/wc3_mdx_decode.c` are exercised by
+  `test_bz_tabletop_assets.c`'s ABI compatibility tests (including the new
+  `rigged_anim` mdxgen fixture — a real, synthetically-generated skeletal
+  MDX with bones/keyframed translation-rotation-scale tracks, a global
+  sequence, and geoset alpha animation), and the pure pose-math module
+  `bz_quest_wc3_anim.c` passes 26 hand-derived host tests covering
+  hierarchy composition, all three interpolation modes (none/linear/
+  Hermite) and their endpoints, pivot transforms, global sequences,
+  missing-track fallback to the node's bind pose, and non-looping-sequence
+  clamping — all part of `make test-quest-host-tests`, now **4040/4040**
+  assertions (up from 3607/3607 at the end of layer 5B/5A's own session;
+  the delta is layer 5C's new/expanded modules).
+- `test_bz_quest_wc3_render.c` gained two new tests for
+  `bz_quest_wc3_model_anim_free()` (NULL-safety and real single-arena-
+  allocation release), and the pre-existing 5A/5B cache-eviction and
+  render-list tests continue to pass unchanged, confirming the animation
+  cache's arena-ownership model does not regress the base model/texture
+  GPU caches it shares eviction machinery with.
+- A new structural test script,
+  `platform/android/quest/scripts/test-wc3-bone-palette-layout.sh` (wired
+  into `make test-quest-wc3-bone-palette-layout`, and into both the `test`
+  and `quest` convenience targets in `build.mk`), greps the real
+  `bz_quest_vk_wc3.c`/`.h` and `warcraft_vert.vert` source for: the
+  device-limit-derived `paletteSlotStride` computation, the
+  `BZ_QUEST_VK_WC3_PALETTE_SLOT_COUNT = ...MAX_SKINNED_DRAWS_PER_FRAME + 1`
+  spare-slot constant (the same create-before-evict headroom pattern as
+  `test-wc3-descriptor-pool-headroom.sh` guards for the model/texture
+  caches), the exact bone-index (unnormalized `UINT`) and bone-weight
+  (normalized `UNORM`) vertex attribute formats, the
+  `UNIFORM_BUFFER_DYNAMIC` descriptor type used for the per-draw palette
+  offset, and the anim-arena free-on-every-non-success-path contract in
+  `model_ready_cb()`/`model_cache_destroy()`. This runs with no Vulkan
+  device present, so it is a compile-/source-shape regression guard, not a
+  substitute for on-device verification.
+- The full Gradle/CMake `assembleDebug` build succeeds end to end
+  (`JAVA_HOME` pointed at Temurin 17, NDK 27.2.12479018) with the modified
+  `bz_quest_wc3_anim.c`/`.h`, `bz_quest_wc3_capture.c`/`.h`,
+  `bz_quest_wc3_render.c`/`.h`, and `bz_quest_vk_wc3.c`/`.h`, and both
+  shaders (`warcraft_vert.vert` gained the bone-index/weight inputs and
+  palette UBO, `warcraft_frag.frag` gained team-color/glow blending)
+  compiling to valid embedded SPIR-V.
+- `scripts/verify-native-lib.sh` passes against that APK with **no change**
+  to the allow-listed `DT_NEEDED` set — layer 5C introduced zero new
+  shared-library dependencies (no new SDL2/desktop-GL/Apple-ObjC/VrApi
+  dependency entered the APK from the new animation/skinning code).
+- `make test-quest-source-sync`, `make test-quest-host-tests` (4040/4040,
+  see above), `make test-quest-bridge` (67/67, unchanged), and the full
+  repo-root `make test` all pass with no regressions (`421/421` in the
+  final UI test gate, and every other suite reporting its own unchanged
+  count — no `FAIL` anywhere in the full run).
+- `git diff --check clancey-clancey-quest-renderer-terrain...HEAD` reports
+  no whitespace errors.
+- **Not verified this session** — identical caveats to layer 5A/5B above,
+  plus the animation-specific gates listed in Layer 5C's own "Acceptance
+  gates" subsection: no real retail MDX skeletal data, no physical Quest
+  device, no on-device pose/team-color/geoset-alpha visual confirmation,
+  and no profiling of `build_frame_dynamic_material()`'s per-frame CPU
+  cost. Do not report any of these as confirmed until checked against real
+  hardware and real staged `War3.mpq`/`War3x.mpq` data.
+
 ## Related documents
 
 - [visionos-tabletop.md](visionos-tabletop.md) — the shared
@@ -1795,8 +2179,23 @@ device.
 - `platform/bridge/bz_tabletop_assets.h` — the ref-counted, POD-array
   Warcraft III asset ABI (`bzTTAsset_t`, geosets/vertices/indices/textures/
   materials) `bz_quest_wc3_capture.c` reads via `BZ_TTA_Acquire()`/
-  `BZ_TTA_Release()`, consumed as-is with no ABI widening in this layer —
-  see "Layer 5A: static Warcraft III model rendering" above.
+  `BZ_TTA_Release()`. Layer 5A consumed the ABI as-is (v2, no widening —
+  see "Layer 5A: static Warcraft III model rendering" above); layer 5C
+  extended it in place to v3 to expose node/track/sequence/global-sequence/
+  geoset-anim data — see "Layer 5C: Warcraft III model animation"'s "ABI
+  decision" subsection above for the exact accessor list and why tunneling
+  a Vulkan-specific/engine pointer through the ABI was rejected instead.
+- `games/warcraft-3/visionos/wc3_mdx_decode.c` — the single shared MDX
+  decoder (despite living under the `visionos/` directory, it is linked by
+  both the visionOS and Quest builds — see `games/warcraft-3/game.mk`) that
+  layer 5C updated to populate the new ABI v3 fields from real MDX chunk
+  data. VisionOS's own Swift consumer
+  (`platform/apple/visionos/tabletop/app/WarcraftAssetAdapter.swift`) was
+  **not** changed this layer and does not read any of the new accessors —
+  `bz_quest_wc3_capture.c` is the first and only real consumer of them;
+  visionOS animation rendering remains the pre-existing non-functional stub
+  it was before this layer, which is unchanged and out of this Quest-
+  focused task's scope to fix.
 - `WarcraftAssetAdapter.swift`, `WarcraftRenderDescriptors.swift`, and
   `WarcraftRenderMath.swift` (under
   `platform/apple/visionos/tabletop/app/`) — the reviewed visionOS

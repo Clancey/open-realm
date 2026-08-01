@@ -99,6 +99,17 @@ enum {
      * scene" contract, not a partial/corrupt draw). */
     BZ_QUEST_VK_WC3_MAX_NEW_MODEL_UPLOADS_PER_FRAME = 4,
     BZ_QUEST_VK_WC3_MAX_NEW_TEXTURE_UPLOADS_PER_FRAME = 8,
+    /* One extra slot beyond bz_quest_wc3_render.h's
+     * BZ_QUEST_WC3_MAX_SKINNED_DRAWS_PER_FRAME budget, permanently reserved
+     * for a single identity bone palette (slot 0) - see bz_quest_vk_wc3.c's
+     * "palette slot 0" comment. A geoset with no bzQuestWc3ModelAnim_t (a
+     * genuinely static model) or one that overflows the per-frame skinned-
+     * draw budget binds slot 0 (identity), reproducing the exact same
+     * `matrixPalette[i] = node_matrices[...]` / `Matrix4_identity()` fill
+     * r_mdx_geoset.c:348-361 already performs for an unused palette slot -
+     * so one GPU-skinning vertex shader draws both animated and static
+     * geometry uniformly, matching bzQuestWc3Vertex_t's own header comment. */
+    BZ_QUEST_VK_WC3_PALETTE_SLOT_COUNT = BZ_QUEST_WC3_MAX_SKINNED_DRAWS_PER_FRAME + 1,
 };
 
 typedef struct {
@@ -131,6 +142,42 @@ typedef struct bzQuestVkWc3_s {
     VkPipelineLayout pipelineLayout;
     VkShaderModule vertexShader;
     VkShaderModule fragmentShader;
+
+    /*
+     * Bone-palette dynamic-offset UBO (layer 5C GPU skinning) - set 1,
+     * binding 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, vertex stage
+     * only. Unlike the per-texture descriptor sets above (one set per
+     * cached texture, created/destroyed with the texture cache entry),
+     * this is a SINGLE descriptor set allocated once at create() and bound
+     * with a different dynamic offset per draw - see bz_quest_wc3_render.h's
+     * BZ_QUEST_WC3_MAX_SKINNED_DRAWS_PER_FRAME comment and this file's
+     * build_frame_dynamic_material()/draw_layer(). paletteBuffer is a single
+     * HOST_VISIBLE|HOST_COHERENT, persistently-mapped allocation (no
+     * staging round-trip - this data changes every frame, unlike the
+     * device-local model/texture data above, so host-visible direct-write
+     * is the appropriate choice, matching the task's "bounded per-frame
+     * updates" requirement without a second GPU copy per frame).
+     * paletteSlotStride is BZ_QUEST_WC3_MAX_MATRIX_PALETTE (128) mat4s
+     * (8192 bytes), rounded up to the device's own
+     * VkPhysicalDeviceLimits::minUniformBufferOffsetAlignment at create()
+     * time (never hardcoded - see bz_quest_vk_wc3_create()), and checked
+     * against VkPhysicalDeviceLimits::maxUniformBufferRange so a single
+     * dynamic-offset bind's range can never exceed what the device
+     * guarantees to support.
+     */
+    VkDescriptorSetLayout paletteDescriptorSetLayout;
+    VkDescriptorPool paletteDescriptorPool;
+    VkDescriptorSet paletteDescriptorSet;
+    VkBuffer paletteBuffer;
+    VkDeviceMemory paletteMemory;
+    void *paletteMapped;
+    VkDeviceSize paletteSlotStride;
+    /* Bounded by BZ_QUEST_WC3_MAX_SKINNED_DRAWS_PER_FRAME (see
+     * build_frame_dynamic_material()'s doc comment) - reset to 0 at the top of
+     * every bz_quest_vk_wc3_capture_and_upload() call. Slot 0 is never
+     * counted here (permanently reserved identity - see this struct's
+     * paletteBuffer comment); real per-frame slots start at 1. */
+    uint32_t paletteSlotsUsedThisFrame;
 
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingMemory;

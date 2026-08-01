@@ -47,6 +47,36 @@ static void test_vec3_scale_track_no_track_yields_one(void) {
     ASSERT_EQ_FLOAT(out.z, 1.0f, 0.0001f);
 }
 
+static void test_float_track_no_track_yields_caller_default(void) {
+    bzQuestWc3Track_t track;
+    memset(&track, 0, sizeof(track));
+    float out = -1.0f;
+    bz_quest_wc3_sample_float_track(&track, 0, 1000, 500, 0.75f, &out);
+    /* Geoset alpha's "no track" fallback is the ABI's own static_alpha value,
+     * not a hardcoded 0/1 - see bz_quest_wc3_capture.c and
+     * bzTTGeosetAnimInfo_t::static_alpha. */
+    ASSERT_EQ_FLOAT(out, 0.75f, 0.0001f);
+}
+
+static void test_float_track_linear_midpoint(void) {
+    bzQuestWc3FloatKey_t keys[2] = {
+        {0, 0.0f, 0.0f, 0.0f},
+        {1000, 1.0f, 0.0f, 0.0f},
+    };
+    bzQuestWc3Track_t track;
+    memset(&track, 0, sizeof(track));
+    track.interp = BZ_QUEST_WC3_INTERP_LINEAR;
+    track.globalSequence = BZ_QUEST_WC3_NO_GLOBAL_SEQUENCE;
+    track.keyCount = 2;
+    track.floatKeys[0] = keys[0];
+    track.floatKeys[1] = keys[1];
+    float out = -1.0f;
+    bz_quest_wc3_sample_float_track(&track, 0, 1000, 250, 1.0f, &out);
+    /* t = 250/1000 = 0.25 -> lerp(0,1,0.25) = 0.25, same formula already
+     * verified by test_vec3_linear_midpoint above, just one component. */
+    ASSERT_EQ_FLOAT(out, 0.25f, 0.0001f);
+}
+
 static void test_vec3_linear_midpoint(void) {
     bzQuestWc3Vec3Key_t keys[2] = {
         {0, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
@@ -398,6 +428,8 @@ static void test_bone_palette_out_of_range_node_index_is_identity(void) {
 void run_bz_quest_wc3_anim_tests(void) {
     RUN_TEST(test_vec3_track_no_track_yields_zero);
     RUN_TEST(test_vec3_scale_track_no_track_yields_one);
+    RUN_TEST(test_float_track_no_track_yields_caller_default);
+    RUN_TEST(test_float_track_linear_midpoint);
     RUN_TEST(test_vec3_linear_midpoint);
     RUN_TEST(test_vec3_exact_key_hit_returns_key_verbatim);
     RUN_TEST(test_vec3_none_interp_holds_left_value);

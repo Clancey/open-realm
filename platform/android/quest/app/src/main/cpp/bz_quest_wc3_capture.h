@@ -37,18 +37,22 @@
  * a later layer can add a cross-module "already GPU-cached" query once
  * profiling on real hardware justifies the extra complexity.
  *
- * -- Texture decode policy (same trade-off, applied to replaceable_id 0) --
- * Only replaceable_id 0 (direct/non-team texture, see
+ * -- Texture decode policy (same trade-off, applied to replaceable_id 0/1/2) --
+ * replaceable_id 0 (direct/non-team texture, see
  * platform/bridge/bz_tabletop_assets.h's BZ_TTA_ModelTextureInfo comment)
- * is supported this slice. replaceable_id 1/2 (team color/glow - resolved
- * via BZ_TTA_RegisterTeamTexture(), see LiveTabletopTransport.swift:281-295)
- * and any per-entity override image (replaceable_id outside {0,1,2},
- * resolved via entity.metadata.image + BZ_TTA_ASSET_IMAGE at CS_IMAGES,
- * LiveTabletopTransport.swift:267-280) are deliberately out of scope for
- * this slice - logged once per unique (model identity, layer index), the
- * layer is skipped (not drawn with a substituted texture), never silently
- * demoted. This is the same category of scoped exclusion as this slice's
- * documented exclusion of skeletal animation/particles/HUD/etc., not a bug.
+ * and 1/2 (team color/team glow, resolved via BZ_TTA_RegisterTeamTexture()
+ * per LiveTabletopTransport.swift:281-295 - added in layer 5C so animated
+ * team-colored units/buildings render correctly, see
+ * bz_quest_wc3_capture_frame()'s per-entity team texture resolution) are
+ * supported. Any per-
+ * entity override image (replaceable_id outside {0,1,2}, resolved via
+ * entity.metadata.image + BZ_TTA_ASSET_IMAGE at CS_IMAGES,
+ * LiveTabletopTransport.swift:267-280) remains deliberately out of scope -
+ * logged once per unique (model identity, layer index), the layer is
+ * skipped (not drawn with a substituted texture), never silently demoted.
+ * This is the same category of scoped exclusion as this project's
+ * documented exclusion of billboarding/TXAN/KMTF/particles/HUD/etc. (see
+ * docs/quest-tabletop.md's "Layer 5C" section), not a bug.
  */
 #ifndef BZ_QUEST_WC3_CAPTURE_H
 #define BZ_QUEST_WC3_CAPTURE_H
@@ -129,6 +133,19 @@ typedef struct {
  */
 void bz_quest_wc3_capture_frame(const bzQuestWc3CaptureCallbacks_t *callbacks,
                                 bzQuestWc3RenderList_t *outRenderList);
+
+/*
+ * Returns a Quest-owned monotonic render-clock value in milliseconds, for
+ * global-sequence sampling only (see bz_quest_wc3_anim.h's header comment
+ * on why global sequences deliberately sample a render clock rather than
+ * entity/sequence time - the exact desktop analog of `tr.viewDef.time` /
+ * `SDL_GetTicks()`, r_mdx_anim.c:34-41). Backed by CLOCK_MONOTONIC (never
+ * CLOCK_REALTIME, which can jump backward/forward on wall-clock changes and
+ * would corrupt the modulo-duration wraparound this value feeds into). The
+ * absolute epoch is irrelevant - only the msec delta across frames matters,
+ * exactly as desktop's own free-running tick counter never resets mid-game.
+ */
+uint32_t bz_quest_wc3_render_clock_msec(void);
 
 #ifdef __cplusplus
 }

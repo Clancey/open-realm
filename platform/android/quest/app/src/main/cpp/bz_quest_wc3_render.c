@@ -4,6 +4,7 @@
 #include "bz_quest_wc3_render.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "bz_quest_pure.h"
@@ -85,9 +86,20 @@ void bz_quest_wc3_build_render_list(const bzQuestWc3EntityInput_t *entities, uin
         bzQuestWc3RenderItem_t *item = &outList->items[outList->count++];
         memcpy(item->modelIdentity, entity->modelIdentity, sizeof(item->modelIdentity));
         bz_quest_wc3_build_world_matrix(entity, item->world);
+        item->frame = entity->frame;
+        memcpy(item->teamColorTextureIdentity, entity->teamColorTextureIdentity,
+              sizeof(item->teamColorTextureIdentity));
+        memcpy(item->teamGlowTextureIdentity, entity->teamGlowTextureIdentity,
+              sizeof(item->teamGlowTextureIdentity));
     }
 }
 
 bool bz_quest_wc3_identity_equal(const char *a, const char *b) {
     return strncmp(a, b, BZ_QUEST_WC3_MAX_IDENTITY) == 0;
+}
+
+void bz_quest_wc3_model_anim_free(bzQuestWc3ModelAnim_t *anim) {
+    if (!anim) return;
+    free(anim->arena);
+    free(anim);
 }

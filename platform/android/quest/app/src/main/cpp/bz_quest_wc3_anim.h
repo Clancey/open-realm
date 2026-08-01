@@ -143,6 +143,12 @@ typedef struct {
     uint32_t globalSequence; /* BZ_QUEST_WC3_NO_GLOBAL_SEQUENCE, or a global-sequence-durations[] index */
     bzQuestWc3Vec3Key_t vec3Keys[BZ_QUEST_WC3_MAX_KEYS_PER_TRACK];
     bzQuestWc3QuatKey_t quatKeys[BZ_QUEST_WC3_MAX_KEYS_PER_TRACK];
+    /* Scalar tracks (geoset alpha - GEOA/KGAO) reuse this same struct rather
+     * than a dedicated FloatTrack_t type, since the interval-resolution
+     * function (bz_quest_wc3_resolve_track_interval) is channel-agnostic
+     * (only reads keyCount/interp/globalSequence) - see
+     * bz_quest_wc3_sample_float_track() below. */
+    bzQuestWc3FloatKey_t floatKeys[BZ_QUEST_WC3_MAX_KEYS_PER_TRACK];
 } bzQuestWc3Track_t;
 
 /* One MDX node (bone/helper/attachment/etc, any object with a pivot).
@@ -187,6 +193,19 @@ void bz_quest_wc3_sample_vec3_track_scale(const bzQuestWc3Track_t *track, uint32
 void bz_quest_wc3_sample_quat_track(const bzQuestWc3Track_t *track, uint32_t intervalStartMsec,
                                     uint32_t intervalEndMsec, uint32_t sampleTimeMsec,
                                     bzQuestWc3Quat_t *outValue);
+
+/*
+ * Samples one scalar (geoset alpha) track. `track->keyCount == 0` yields
+ * `defaultValue` verbatim (the caller passes bzTTGeosetAnimInfo_t's own
+ * static_alpha for that case - see bz_quest_wc3_capture.c; unlike
+ * translation/rotation/scale, a "no track" scalar has no single universal
+ * rest value, so this function takes the default explicitly rather than
+ * hardcoding one). Matches MDLX_GetModelKeytrackValue exactly, same as the
+ * vec3/quat sample functions above.
+ */
+void bz_quest_wc3_sample_float_track(const bzQuestWc3Track_t *track, uint32_t intervalStartMsec,
+                                     uint32_t intervalEndMsec, uint32_t sampleTimeMsec,
+                                     float defaultValue, float *outValue);
 
 /*
  * Resolves the [intervalStart,intervalEnd] and sampleTime a track must be

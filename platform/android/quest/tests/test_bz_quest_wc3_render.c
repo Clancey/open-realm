@@ -4,6 +4,7 @@
  * covers a normal path and its inverse/overflow path, per AGENTS.md's test
  * discipline.
  */
+#include <stdlib.h>
 #include <string.h>
 
 #include "bz_quest_wc3_render.h"
@@ -295,6 +296,35 @@ static void test_identity_equal_rejects_different_strings(void) {
                                         "units/human/knight/knight.mdx"));
 }
 
+/* ------------------------------------------------------------------ */
+/* bz_quest_wc3_model_anim_free - layer 5C anim-arena release          */
+/* ------------------------------------------------------------------ */
+
+/* NULL-safety: bz_quest_wc3_capture.c's model_ready_cb() calls this
+ * unconditionally on every non-success path (some of which have never
+ * allocated an anim arena at all, e.g. a static/non-animated model) - a
+ * missing NULL guard here would crash the very first static model drawn. */
+static void test_model_anim_free_null_is_a_no_op(void) {
+    bz_quest_wc3_model_anim_free(NULL); /* must not crash */
+}
+
+/* Hit path: a real single-allocation arena (mirroring
+ * bz_quest_wc3_capture.c's two-pass build_model_anim() - one malloc() sized
+ * to the model's real data, with every pointer field aliasing into it) must
+ * release both the arena and the struct itself without leaking or double-
+ * freeing either. Run under a plain malloc/free pair here (no ASan in this
+ * host harness), but the shape mirrors production exactly: `arena` is the
+ * only owned allocation besides the bzQuestWc3ModelAnim_t struct itself. */
+static void test_model_anim_free_releases_arena_and_struct(void) {
+    bzQuestWc3ModelAnim_t *anim = malloc(sizeof(*anim));
+    ASSERT(anim != NULL);
+    memset(anim, 0, sizeof(*anim));
+    anim->arena = malloc(64);
+    ASSERT(anim->arena != NULL);
+    anim->nodes = (const bzQuestWc3StoredNode_t *)anim->arena; /* aliases the arena, not separately owned */
+    bz_quest_wc3_model_anim_free(anim); /* frees anim->arena then anim - no separate free(anim->nodes) needed */
+}
+
 void run_bz_quest_wc3_render_tests(void) {
     RUN_TEST(test_position_swaps_y_and_z);
     RUN_TEST(test_zero_heading_yields_identity_rotation);
@@ -313,4 +343,6 @@ void run_bz_quest_wc3_render_tests(void) {
     RUN_TEST(test_render_list_rewrites_stale_state);
     RUN_TEST(test_identity_equal_matches_identical_strings);
     RUN_TEST(test_identity_equal_rejects_different_strings);
+    RUN_TEST(test_model_anim_free_null_is_a_no_op);
+    RUN_TEST(test_model_anim_free_releases_arena_and_struct);
 }
