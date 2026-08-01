@@ -219,6 +219,7 @@ enum WarcraftSceneCoordinateSpace: String, Codable, Equatable, Sendable {
 struct WarcraftSceneDescriptor: Codable, Equatable, Sendable {
     var generation: UInt64
     var coordinateSpace: WarcraftSceneCoordinateSpace
+    var terrainKey: String?
     var terrain: WarcraftTerrainDescriptor?
     var fog: WarcraftFogDescriptor?
     var entities: [WarcraftEntityDescriptor]
@@ -284,14 +285,23 @@ actor TabletopSnapshotMailbox {
 actor WarcraftRenderPipeline {
     private let provider: any WarcraftRenderDescriptorProvider
     private var generation: UInt64?
+    private var terrainCache = WarcraftTerrainChunkCache()
 
     init(provider: any WarcraftRenderDescriptorProvider) { self.provider = provider }
 
-    func reset() { generation = nil }
+    func reset() { generation = nil; terrainCache.reset() }
 
     func prepare(_ snapshot: TabletopSnapshot) throws -> WarcraftPreparedSnapshot? {
         guard generation != snapshot.generation else { return nil }
-        let render = try WarcraftSceneBuilder.build(provider.scene(for: snapshot))
+        let scene = try provider.scene(for: snapshot)
+        let chunks: [WarcraftTerrainChunkDescriptor]
+        if let cached = terrainCache.chunks(for: scene.terrainKey) {
+            chunks = cached
+        } else {
+            chunks = try scene.terrain.map(WarcraftTerrainChunkBuilder.build) ?? []
+            terrainCache.insert(chunks, for: scene.terrainKey)
+        }
+        let render = try WarcraftSceneBuilder.build(scene, terrainChunks: chunks)
         generation = snapshot.generation
         return WarcraftPreparedSnapshot(snapshot: snapshot, render: render)
     }

@@ -34,7 +34,8 @@ struct FixtureWarcraftRenderProvider: WarcraftRenderDescriptorProvider {
         }
         return WarcraftSceneDescriptor(
             generation: snapshot.generation, coordinateSpace: .terrainGrid,
-            terrain: terrain, fog: Self.fog(generation: snapshot.generation), entities: entities,
+            terrainKey: "fixture-terrain-64x64-v1", terrain: terrain,
+            fog: Self.fog(generation: snapshot.generation), entities: entities,
             diagnostics: ["Fixture descriptors are test-only; no MPQ art is represented."])
     }
 
@@ -193,8 +194,8 @@ struct ProductionWarcraftRenderProvider: WarcraftRenderDescriptorProvider {
                 })
         }
         return WarcraftSceneDescriptor(
-            generation: snapshot.generation, coordinateSpace: .world, terrain: assets?.terrain, fog: fog,
-            entities: entities,
+            generation: snapshot.generation, coordinateSpace: .world, terrainKey: assets?.terrainKey,
+            terrain: assets?.terrain, fog: fog, entities: entities,
             diagnostics: (assets?.diagnostics ?? [
                 "Production snapshot has no copied asset descriptors; explicit placeholders are active.",
             ]) + (assets?.terrain == nil && !entities.isEmpty ? [

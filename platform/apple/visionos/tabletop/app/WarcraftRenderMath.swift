@@ -468,9 +468,27 @@ enum WarcraftPlaceholder {
         materials: [material], sequences: [])
 }
 
+/* Terrain is immutable for a published provider identity, so generations share its expanded meshes. */
+struct WarcraftTerrainChunkCache {
+    private var entry: (key: String, chunks: [WarcraftTerrainChunkDescriptor])?
+
+    mutating func chunks(for key: String?) -> [WarcraftTerrainChunkDescriptor]? {
+        guard let key, entry?.key == key else { return nil }
+        return entry?.chunks
+    }
+
+    mutating func insert(_ chunks: [WarcraftTerrainChunkDescriptor], for key: String?) {
+        entry = key.map { ($0, chunks) }
+    }
+
+    mutating func reset() { entry = nil }
+}
+
 enum WarcraftSceneBuilder {
-    static func build(_ scene: WarcraftSceneDescriptor) throws -> WarcraftRenderSnapshot {
-        let chunks = try scene.terrain.map(WarcraftTerrainChunkBuilder.build) ?? []
+    static func build(_ scene: WarcraftSceneDescriptor,
+                      terrainChunks: [WarcraftTerrainChunkDescriptor]? = nil) throws
+        -> WarcraftRenderSnapshot {
+        let chunks = try terrainChunks ?? scene.terrain.map(WarcraftTerrainChunkBuilder.build) ?? []
         let fog = try scene.fog.map { try WarcraftFogBuilder.build($0, terrain: scene.terrain) }
         var diagnostics = scene.diagnostics
         let entities = try scene.entities.map { entity -> WarcraftRenderEntityDescriptor in

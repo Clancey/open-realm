@@ -141,6 +141,13 @@ metadata without committing archives or generated artifacts.
 - Initial and stable summaries must keep cache misses unchanged while hits
   increase. Same-generation Swift reconciliation performs no chunk, fog,
   entity, decode, or disk work.
+- New transport generations reuse production asset descriptors while map,
+  terrain publication, and entity model/image/class/player identities remain
+  unchanged. Expanded 32x32 terrain meshes are likewise reused by terrain
+  publication key; both caches reset with the native session.
+- Team-color, team-glow, and entity-skin material variants share the base
+  configstring model's immutable vertex/index buffers instead of retaining a
+  second geometry copy.
 - C and Swift tests cover cache miss/hit/reset, retained asset/terrain lifetime,
   concurrent shutdown/publication, and immutable copied-value reuse.
 
@@ -167,6 +174,10 @@ snapshot before entering `playing`, cancels and joins workers on stop, rejects
 stale epochs, and starts retries/next maps with a fresh bridge instance.
 Snapshots contain copied values only; retained C snapshots and asset handles
 are released before RealityKit presentation.
+
+The launcher initializes its source segment from the persisted selected map and
+resynchronizes it after edition changes, so every map Picker selection has a
+visible matching tag before SwiftUI evaluates the control.
 
 Commands are typed (`select`, smart entity/point, target point, button,
 cancel), include session/generation identity, and are validated before crossing

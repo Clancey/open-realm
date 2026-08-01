@@ -130,6 +130,7 @@ final class TabletopSessionModel: ObservableObject {
             try saveSelection(map)
         } catch {
             await transport.stop()
+            await renderPipeline.reset()
             phase = .idle
             productState = .failed("Loading \(map.title) failed: \(error)")
             throw error
@@ -228,6 +229,7 @@ final class TabletopSessionModel: ObservableObject {
         processingTask = nil
         await snapshotMailbox.reset()
         await preparedMailbox.reset()
+        await renderPipeline.reset()
         if let terminalMessage {
             errorMessage = terminalMessage
             FileHandle.standardError.write(Data("OpenRealmTabletop: \(terminalMessage)\n".utf8))
@@ -387,6 +389,7 @@ final class TabletopSessionModel: ObservableObject {
         snapshotDiagnostic = nil
         guard pollingTask != nil || processingTask != nil else {
             await transport.stop()
+            await renderPipeline.reset()
             phase = .idle
             return
         }
@@ -398,6 +401,7 @@ final class TabletopSessionModel: ObservableObject {
         await processing?.value
         pollingTask = nil
         processingTask = nil
+        await renderPipeline.reset()
         await snapshotMailbox.reset()
         await preparedMailbox.reset()
         phase = .idle

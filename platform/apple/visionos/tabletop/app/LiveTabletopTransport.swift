@@ -2,10 +2,12 @@ import OpenRealmTabletopBridge
 
 private final class LiveWarcraftCopyCache {
     var values = WarcraftExportedAssetCache(modelLimit: 256)
+    var production = WarcraftProductionAssetCache()
     var teamImages: [UInt64: (image: WarcraftExportedImage, contentKey: String)] = [:]
 
     func reset() {
         values.reset()
+        production.reset()
         teamImages.removeAll()
     }
 }
@@ -27,14 +29,16 @@ private struct LiveSnapshotLease: TabletopSnapshotLease {
         }
         let entities = try copyEntities()
         let mapName = copyMapName()
+        let configStrings = copyConfigStrings()
         let warcraftAssets = try LiveWarcraftAssetCopy.copy(
-            snapshot: retained, mapName: mapName, entities: entities.values, cache: assetCache)
+            snapshot: retained, mapName: mapName, entities: entities.values,
+            configStrings: configStrings, cache: assetCache)
         return TabletopSnapshot(
             abiVersion: actual, generation: BZ_TTSnapshot_Generation(retained), terrain: [],
             entities: entities.values, sessionID: sessionID, coordinateSpace: .world(bounds),
             connectionState: connectionState(), mapName: mapName, player: copyPlayer(),
             selectedEntityIDs: copySelection(), fog: try copyFog(), unitLayouts: try copyUnitLayouts(),
-            actionLayout: copyActionLayout(), configStrings: copyConfigStrings(),
+            actionLayout: copyActionLayout(), configStrings: configStrings,
             entitiesOverflowCount: BZ_TTSnapshot_EntitiesOverflowCount(retained),
             duplicateEntityCount: entities.duplicateCount, warcraftAssets: warcraftAssets)
     }
@@ -216,18 +220,31 @@ private enum LiveWarcraftAssetCopy {
 
     static func copy(
         snapshot: OpaquePointer, mapName: String?, entities: [TabletopEntitySnapshot],
-        cache: LiveWarcraftCopyCache) throws
+        configStrings: [UInt32: String], cache: LiveWarcraftCopyCache) throws
         -> WarcraftProductionAssets {
         let expected = UInt32(BZ_TABLETOP_ASSETS_ABI_VERSION), actual = BZ_TTA_AbiVersion()
         guard actual == expected else {
             throw TabletopTransportError.abiVersion(expected: expected, actual: actual)
         }
         let terrain = try copyTerrain(mapName: mapName, cache: cache)
+        let signature = WarcraftProductionAssetSignature(
+            mapName: mapName, terrainKey: terrain.key,
+            entities: entities.compactMap {
+                guard $0.metadata.model != 0 else { return nil }
+                return WarcraftEntityAssetSignature(
+                    id: $0.id, classID: $0.metadata.classID, model: $0.metadata.model,
+                    modelIdentity: configStrings[modelConfigStringBase + $0.metadata.model] ?? "",
+                    image: $0.metadata.image,
+                    imageIdentity: configStrings[imageConfigStringBase + $0.metadata.image] ?? "",
+                    player: $0.metadata.player)
+            })
+        if let cached = cache.production.assets(for: signature) { return cached }
         var models: [UInt64: WarcraftProductionEntityAsset] = [:]
         var modelDescriptors: [
             WarcraftExportedModelCacheKey: (WarcraftExportedModel, WarcraftProductionEntityAsset)
         ] = [:]
         var baseModels: [UInt32: (WarcraftExportedModelCacheKey, WarcraftExportedModel)] = [:]
+        var baseTemplates: [UInt32: WarcraftProductionEntityAsset] = [:]
         var entityImages: [UInt32: WarcraftExportedImage] = [:]
         for entity in entities where entity.metadata.model != 0 {
             let (metadataStatus, resolvedMetadata) = resolveMetadata(expected, entity: entity)
@@ -300,6 +317,16 @@ private enum LiveWarcraftAssetCopy {
                 models[entity.id] = WarcraftAssetDescriptorAdapter.model(model, template: descriptor.1)
                 continue
             }
+            let geometryTemplate: WarcraftProductionEntityAsset
+            if let cached = baseTemplates[entity.metadata.model] {
+                geometryTemplate = cached
+            } else if let cached = cache.values.adaptedModel(for: base.0) {
+                geometryTemplate = cached
+            } else {
+                geometryTemplate = try WarcraftAssetDescriptorAdapter.modelTemplate(base.1)
+                cache.values.insertAdapted(geometryTemplate, for: base.0)
+            }
+            baseTemplates[entity.metadata.model] = geometryTemplate
             var copied = base.1
             copied.overrideImage = overrideImage
             copied.teamColorImage = teamColorImage?.image
@@ -312,10 +339,13 @@ private enum LiveWarcraftAssetCopy {
                 }
             }
             let template: WarcraftProductionEntityAsset
-            if let cached = cache.values.adaptedModel(for: key) {
+            if key == base.0 {
+                template = geometryTemplate
+            } else if let cached = cache.values.adaptedModel(for: key) {
                 template = cached
             } else {
-                template = try WarcraftAssetDescriptorAdapter.modelTemplate(copied)
+                template = try WarcraftAssetDescriptorAdapter.modelTemplate(
+                    copied, reusingGeometry: geometryTemplate)
                 cache.values.insertAdapted(template, for: key)
             }
             var model = copied
@@ -324,11 +354,13 @@ private enum LiveWarcraftAssetCopy {
             modelDescriptors[key] = (copied, template)
             models[entity.id] = WarcraftAssetDescriptorAdapter.model(model, template: template)
         }
-        return try WarcraftAssetDescriptorAdapter.production(
-            abiVersion: actual, terrain: terrain, entities: models,
+        var assets = try WarcraftAssetDescriptorAdapter.production(
+            abiVersion: actual, terrain: terrain.value, entities: models,
             counters: WarcraftAssetCacheCounters(
                 hits: BZ_TTA_CacheHits(), misses: BZ_TTA_CacheMisses(),
                 placeholderLogs: BZ_TTA_PlaceholderLogs(), metadataLogs: BZ_TTA_MetadataLogs()))
+        assets.terrainKey = terrain.key
+        return cache.production.insert(assets, for: signature)
     }
 
     /* The server already resolved class/path aliases into the per-entity CS_IMAGES slot. */
@@ -559,9 +591,9 @@ private enum LiveWarcraftAssetCopy {
     }
 
     private static func copyTerrain(mapName: String?, cache: LiveWarcraftCopyCache) throws
-        -> WarcraftExportedTerrain? {
-        guard let mapName, !mapName.isEmpty else { return nil }
-        guard let terrain = BZ_TTA_LatestTerrain() else { return nil }
+        -> (key: String?, value: WarcraftExportedTerrain?) {
+        guard let mapName, !mapName.isEmpty else { return (nil, nil) }
+        guard let terrain = BZ_TTA_LatestTerrain() else { return (nil, nil) }
         defer { BZ_TTTerrain_Release(terrain) }
         var info = bzTTTerrainInfo_t()
         guard BZ_TTTerrain_Info(terrain, &info),
@@ -575,7 +607,7 @@ private enum LiveWarcraftAssetCopy {
         let terrainKey = "\(mapName):\(UInt(bitPattern: terrain)):" +
             "\(info.width)x\(info.height):\(info.min_x),\(info.min_y),\(info.max_x),\(info.max_y):" +
             "\(groundTypes):\(cliffTypes)"
-        if let cached = cache.values.terrain(for: terrainKey) { return cached }
+        if let cached = cache.values.terrain(for: terrainKey) { return (terrainKey, cached) }
         var corners: [WarcraftExportedTerrainCorner] = []
         corners.reserveCapacity(Int(info.width * info.height))
         for z in 0..<info.height {
@@ -608,7 +640,7 @@ private enum LiveWarcraftAssetCopy {
                 terrain, types: [0], kind: BZ_TTA_TERRAIN_TEXTURE_WATER).first,
             corners: corners)
         cache.values.insert(copied, terrainKey: terrainKey)
-        return copied
+        return (terrainKey, copied)
     }
 
     private static func copyTerrainTextures(
