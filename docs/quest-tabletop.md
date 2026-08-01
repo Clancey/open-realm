@@ -65,7 +65,7 @@ platform/android/quest/
     verify-native-lib.sh         # forbidden-dependency/ABI/entry-point check
     test-source-sync.sh          # Make -> CMake source-list sync-contract test
     build-shaders.sh             # GLSL -> SPIR-V -> embedded-C-header pipeline
-    bin2c.c                      # host tool: SPIR-V binary -> C byte array
+    bin2c.c                      # host tool: SPIR-V binary -> aligned C uint32_t array
   tests/
     test_bz_quest_pure.c         # bz_quest_pure.c unit tests (host-buildable)
     test_bz_quest_scene.c        # bz_quest_scene.c unit tests (host-buildable)
@@ -339,17 +339,28 @@ so it needs no Vulkan/OpenXR headers to unit test.
 ### No busy loop / no per-frame logging
 
 `bz_quest_host.c`'s `android_main` loop chooses `ALooper_pollOnce`'s
-timeout per iteration: `-1` (block indefinitely, zero CPU cost) whenever
-`bz_quest_xr_is_session_running()` is false (renderer not ready yet, or the
-app is backgrounded so the session is `SYNCHRONIZED`/`IDLE`/`STOPPING`), and
-`0` (poll without blocking) only while a running session needs its
-wait/begin/end frame calls kept flowing every iteration. No code path in
-the frame loop logs anything on a healthy per-frame basis — every
-`BZ_QUEST_LOGI`/`BZ_QUEST_LOGE` call site in `bz_quest_xr.c`/
-`bz_quest_vk.c`/`bz_quest_passthrough.c` is inside a one-time init/teardown
-function or an error branch, never inside `bz_quest_xr_wait_frame`/
-`bz_quest_xr_begin_frame`/`bz_quest_xr_end_frame`/`bz_quest_vk_render_target`'s
-success paths.
+timeout per iteration via the host-tested pure helper
+`bz_quest_looper_timeout_millis(wantsXrEventPolling, xrSessionRunning)`
+(`bz_quest_pure.h`/`.c`): it returns `-1` (block indefinitely, zero CPU
+cost) only when **both** are false, and `0` (poll without blocking)
+whenever **either** is true. `xrSessionRunning` alone is deliberately not
+the only input: `xrPollEvent` is only reachable from inside
+`bz_quest_renderer_frame` (via `bz_quest_xr_poll_events`), itself only
+called after `ALooper_pollOnce` returns, so an app that has just resumed
+from the background but whose session hasn't reached `RUNNING` yet (the
+`READY` event that would trigger `xrBeginSession` hasn't been polled yet)
+would otherwise have `ALooper_pollOnce` block indefinitely waiting for an
+Android input event that may never arrive — a permanent hang after every
+resume with no user input, closed by also polling non-blocking whenever
+`wantsXrEventPolling` (`androidResumed && rendererReady`, tracked in
+`bzQuestAppState_t`) is true. Gating on `rendererReady` too (not
+`androidResumed` alone) avoids a pure busy-loop with nothing to poll if
+renderer init ever failed. No code path in the frame loop logs anything on
+a healthy per-frame basis — every `BZ_QUEST_LOGI`/`BZ_QUEST_LOGE` call site
+in `bz_quest_xr.c`/`bz_quest_vk.c`/`bz_quest_passthrough.c` is inside a
+one-time init/teardown function or an error branch, never inside
+`bz_quest_xr_wait_frame`/`bz_quest_xr_begin_frame`/`bz_quest_xr_end_frame`/
+`bz_quest_vk_render_target`'s success paths.
 
 ### OpenXR session state handling
 
@@ -463,9 +474,19 @@ shaders are compiled from committed GLSL source
    (`$ANDROID_NDK_HOME/shader-tools/<host-tag>/glslc`), compiles each
    `.vert`/`.frag` to SPIR-V (`--target-env=vulkan1.0`).
 2. It builds `scripts/bin2c.c` (a tiny standalone host tool, `cc -std=c11`)
-   and runs it on each `.spv`, which **verifies the SPIR-V magic number
-   (`0x07230203`) before embedding** and writes a C byte-array header
-   (`<name>.spv.h`, array `g_bz_quest_<name>_spv`).
+   and runs it on each `.spv`, which **repacks the file's raw bytes into
+   native 32-bit words (explicitly little-endian, matching every host
+   `glslc` build and Android arm64 - see the file's endianness comment),
+   verifies the little-endian SPIR-V magic number (`0x07230203`) against
+   the first word before embedding, and writes an aligned
+   `static const uint32_t <name>[]` header** (`<name>.spv.h`, array
+   `g_bz_quest_<name>_spv`). Emitting real `uint32_t` words - not an
+   `unsigned char[]` later reinterpret-cast to `uint32_t *` - is
+   deliberate: `VkShaderModuleCreateInfo::pCode` requires
+   `alignof(uint32_t)` alignment, which only an array whose element type is
+   actually `uint32_t` is guaranteed by the C standard to provide (see
+   `bin2c.c`'s top comment and the Vulkan 1.3 spec's `vkCreateShaderModule`
+   section).
 3. It concatenates both into one umbrella `bz_quest_shaders_generated.h`
    that `bz_quest_vk.c` `#include`s directly.
 
@@ -538,6 +559,33 @@ fails — see the OpenXR spec's environment blend mode section,
 `XrCompositionLayerProjection` (the tabletop scene) second (foreground),
 since `XrFrameEndInfo.layers` is composited back-to-front.
 
+**The projection layer's `layerFlags` must request source-alpha
+compositing, or it fully occludes the passthrough layer beneath it.**
+`tabletop_frag.frag` writes `vec4(fragColor, 1.0)` (opaque geometry) while
+`bz_quest_vk_create_render_resources()`'s render-pass clear value clears
+untouched background pixels to alpha `0.0` (see "Vulkan render
+pass/pipeline/targets" above) — this only lets passthrough show through
+those untouched pixels if the compositor is told to honor the layer's
+alpha channel at all, and to interpret it as straight (non-premultiplied)
+alpha, since that's the form the shader writes (color channels are never
+scaled by alpha). `bz_quest_renderer.c` sets
+`projectionLayer.layerFlags = bz_quest_projection_layer_flags(/*unpremultipliedAlpha=*/true)`
+(`bz_quest_pure.h`/`.c`), which ORs in both
+`XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` (without it, the
+runtime ignores the layer's alpha channel entirely and treats every texel
+as fully opaque, regardless of what the shader wrote) and
+`XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT` (without it, the runtime
+assumes the source is already premultiplied and double-darkens any
+partially-transparent texel — invisible for this scene's fully-opaque
+geometry texels, but wrong for the alpha=0 background, which is exactly
+where this bug hid). `bz_quest_renderer.c` also `_Static_assert`s the pure
+module's mirrored flag-bit literals (needed there because
+`bz_quest_pure.c` must stay host-buildable without `openxr.h`) against the
+real `XR_COMPOSITION_LAYER_*_BIT` constants at compile time, and
+`test_bz_quest_pure.c` has host-buildable regression tests asserting both
+bits are set for the arguments the renderer actually passes. See the OpenXR
+spec citation in "Documented quirks" below.
+
 ## Test scene (`bz_quest_scene.c`)
 
 Purely procedural, no asset files: an `BZ_QUEST_SCENE_TABLE_TILES` x
@@ -601,12 +649,78 @@ rendering (out of scope for this layer; see
   <https://registry.khronos.org/OpenXR/specs/1.0/html/xrspec.html#compositing-layer-ordering>:
   `XrFrameEndInfo.layers[0]` is drawn first (furthest back), so passthrough
   must be listed before the projection layer, not after.
+- **A composition layer's alpha channel is ignored unless
+  `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` is set in
+  `layerFlags`.** Without it, the runtime treats the layer as fully opaque
+  regardless of what the shader wrote to alpha — this is what let an
+  earlier draft's `XrCompositionLayerProjection` (`layerFlags` left at its
+  zero-initialized default) fully occlude `XR_FB_passthrough`, even though
+  the render pass correctly cleared background pixels to alpha `0.0`. A
+  second, independent bit,
+  `XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT`, must also be set
+  whenever (as here) the source color is straight/non-premultiplied alpha,
+  or the runtime composites as though it were already premultiplied,
+  double-darkening partially-transparent texels. Confirmed against the
+  OpenXR 1.1 spec's `XrCompositionLayerFlags`/`XrCompositionLayerBaseHeader`
+  description,
+  <https://registry.khronos.org/OpenXR/specs/1.1/html/xrspec.html#XrCompositionLayerFlags>,
+  and the exact bit values (`0x2`/`0x4`) cross-checked against the
+  extracted `org.khronos.openxr:openxr_loader_for_android:1.1.49` `openxr.h`
+  (`XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` /
+  `XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT`). See "Composition layer
+  assembly" above and `bz_quest_pure.h`'s
+  `bz_quest_projection_layer_flags()` comment.
 - **`xrLocateViews` can report invalid tracking even mid-session.**
   `XrViewState.viewStateFlags` must be checked
   (`XR_VIEW_STATE_POSITION_VALID_BIT`/`ORIENTATION_VALID_BIT`) on every call
   — a momentary tracking loss does not change `XrSessionState`, so relying
   on session state alone to decide whether to render is insufficient. OpenXR
   1.0 spec, `xrLocateViews`/`XrViewState` reference pages.
+- **`XR_TIMEOUT_EXPIRED` from `xrWaitSwapchainImage` is a qualified
+  *success*, not a failure, and must not be treated as license to release or
+  abandon the image.** `XR_TIMEOUT_EXPIRED = 1` and
+  `XR_SUCCEEDED(result)` is `(result) >= 0`, so it is `XR_SUCCEEDED` despite
+  the name. The OpenXR spec's Rendering chapter, "Swapchain Image
+  Management" → `xrWaitSwapchainImage`
+  (<https://github.com/KhronosGroup/OpenXR-Docs/blob/main/specification/sources/chapters/rendering.adoc>,
+  mirrored at
+  <https://registry.khronos.org/OpenXR/specs/1.0/html/xrspec.html#xrWaitSwapchainImage>)
+  states: "If `xrWaitSwapchainImage` returns `XR_TIMEOUT_EXPIRED`, the next
+  call to `xrWaitSwapchainImage` will wait on the same image index again
+  until the function succeeds with `XR_SUCCESS`" and separately that
+  `xrReleaseSwapchainImage` requires the image to have "been successfully
+  waited on **without timeout** before it is released." `bz_quest_xr.c`'s
+  `bz_quest_xr_wait_swapchain_image()` always requests `XR_INFINITE_DURATION`
+  (so a conformant runtime should not return `XR_TIMEOUT_EXPIRED` there in
+  practice — there is no requested timeout to expire against), but
+  defensively retries (bounded by `BZ_QUEST_SWAPCHAIN_WAIT_MAX_RETRIES`,
+  currently 64) rather than treating it as fatal, and only returns `false`
+  on a genuine `XR_FAILED` result (a negative `XrResult`), which is the only
+  case where the caller (`bz_quest_renderer.c`'s frame loop) correctly skips
+  the subsequent `bz_quest_xr_release_swapchain_image()` call for that
+  image. Confirmed against `hello_xr`'s reference implementation
+  (`src/tests/hello_xr/check.h`'s `CheckXrResult`), which uses
+  `XR_FAILED(res)` (negative-only) rather than `res != XR_SUCCESS` to decide
+  whether an `XrResult` is fatal, for the same reason.
+- **`VkShaderModuleCreateInfo::pCode` requires `uint32_t` alignment, which a
+  `char`/`unsigned char` array does not guarantee.** SPIR-V is a stream of
+  32-bit words (SPIR-V spec section 2.2.1, "Layout of a Module",
+  <https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html>), and the
+  Vulkan 1.3 spec's `vkCreateShaderModule` section requires `pCode` to
+  point at an array of `codeSize/4` `uint32_t` values
+  (<https://registry.khronos.org/vulkan/specs/1.3/html/vkspec.html#vkCreateShaderModule>).
+  An earlier version of `scripts/bin2c.c` emitted `static const unsigned
+  char[]` and `bz_quest_vk.c` reinterpret-cast its address to
+  `const uint32_t *` — an array of `unsigned char` has no alignment
+  requirement beyond 1, so that cast was not standard-guaranteed valid,
+  even though it happened to work on every ABI this project currently
+  targets. `bin2c.c` now repacks the SPIR-V bytes into a real
+  `static const uint32_t[]` at generation time (explicitly assuming
+  little-endian byte order, matching every host `glslc` build and the
+  arm64 Android target — see that file's top comment for why a
+  byte-swapped input is a hard failure, not something silently handled),
+  so the generated array itself carries the correct compiler-guaranteed
+  alignment and `bz_quest_vk.c` no longer needs to cast at all.
 - **The Khronos Android OpenXR loader AAR's Prefab package name is
   `"OpenXR"`, not the Maven artifact name.** Carried over from layer 2,
   still true and still load-bearing for `CMakeLists.txt`'s
