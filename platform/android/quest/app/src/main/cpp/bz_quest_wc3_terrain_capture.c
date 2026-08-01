@@ -26,6 +26,23 @@ static bzQuestWc3TerrainInput_t s_scratchTerrain;
 static uint8_t s_scratchPixels[BZ_QUEST_WC3_TERRAIN_MAX_TEXTURE_BYTES];
 static char s_lastTerrainKey[BZ_QUEST_WC3_MAX_IDENTITY];
 
+/* Per-referenced-texture "still needs to be copied/offered" flags, private to
+ * this module (not part of bzQuestWc3TerrainInput_t - no other module needs
+ * to know upload-pending status). All set true whenever a NEW generation is
+ * captured below; cleared as each texture's callback reports it consumed
+ * (see emit_texture()). This is what lets emit_textures() skip registration/
+ * decode work entirely for a texture that already finished uploading, while
+ * still retrying ones deferred by the Vulkan side's per-frame budget. */
+static bool s_groundPending[BZ_QUEST_WC3_TERRAIN_MAX_GROUND_TYPES];
+static bool s_cliffPending[BZ_QUEST_WC3_TERRAIN_MAX_CLIFF_TYPES];
+static bool s_waterPending;
+
+static void reset_pending_textures(void) {
+    for (uint32_t i = 0; i < BZ_QUEST_WC3_TERRAIN_MAX_GROUND_TYPES; i++) s_groundPending[i] = true;
+    for (uint32_t i = 0; i < BZ_QUEST_WC3_TERRAIN_MAX_CLIFF_TYPES; i++) s_cliffPending[i] = true;
+    s_waterPending = true;
+}
+
 enum { BZ_QUEST_WC3_TERRAIN_CAPTURE_MAX_LOGGED_KEYS = 256 };
 static char s_loggedKeys[BZ_QUEST_WC3_TERRAIN_CAPTURE_MAX_LOGGED_KEYS][BZ_QUEST_WC3_TERRAIN_MAX_KEY];
 static uint32_t s_loggedKeyCount;
@@ -212,28 +229,41 @@ static void copy_reference_tables(const bzTTTerrain_t *terrain, const char *terr
     BZ_TTAsset_Release(asset);
 }
 
-static void emit_texture(const bzTTTerrain_t *terrain, bzTTTerrainTextureKind_t kind, uint32_t typeIndex,
+static bool emit_texture(const bzTTTerrain_t *terrain, bzTTTerrainTextureKind_t kind, uint32_t typeIndex,
                          const bzQuestWc3TerrainTextureRef_t *ref,
                          const bzQuestWc3TerrainCaptureCallbacks_t *callbacks) {
-    if (!callbacks || !callbacks->onTextureReady || !ref->identity[0]) return;
+    if (!ref->identity[0]) return true; /* empty slot: nothing to upload, not pending */
+    if (!callbacks || !callbacks->onTextureReady) return false; /* nothing can consume it yet: stay pending */
     const bzTTAsset_t *asset = NULL;
     bzTTImageInfo_t imageInfo;
     char identity[BZ_QUEST_WC3_MAX_IDENTITY] = {0};
-    if (!register_texture_identity(terrain, kind, typeIndex, identity, &imageInfo, &asset)) return;
+    if (!register_texture_identity(terrain, kind, typeIndex, identity, &imageInfo, &asset)) return false;
     uint32_t copied = BZ_TTAsset_CopyImagePixels(asset, s_scratchPixels, sizeof(s_scratchPixels));
+    bool consumed = false;
     if (copied == imageInfo.data_bytes)
-        callbacks->onTextureReady(identity, imageInfo.width, imageInfo.height, imageInfo.row_bytes,
-                                  s_scratchPixels, copied, callbacks->textureUserdata);
+        consumed = callbacks->onTextureReady(identity, imageInfo.width, imageInfo.height, imageInfo.row_bytes,
+                                             s_scratchPixels, copied, callbacks->textureUserdata);
     BZ_TTAsset_Release(asset);
+    return consumed;
 }
 
 static void emit_textures(const bzTTTerrain_t *terrain, const bzQuestWc3TerrainInput_t *input,
                           const bzQuestWc3TerrainCaptureCallbacks_t *callbacks) {
-    for (uint32_t i = 0; i < input->referencedGroundCount; i++)
-        emit_texture(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND, input->grounds[i].typeIndex, &input->grounds[i], callbacks);
-    for (uint32_t i = 0; i < input->referencedCliffCount; i++)
-        emit_texture(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF, input->cliffs[i].typeIndex, &input->cliffs[i], callbacks);
-    if (input->hasWater) emit_texture(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER, 0, &input->water, callbacks);
+    for (uint32_t i = 0; i < input->referencedGroundCount; i++) {
+        if (!s_groundPending[i]) continue;
+        if (emit_texture(terrain, BZ_TTA_TERRAIN_TEXTURE_GROUND, input->grounds[i].typeIndex, &input->grounds[i],
+                         callbacks))
+            s_groundPending[i] = false;
+    }
+    for (uint32_t i = 0; i < input->referencedCliffCount; i++) {
+        if (!s_cliffPending[i]) continue;
+        if (emit_texture(terrain, BZ_TTA_TERRAIN_TEXTURE_CLIFF, input->cliffs[i].typeIndex, &input->cliffs[i],
+                         callbacks))
+            s_cliffPending[i] = false;
+    }
+    if (input->hasWater && s_waterPending) {
+        if (emit_texture(terrain, BZ_TTA_TERRAIN_TEXTURE_WATER, 0, &input->water, callbacks)) s_waterPending = false;
+    }
 }
 
 bool bz_quest_wc3_terrain_capture(const bzQuestWc3TerrainCaptureCallbacks_t *callbacks) {
@@ -248,20 +278,23 @@ bool bz_quest_wc3_terrain_capture(const bzQuestWc3TerrainCaptureCallbacks_t *cal
     char terrainIdentity[BZ_QUEST_WC3_MAX_IDENTITY];
     terrain_key(terrain, &info, terrainIdentity, sizeof(terrainIdentity));
     if (bz_quest_wc3_identity_equal(terrainIdentity, s_lastTerrainKey)) {
-        /* Same generation: skip the expensive corner walk/onTerrainReady rebuild,
-         * but still re-offer this generation's already-known referenced textures
-         * every call. s_scratchTerrain's referencedGround/Cliff/water tables were
-         * populated the frame this generation first appeared and are untouched
-         * here, so this is just re-registering/copying+re-callbacking them - the
-         * Vulkan cache dedups anything already uploaded via cache_find() before
-         * spending a budget slot. Without this, any texture rejected by the first
-         * frame's bounded upload budget would never be retried (see
-         * bz_quest_wc3_terrain_capture.h's header comment). */
+        /* Same generation: skip the expensive corner walk/onTerrainReady rebuild.
+         * s_scratchTerrain's referencedGround/Cliff/water tables were populated
+         * the frame this generation first appeared and are untouched here, so
+         * emit_textures() below only re-registers/copies+re-callbacks textures
+         * still marked pending (see s_groundPending/s_cliffPending/s_waterPending
+         * above and bz_quest_wc3_terrain_capture.h's header comment) - a texture
+         * whose callback already reported it consumed does zero extra work on
+         * every later same-generation call. Without pending-gating here, any
+         * texture rejected by the first frame's bounded upload budget would
+         * never be retried, AND every already-uploaded texture would be
+         * needlessly re-decoded/re-copied every single frame forever. */
         emit_textures(terrain, &s_scratchTerrain, callbacks);
         BZ_TTTerrain_Release(terrain);
         return true;
     }
     strncpy(s_lastTerrainKey, terrainIdentity, sizeof(s_lastTerrainKey) - 1);
+    reset_pending_textures();
 
     memset(&s_scratchTerrain, 0, sizeof(s_scratchTerrain));
     strncpy(s_scratchTerrain.identity, terrainIdentity, sizeof(s_scratchTerrain.identity) - 1);

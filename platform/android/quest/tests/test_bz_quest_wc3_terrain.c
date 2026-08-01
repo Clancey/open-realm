@@ -781,6 +781,228 @@ static void test_deferred_log_capacity_exhaustion_and_reset_restores_headroom(vo
     ASSERT_EQ_INT((int)set.count, DEFERRED_LOG_TEST_CAPACITY);
 }
 
+/* ------------------------------------------------------------------ */
+/* Regression: PR #21 re-review defect 2 - every-frame texture re-copy      */
+/* ------------------------------------------------------------------ */
+
+/* Structural regression: bz_quest_wc3_terrain_capture.c's emit_textures()
+ * MUST gate each referenced ground/cliff/water texture behind its own
+ * per-generation "pending" flag (skipping registration/decode/copy entirely
+ * once a texture is no longer pending), and bz_quest_wc3_terrain_capture()
+ * MUST repopulate every pending flag on a NEW generation via
+ * reset_pending_textures(). Without this gating, every referenced texture is
+ * unconditionally re-registered/re-copied on every single same-generation
+ * call forever, even long after it finished uploading - a real bandwidth/CPU
+ * cost on mobile hardware for large terrain atlases. This can't be exercised
+ * against the real bzTTTerrain_t bridge on host (see this file's header
+ * comment), so it asserts on the checked-in source text, mirroring the
+ * existing depth-compare/deferred-log structural tests above; the pure
+ * pending-flag *policy* itself is proven behaviorally by the
+ * test_pending_textures_* tests below via a faithful local mirror. */
+static void test_capture_gates_texture_reoffer_on_a_pending_flag(void) {
+    const char *path = "platform/android/quest/app/src/main/cpp/bz_quest_wc3_terrain_capture.c";
+    FILE *f = fopen(path, "r");
+    ASSERT_NOT_NULL(f);
+    if (!f) return;
+    char text[65536];
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    text[n] = '\0';
+    fclose(f);
+    ASSERT(strstr(text, "static void reset_pending_textures(void) {") != NULL);
+    const char *emitTextures = strstr(text, "static void emit_textures(");
+    ASSERT_NOT_NULL(emitTextures);
+    if (emitTextures) {
+        ASSERT(strstr(emitTextures, "if (!s_groundPending[i]) continue;") != NULL);
+        ASSERT(strstr(emitTextures, "if (!s_cliffPending[i]) continue;") != NULL);
+        ASSERT(strstr(emitTextures, "s_waterPending") != NULL);
+    }
+    const char *captureFn = strstr(text, "bool bz_quest_wc3_terrain_capture(");
+    ASSERT_NOT_NULL(captureFn);
+    if (captureFn) ASSERT(strstr(captureFn, "reset_pending_textures();") != NULL);
+}
+
+/* Mirrors bz_quest_wc3_terrain_capture.c's emit_texture()/emit_textures()/
+ * reset_pending_textures() pending-flag policy exactly: each referenced
+ * texture has a persistent per-generation "pending" flag (all set true on a
+ * NEW generation). Only pending textures are "copied" (registration+
+ * BZ_TTAsset_CopyImagePixels stand-in, counted here) and offered to the
+ * upload callback; a callback that reports the texture consumed (true)
+ * clears pending so later calls skip it entirely (zero copy work), while a
+ * callback reporting not-yet-consumed (false - deferred by budget, or a
+ * failure) leaves it pending so it is retried on the next call. This is
+ * composed with the existing budgeted_ensure_uploaded()/find_in_cache()
+ * harness above (mirroring the real Vulkan-side budget/dedup policy) so the
+ * whole capture-to-upload pipeline's copy-avoidance behavior is proven
+ * end-to-end, not just one half of it. */
+typedef struct {
+    bool pending[8];
+    int copyCalls[8];
+} PendingTextureSet_t;
+
+static void pending_texture_set_reset(PendingTextureSet_t *set, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) set->pending[i] = true;
+}
+
+static void emit_pending_textures(PendingTextureSet_t *set, uint32_t count, bzQuestWc3Cache_t *cache,
+                                  const bzQuestWc3CacheKey_t *keys, int *budgetRemaining) {
+    for (uint32_t i = 0; i < count; i++) {
+        if (!set->pending[i]) continue;
+        set->copyCalls[i]++;
+        if (budgeted_ensure_uploaded(cache, &keys[i], budgetRemaining)) set->pending[i] = false;
+    }
+}
+
+static void init_pending_test_keys(bzQuestWc3CacheKey_t *keys, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        char identity[32];
+        snprintf(identity, sizeof(identity), "pending%u.blp", i);
+        keys[i] = cache_key(identity);
+    }
+}
+
+static void test_pending_textures_initial_copy_happens(void) {
+    bzQuestWc3Cache_t cache;
+    FakeTerrainCache_t fake;
+    memset(&fake, 0, sizeof(fake));
+    ASSERT(bz_quest_wc3_cache_init(&cache, 8, fake_terrain_create, fake_terrain_destroy, &fake));
+    PendingTextureSet_t set;
+    memset(&set, 0, sizeof(set));
+    bzQuestWc3CacheKey_t keys[3];
+    init_pending_test_keys(keys, 3);
+    pending_texture_set_reset(&set, 3);
+    int budget = 4;
+    emit_pending_textures(&set, 3, &cache, keys, &budget);
+    for (uint32_t i = 0; i < 3; i++) {
+        ASSERT_EQ_INT(set.copyCalls[i], 1);
+        ASSERT(!set.pending[i]);
+    }
+    ASSERT_EQ_INT(fake.createCalls, 3);
+    bz_quest_wc3_cache_shutdown(&cache);
+}
+
+static void test_pending_textures_budget_drains_across_frames_without_recopying_completed(void) {
+    bzQuestWc3Cache_t cache;
+    FakeTerrainCache_t fake;
+    memset(&fake, 0, sizeof(fake));
+    ASSERT(bz_quest_wc3_cache_init(&cache, 8, fake_terrain_create, fake_terrain_destroy, &fake));
+    PendingTextureSet_t set;
+    memset(&set, 0, sizeof(set));
+    bzQuestWc3CacheKey_t keys[6];
+    init_pending_test_keys(keys, 6);
+    pending_texture_set_reset(&set, 6);
+
+    int budget = 4;
+    emit_pending_textures(&set, 6, &cache, keys, &budget); /* frame 1: all 6 attempted, only 4 succeed */
+    uint32_t completed = 0, stillPending = 0;
+    for (uint32_t i = 0; i < 6; i++) {
+        ASSERT_EQ_INT(set.copyCalls[i], 1); /* every distinct texture is attempted at least once */
+        if (set.pending[i]) stillPending++; else completed++;
+    }
+    ASSERT_EQ_INT((int)completed, 4);
+    ASSERT_EQ_INT((int)stillPending, 2);
+
+    budget = 4; /* next frame's budget resets, same as production's per-frame counter */
+    emit_pending_textures(&set, 6, &cache, keys, &budget); /* frame 2: only the 2 pending retry */
+    for (uint32_t i = 0; i < 6; i++) ASSERT(!set.pending[i]); /* everything eventually uploads: no permanent omission */
+    /* A texture completed in frame 1 must NOT be re-copied in frame 2 - this
+     * is the exact bug: unconditional re-offering re-decoded every
+     * already-uploaded texture's pixels every single frame forever.
+     * Precisely: the 4 completed-in-frame-1 textures have copyCalls==1 (zero
+     * extra copy work in frame 2); the 2 retried-in-frame-2 textures have
+     * copyCalls==2 (one legitimate retry each). */
+    int oneCopyCount = 0, twoCopyCount = 0;
+    for (uint32_t i = 0; i < 6; i++) {
+        if (set.copyCalls[i] == 1) oneCopyCount++;
+        else if (set.copyCalls[i] == 2) twoCopyCount++;
+    }
+    ASSERT_EQ_INT(oneCopyCount, 4);
+    ASSERT_EQ_INT(twoCopyCount, 2);
+    ASSERT_EQ_INT(fake.createCalls, 6);
+    bz_quest_wc3_cache_shutdown(&cache);
+}
+
+static void test_pending_textures_completed_texture_is_zero_copy_on_later_frames(void) {
+    bzQuestWc3Cache_t cache;
+    FakeTerrainCache_t fake;
+    memset(&fake, 0, sizeof(fake));
+    ASSERT(bz_quest_wc3_cache_init(&cache, 4, fake_terrain_create, fake_terrain_destroy, &fake));
+    PendingTextureSet_t set;
+    memset(&set, 0, sizeof(set));
+    bzQuestWc3CacheKey_t keys[1];
+    init_pending_test_keys(keys, 1);
+    pending_texture_set_reset(&set, 1);
+
+    int budget = 4;
+    emit_pending_textures(&set, 1, &cache, keys, &budget);
+    ASSERT(!set.pending[0]);
+    ASSERT_EQ_INT(set.copyCalls[0], 1);
+    for (int frame = 0; frame < 20; frame++) {
+        budget = 4;
+        emit_pending_textures(&set, 1, &cache, keys, &budget);
+    }
+    ASSERT_EQ_INT(set.copyCalls[0], 1); /* 20 more same-generation frames: still exactly one copy ever */
+    ASSERT_EQ_INT(fake.createCalls, 1);
+    bz_quest_wc3_cache_shutdown(&cache);
+}
+
+static void test_pending_textures_only_pending_or_failed_identities_retry(void) {
+    bzQuestWc3Cache_t cache;
+    FakeTerrainCache_t fake;
+    memset(&fake, 0, sizeof(fake));
+    ASSERT(bz_quest_wc3_cache_init(&cache, 4, fake_terrain_create, fake_terrain_destroy, &fake));
+    PendingTextureSet_t set;
+    memset(&set, 0, sizeof(set));
+    bzQuestWc3CacheKey_t keys[2];
+    init_pending_test_keys(keys, 2);
+    pending_texture_set_reset(&set, 2);
+
+    fake.failNextCreate = true; /* index 0 (created first) fails; index 1 succeeds */
+    int budget = 4;
+    emit_pending_textures(&set, 2, &cache, keys, &budget);
+    ASSERT(set.pending[0]);  /* failed creation: stays pending */
+    ASSERT(!set.pending[1]); /* succeeded: cleared */
+    ASSERT_EQ_INT(set.copyCalls[0], 1);
+    ASSERT_EQ_INT(set.copyCalls[1], 1);
+
+    budget = 4;
+    emit_pending_textures(&set, 2, &cache, keys, &budget); /* only index 0 should be attempted again */
+    ASSERT(!set.pending[0]);
+    ASSERT_EQ_INT(set.copyCalls[0], 2);
+    ASSERT_EQ_INT(set.copyCalls[1], 1); /* untouched: already-completed texture never re-attempted */
+    bz_quest_wc3_cache_shutdown(&cache);
+}
+
+static void test_pending_textures_generation_reset_copies_fresh_resources(void) {
+    bzQuestWc3Cache_t cache;
+    FakeTerrainCache_t fake;
+    memset(&fake, 0, sizeof(fake));
+    ASSERT(bz_quest_wc3_cache_init(&cache, 4, fake_terrain_create, fake_terrain_destroy, &fake));
+    PendingTextureSet_t set;
+    memset(&set, 0, sizeof(set));
+    bzQuestWc3CacheKey_t keys[1];
+    init_pending_test_keys(keys, 1);
+    pending_texture_set_reset(&set, 1);
+
+    int budget = 4;
+    emit_pending_textures(&set, 1, &cache, keys, &budget);
+    ASSERT_EQ_INT(set.copyCalls[0], 1);
+    ASSERT_EQ_INT(fake.liveCount, 1);
+
+    /* Simulate a new map generation: the Vulkan side wholesale-evicts its
+     * caches (reset_generation_caches()) and the capture side repopulates
+     * every pending flag (reset_pending_textures()). */
+    bz_quest_wc3_cache_shutdown(&cache);
+    ASSERT(bz_quest_wc3_cache_init(&cache, 4, fake_terrain_create, fake_terrain_destroy, &fake));
+    pending_texture_set_reset(&set, 1);
+
+    budget = 4;
+    emit_pending_textures(&set, 1, &cache, keys, &budget);
+    ASSERT_EQ_INT(set.copyCalls[0], 2); /* a genuinely fresh copy happened, not a false zero-copy skip */
+    ASSERT_EQ_INT(fake.createCalls, 2);
+    ASSERT_EQ_INT(fake.liveCount, 1);
+    bz_quest_wc3_cache_shutdown(&cache);
+}
+
 void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_measure_computes_scale_and_cell_size);
     RUN_TEST(test_measure_rejects_non_square_tiles);
@@ -815,4 +1037,10 @@ void run_bz_quest_wc3_terrain_tests(void) {
     RUN_TEST(test_deferred_log_resets_allow_a_reused_identity_to_log_again);
     RUN_TEST(test_deferred_log_multiple_generation_resets_do_not_leak_state);
     RUN_TEST(test_deferred_log_capacity_exhaustion_and_reset_restores_headroom);
+    RUN_TEST(test_capture_gates_texture_reoffer_on_a_pending_flag);
+    RUN_TEST(test_pending_textures_initial_copy_happens);
+    RUN_TEST(test_pending_textures_budget_drains_across_frames_without_recopying_completed);
+    RUN_TEST(test_pending_textures_completed_texture_is_zero_copy_on_later_frames);
+    RUN_TEST(test_pending_textures_only_pending_or_failed_identities_retry);
+    RUN_TEST(test_pending_textures_generation_reset_copies_fresh_resources);
 }

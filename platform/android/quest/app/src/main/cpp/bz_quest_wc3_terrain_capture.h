@@ -22,7 +22,12 @@ extern "C" {
 #endif
 
 typedef void (*bzQuestWc3TerrainReadyFn)(const bzQuestWc3TerrainInput_t *terrain, void *userdata);
-typedef void (*bzQuestWc3TerrainTextureReadyFn)(const char *identity, uint32_t width, uint32_t height,
+/* Returns true once the texture is fully consumed (uploaded, or already
+ * cached) so the capture module can stop copying/re-offering it; returns
+ * false to mean "not consumed yet" (deferred by a per-frame budget, or a
+ * transient failure) so the capture module keeps it pending and retries on a
+ * later call. */
+typedef bool (*bzQuestWc3TerrainTextureReadyFn)(const char *identity, uint32_t width, uint32_t height,
                                                 uint32_t rowBytes, const uint8_t *pixels,
                                                 uint32_t dataBytes, void *userdata);
 
@@ -46,22 +51,26 @@ typedef struct {
  * corner walk/mesh-input rebuild and the onTerrainReady callback entirely.
  *
  * Textures are handled differently on purpose: this generation's referenced
- * ground/cliff/water textures are re-registered/copied and fed to
- * callbacks->onTextureReady on EVERY call, including same-generation frames,
- * not only when the generation first changes. The Vulkan-side GPU upload path
- * bounds uploads to a small per-frame budget (see bz_quest_vk_wc3_terrain.c),
- * so a generation with more referenced textures than one frame's budget would
- * otherwise get exactly one shot at each texture and any texture rejected by
- * that budget would never be retried. Re-offering every call is cheap (the
- * Vulkan cache's cache_find() dedups an already-uploaded identity before this
- * module's decode work even runs... note: this module still decodes pixels
- * into the scratch buffer before the cache dedup check happens downstream, so
- * "cheap" means "one ABI registration + memcpy", not "free" - acceptable given
- * terrain texture counts are bounded and this mirrors the chunk upload path's
- * existing every-frame re-scan in upload_missing_chunks()) and guarantees the
- * bounded per-frame texture budget eventually drains across frames instead of
- * silently, permanently losing textures beyond the first frame's budget.
- * Safe with any callback field NULL: the corresponding work is simply omitted.
+ * ground/cliff/water textures are tracked with a per-texture "pending" flag
+ * (all set on a NEW generation, alongside the onTerrainReady rebuild above).
+ * On every call (including same-generation frames), only textures still
+ * marked pending are re-registered/decoded/copied and fed to
+ * callbacks->onTextureReady; a texture whose callback returns true (meaning
+ * the Vulkan side actually consumed it - uploaded, or already cached) is
+ * cleared and skipped - zero registration/copy work - on every later call
+ * until the next generation reset. A texture whose callback returns false
+ * (deferred by the Vulkan side's small per-frame upload budget, see
+ * bz_quest_vk_wc3_terrain.c, or a transient registration/copy failure) stays
+ * pending and is retried on the next call. This guarantees the bounded
+ * per-frame texture budget eventually drains across frames without
+ * permanently losing textures beyond the first frame's budget, while NOT
+ * re-registering/re-copying pixels for textures that already finished
+ * uploading - unlike re-offering every referenced texture unconditionally on
+ * every frame, which would re-decode potentially many large images per frame
+ * on mobile hardware even once nothing is left to do.
+ * Safe with any callback field NULL: the corresponding work is simply omitted
+ * (and a texture whose callback never runs, because onTextureReady is NULL,
+ * simply never clears pending - harmless, since there is nothing to upload).
  */
 bool bz_quest_wc3_terrain_capture(const bzQuestWc3TerrainCaptureCallbacks_t *callbacks);
 

@@ -750,11 +750,11 @@ static void terrain_ready_cb(const bzQuestWc3TerrainInput_t *terrain, void *user
     }
 }
 
-static void texture_ready_cb(const char *identity, uint32_t width, uint32_t height, uint32_t rowBytes,
+static bool texture_ready_cb(const char *identity, uint32_t width, uint32_t height, uint32_t rowBytes,
                              const uint8_t *pixels, uint32_t dataBytes, void *userdata) {
     (void)dataBytes;
     bzQuestVkWc3Terrain_t *vkTerrain = (bzQuestVkWc3Terrain_t *)userdata;
-    ensure_texture_uploaded(vkTerrain, identity, width, height, rowBytes, pixels);
+    return ensure_texture_uploaded(vkTerrain, identity, width, height, rowBytes, pixels);
 }
 
 static void upload_missing_chunks(bzQuestVkWc3Terrain_t *vkTerrain) {

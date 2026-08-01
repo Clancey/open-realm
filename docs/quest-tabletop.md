@@ -1403,7 +1403,7 @@ module split mirrors 5A exactly:
 | File | Kind | Owns |
 |------|------|------|
 | [`bz_quest_wc3_terrain.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_terrain.c) | pure, host-testable | Terrain scale validation, chunk grid/bounds math, surface-layer UV selection, water/cliff detection, chunk mesh emission, and stable chunk/texture keys. |
-| [`bz_quest_wc3_terrain_capture.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_terrain_capture.c) | impure, ABI-calling | The one retain/copy/release walk over `BZ_TTA_LatestTerrain()`/`BZ_TTTerrain_*()`/`BZ_TTA_RegisterTerrainTexture()`/`BZ_TTAsset_*()`. Detects same-generation terrain cheaply and skips *chunk-metadata* rebuild work there, but still re-offers every referenced ground/cliff/water texture on every call (see "Bounded texture upload budget spans multiple frames" below) — a same-generation short-circuit must never also skip texture emission. |
+| [`bz_quest_wc3_terrain_capture.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_wc3_terrain_capture.c) | impure, ABI-calling | The one retain/copy/release walk over `BZ_TTA_LatestTerrain()`/`BZ_TTTerrain_*()`/`BZ_TTA_RegisterTerrainTexture()`/`BZ_TTAsset_*()`. Detects same-generation terrain cheaply and skips *chunk-metadata* rebuild work there, but re-offers each referenced ground/cliff/water texture on every call **only while its own per-generation pending flag is still set** (see "Bounded texture upload budget spans multiple frames" below) — a same-generation short-circuit must never also skip a still-pending texture's emission, and a completed texture must never be re-registered/re-copied. |
 | [`bz_quest_vk_wc3_terrain.h`/`.c`](../platform/android/quest/app/src/main/cpp/bz_quest_vk_wc3_terrain.c) | impure, Vulkan-calling | Owns terrain-only descriptor set layout/pool/sampler/pipeline layout/shaders/staging buffer/upload command buffer plus one chunk cache and one texture cache, fully separate from both `bz_quest_vk.c` and `bz_quest_vk_wc3.c`. |
 | [`shaders/terrain_vert.vert`/`terrain_frag.frag`](../platform/android/quest/app/src/main/cpp/shaders/terrain_vert.vert) | GLSL, compiled by `build-shaders.sh` | Unlit textured terrain draw with per-vertex RGBA so water can preserve its authoritative corner alpha. |
 
@@ -1440,19 +1440,57 @@ host-testable Vulkan device is available to assert this dynamically).
 `bz_quest_vk_wc3_terrain.c`'s `ensure_texture_uploaded()` caps new texture
 creates to `BZ_QUEST_VK_WC3_TERRAIN_MAX_NEW_TEXTURE_UPLOADS_PER_FRAME` per
 frame, mirroring 5A's model-texture budget. A texture deferred by the budget
-is **not** lost: `bz_quest_wc3_terrain_capture()` re-offers every referenced
-ground/cliff/water texture identity on every call (not just when the terrain
-generation changes), and `ensure_texture_uploaded()`'s own cache-find-first
-check means re-offering an already-uploaded identity is a cheap no-op, so the
-budget drains a large texture set across multiple frames instead of
-permanently dropping anything past the first frame's budget. A texture still
-pending past its first deferral logs once (`log_deferred_once()`, keyed by
-identity, never reset) so a texture stuck pending for a long time stays
-explicitly diagnosable without per-frame log spam. `test_texture_budget_*` in
-`test_bz_quest_wc3_terrain.c` covers >4-texture eventual upload across
-frames, same-generation dedup, create-failure retry, and generation-reset
-eviction, using the same fake-cache harness as the existing hit/miss/eviction
-test.
+is **not** lost: `bz_quest_wc3_terrain_capture()` tracks a per-referenced-
+texture "pending" flag (`s_groundPending`/`s_cliffPending`/`s_waterPending`),
+all set on a NEW terrain generation. On every call (including same-generation
+frames), only textures still marked pending are re-registered, decoded via
+`BZ_TTAsset_CopyImagePixels`, and fed to `onTextureReady`; the callback
+returns `true` once the Vulkan side actually consumed the texture (uploaded,
+or already cache-hit), which clears its pending flag so every later
+same-generation call does **zero** registration/decode/copy work for it - it
+is not merely a "cheap cache-find no-op", it is skipped before any ABI call
+happens. A callback returning `false` (deferred by the per-frame budget, or a
+transient registration/copy failure) leaves the texture pending so it is
+retried on the very next call, and a new terrain generation repopulates every
+pending flag via `reset_pending_textures()`. This drains a large texture set
+across multiple frames without permanently dropping anything past the first
+frame's budget, and without re-decoding/re-copying pixels for a texture that
+already finished uploading - unconditionally re-offering every referenced
+texture every frame regardless of completion status would re-copy potentially
+many large images per frame indefinitely on mobile hardware, which is exactly
+the bug this pending-flag gate fixes.
+
+A texture still pending past its first deferral logs once
+(`log_deferred_once()`, keyed by identity) so it stays explicitly diagnosable
+without per-frame log spam. That log-once set is scoped to the current
+terrain **generation**, not the whole app session: `reset_deferred_log()`
+clears it on every generation swap (`reset_generation_caches()`) and on
+module teardown (`bz_quest_vk_wc3_terrain_destroy()`). Without this reset, the
+bounded set accumulates identities across every map reload forever, which (a)
+eventually fills the set so a brand-new deferred identity on a later map can
+no longer be recorded and instead reverts to logging every single frame, and
+(b) wrongly suppresses a legitimately-new deferral for an identity STRING
+reused across maps (e.g. a shared texture path) because an earlier
+generation's stale entry is still sitting in the set.
+
+`test_texture_budget_*` in `test_bz_quest_wc3_terrain.c` covers >4-texture
+eventual upload across frames, same-generation dedup, create-failure retry,
+and generation-reset eviction, using the same fake-cache harness as the
+existing hit/miss/eviction test. `test_pending_textures_*` composes that same
+harness with a local mirror of the capture-side pending-flag policy to prove,
+with copy counters: the initial copy happens; a >4-texture set eventually
+drains its budget across frames while textures completed in an earlier frame
+get **zero** additional copy calls in later frames; only pending/failed
+identities retry; and a generation reset causes a genuinely fresh copy (not a
+false zero-copy skip). `test_capture_gates_texture_reoffer_on_a_pending_flag`
+and `test_deferred_log_is_reset_on_generation_swap_and_teardown` structurally
+assert the real pending-flag gating and log-once-per-generation reset exist
+at their exact call sites in the checked-in source (no host-testable
+`bzTTTerrain_t` bridge or `VkDevice` is available to exercise either path
+dynamically). `test_deferred_log_*` behaviorally proves the log-once-with-
+reset policy itself: once-per-identity-per-generation, a reused identity
+logging again after a reset, many resets never leaking state, and capacity
+exhaustion recovering once reset restores headroom.
 
 Texture uploads also re-pack into a tightly-packed staging buffer one row at
 a time via the shared, host-testable `bz_quest_wc3_terrain_repack_texture_tight()`
@@ -1469,10 +1507,11 @@ an undersized destination, and an invalid too-short stride.
 paths: scale rejection, 32x32 tail-chunk clamping, authoritative quad winding,
 ground splat atlas selection, water opacity, cliff detection/material fallback,
 stable cache-key generation, the blended-pipeline depth-compare structural
-assertion, the texture upload budget/retry/dedup/reset scenarios, and the
-row-padding-safe texture repack helper (see the two subsections above). The
-existing descriptor-pool headroom script now structurally checks the terrain
-texture descriptor pool's required `capacity + 1` spare slot too.
+assertion, the texture upload budget/pending-retry/dedup/reset scenarios, the
+per-generation deferred-log reset, and the row-padding-safe texture repack
+helper (see the subsections above). The existing descriptor-pool headroom
+script now structurally checks the terrain texture descriptor pool's required
+`capacity + 1` spare slot too.
 
 ## Manifest requirements
 
