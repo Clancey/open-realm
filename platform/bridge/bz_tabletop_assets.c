@@ -756,6 +756,58 @@ uint32_t BZ_TTAsset_CopyGeosetMatrixPalette(const bzTTAsset_t *asset, uint32_t i
     return n;
 }
 
+static const bzTTEmitterRecord_t *emitter_record(const bzTTAsset_t *asset, uint32_t index) {
+    if (!asset || asset->kind != BZ_TTA_ASSET_MODEL || index >= asset->u.model.info.emitter_count)
+        return NULL;
+    return BZ_TTA_AssetData((bzTTAsset_t *)asset, asset->u.model.emitters_offset +
+                            index * sizeof(bzTTEmitterRecord_t), sizeof(bzTTEmitterRecord_t));
+}
+
+bool BZ_TTAsset_ParticleEmitterInfo(const bzTTAsset_t *asset, uint32_t index, bzTTParticleEmitterInfo_t *out) {
+    const bzTTEmitterRecord_t *record = emitter_record(asset, index);
+    if (!record || !out) return false;
+    *out = record->info;
+    return true;
+}
+
+static const bzTTTrackRecord_t *emitter_track_record(const bzTTAsset_t *asset, uint32_t emitter_index,
+                                                     bzTTEmitterChannel_t channel) {
+    const bzTTEmitterRecord_t *record = emitter_record(asset, emitter_index);
+    if (!record) return NULL;
+    switch (channel) {
+        case BZ_TTA_EMITTER_VISIBILITY: return &record->visibility;
+        case BZ_TTA_EMITTER_EMISSION_RATE: return &record->emission_rate;
+        case BZ_TTA_EMITTER_WIDTH: return &record->width;
+        case BZ_TTA_EMITTER_LENGTH: return &record->length;
+        case BZ_TTA_EMITTER_SPEED: return &record->speed;
+        case BZ_TTA_EMITTER_LATITUDE: return &record->latitude;
+        case BZ_TTA_EMITTER_GRAVITY: return &record->gravity;
+        case BZ_TTA_EMITTER_VARIATION: return &record->variation;
+        default: return NULL;
+    }
+}
+
+bool BZ_TTAsset_EmitterTrackInfo(const bzTTAsset_t *asset, uint32_t emitter_index,
+                                 bzTTEmitterChannel_t channel, bzTTTrackInfo_t *out) {
+    const bzTTTrackRecord_t *track = emitter_track_record(asset, emitter_index, channel);
+    if (!track || !out) return false;
+    out->key_count = track->key_count; out->interp = track->interp; out->global_sequence = track->global_sequence;
+    return true;
+}
+
+uint32_t BZ_TTAsset_CopyEmitterFloatKeys(const bzTTAsset_t *asset, uint32_t emitter_index,
+                                        bzTTEmitterChannel_t channel, bzTTFloatKey_t *dst, uint32_t cap) {
+    const bzTTTrackRecord_t *track = emitter_track_record(asset, emitter_index, channel);
+    uint32_t n; const void *src;
+    if (!track || !dst || !cap) return 0;
+    n = track->key_count < cap ? track->key_count : cap;
+    if (!n) return 0;
+    src = BZ_TTA_AssetData((bzTTAsset_t *)asset, track->keys_offset, (size_t)n * sizeof(bzTTFloatKey_t));
+    if (!src) return 0;
+    memcpy(dst, src, (size_t)n * sizeof(bzTTFloatKey_t));
+    return n;
+}
+
 void BZ_TTA_PublishTerrainFromGame(void) {
     bzTTTerrain_t *terrain = NULL, *old;
     bzTTAssetSource_t source;

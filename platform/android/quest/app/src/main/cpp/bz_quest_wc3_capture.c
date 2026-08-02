@@ -375,7 +375,8 @@ static void *anim_arena_take(bzQuestAnimArena_t *arena, size_t bytes) {
 static bzQuestWc3ModelAnim_t *build_model_anim(const bzTTAsset_t *asset, const char *identity,
                                                const bzTTModelInfo_t *modelInfo,
                                                const uint32_t *rawToOutGeoset, uint32_t rawGeosetCount,
-                                               uint32_t outGeosetCount) {
+                                               uint32_t outGeosetCount,
+                                               const bzQuestWc3CaptureCallbacks_t *callbacks) {
     uint32_t nodeCount = modelInfo->node_count;
     if (nodeCount > BZ_QUEST_WC3_MAX_NODES_PER_MODEL) {
         LOG_ONCE(identity, "model-too-many-nodes",
@@ -402,6 +403,15 @@ static bzQuestWc3ModelAnim_t *build_model_anim(const bzTTAsset_t *asset, const c
                  identity, globalSeqCount, (uint32_t)BZ_QUEST_WC3_MAX_GLOBAL_SEQUENCES_PER_MODEL,
                  (uint32_t)BZ_QUEST_WC3_MAX_GLOBAL_SEQUENCES_PER_MODEL);
         globalSeqCount = BZ_QUEST_WC3_MAX_GLOBAL_SEQUENCES_PER_MODEL;
+    }
+    uint32_t emitterCount = modelInfo->emitter_count;
+    if (emitterCount > BZ_QUEST_WC3_MAX_EMITTERS_PER_MODEL) {
+        LOG_ONCE(identity, "model-too-many-emitters",
+                 "bz_quest_wc3_capture: model '%s' has %u PRE2 particle emitters (max %u "
+                 "supported this slice) - truncating to the first %u\n",
+                 identity, emitterCount, (uint32_t)BZ_QUEST_WC3_MAX_EMITTERS_PER_MODEL,
+                 (uint32_t)BZ_QUEST_WC3_MAX_EMITTERS_PER_MODEL);
+        emitterCount = BZ_QUEST_WC3_MAX_EMITTERS_PER_MODEL;
     }
 
     /* Bounded Info()-only scratch, queried exactly once here and reused by
@@ -492,6 +502,59 @@ static bzQuestWc3ModelAnim_t *build_model_anim(const bzTTAsset_t *asset, const c
         }
     }
 
+    /* PRE2 particle emitters (ABI v4) - the only MDX effect class this project's authoritative
+     * runtime actually parses+simulates+draws end to end, see bz_quest_wc3_particles.h's header
+     * comment for the full audit. Each emitter's own node hierarchy/pivot/KGTR-KGRT-KGSC track
+     * already lives in s_animNodeInfo/s_animTransInfo/etc above (an emitter IS just another
+     * node - platform/bridge/bz_tabletop_assets.h's bzTTParticleEmitterInfo_t doc comment).
+     *
+     * Only 4 of PRE2's 8 animatable float channels ever need a track sampled here (visibility/
+     * emissionRate/speed/gravity) - width/length/latitude/variation are deliberately excluded:
+     * the authoritative renderer's own MDLX_RenderEmitter samples all 7 physical channels but
+     * only ever reads back the sampled EmissionRate/Speed/Gravity locals, reading
+     * emitter->Width/Length/Latitude's STATIC field directly at their call sites instead (and
+     * never reading the sampled Variation local at all) - see
+     * bzQuestWc3StoredEmitter_t's doc comment (bz_quest_wc3_render.h) for the full git-blame-
+     * verified citation. Requesting track info the Quest renderer will never sample would just
+     * be wasted ABI calls/arena space for data that can never affect a frame. */
+    static const bzTTEmitterChannel_t kEmitterTrackChannels[4] = {
+        BZ_TTA_EMITTER_VISIBILITY, BZ_TTA_EMITTER_EMISSION_RATE, BZ_TTA_EMITTER_SPEED, BZ_TTA_EMITTER_GRAVITY,
+    };
+    static bzTTParticleEmitterInfo_t s_animEmitterInfo[BZ_QUEST_WC3_MAX_EMITTERS_PER_MODEL];
+    static bzTTTrackInfo_t s_animEmitterTrackInfo[BZ_QUEST_WC3_MAX_EMITTERS_PER_MODEL][4];
+    for (uint32_t e = 0; e < emitterCount; e++) {
+        if (!BZ_TTAsset_ParticleEmitterInfo(asset, e, &s_animEmitterInfo[e])) {
+            LOG_ONCE(identity, "emitter-info-missing",
+                     "bz_quest_wc3_capture: model '%s' emitter %u missing ParticleEmitterInfo - "
+                     "this emitter will not spawn particles\n",
+                     identity, e);
+            memset(&s_animEmitterInfo[e], 0, sizeof(s_animEmitterInfo[e]));
+            s_animEmitterInfo[e].node_index = UINT32_MAX; /* sentinel: resolved-away below */
+        } else if (s_animEmitterInfo[e].node_index >= nodeCount) {
+            /* Only reachable if the emitter's own node fell past
+             * BZ_QUEST_WC3_MAX_NODES_PER_MODEL's truncation point above - the emitter itself is
+             * still decoded (so a future larger node cap could revive it), but it cannot spawn
+             * without a resolvable node this frame. */
+            LOG_ONCE(identity, "emitter-node-truncated",
+                     "bz_quest_wc3_capture: model '%s' emitter %u references node %u, past this "
+                     "slice's %u-node cap - this emitter will not spawn particles\n",
+                     identity, e, s_animEmitterInfo[e].node_index, nodeCount);
+        }
+        for (uint32_t ci = 0; ci < 4; ci++) {
+            bzTTEmitterChannel_t ch = kEmitterTrackChannels[ci];
+            if (!BZ_TTAsset_EmitterTrackInfo(asset, e, ch, &s_animEmitterTrackInfo[e][ci]))
+                memset(&s_animEmitterTrackInfo[e][ci], 0, sizeof(s_animEmitterTrackInfo[e][ci]));
+            if (s_animEmitterTrackInfo[e][ci].key_count > BZ_QUEST_WC3_MAX_KEYS_PER_TRACK) {
+                LOG_ONCE(identity, "emitter-track-too-many-keys",
+                         "bz_quest_wc3_capture: model '%s' emitter %u channel %u track has %u "
+                         "keys (max %u supported this slice) - truncating\n",
+                         identity, e, (uint32_t)ch, s_animEmitterTrackInfo[e][ci].key_count,
+                         (uint32_t)BZ_QUEST_WC3_MAX_KEYS_PER_TRACK);
+                s_animEmitterTrackInfo[e][ci].key_count = BZ_QUEST_WC3_MAX_KEYS_PER_TRACK;
+            }
+        }
+    }
+
     /* geoset-anim Info, keyed by the COMPACTED output geoset index (so
      * geosetAnims[] ends up index-aligned with meta.geosets[] even when
      * earlier raw geosets were skipped) - s_animOutToRawGeoset lets the fill
@@ -546,6 +609,8 @@ static bzQuestWc3ModelAnim_t *build_model_anim(const bzTTAsset_t *asset, const c
             (uint32_t *)anim_arena_take(&arena, (size_t)globalSeqCount * sizeof(uint32_t));
         bzQuestWc3StoredGeosetAnim_t *geosetAnims = (bzQuestWc3StoredGeosetAnim_t *)anim_arena_take(
             &arena, (size_t)outGeosetCount * sizeof(*geosetAnims));
+        bzQuestWc3StoredEmitter_t *emitters =
+            (bzQuestWc3StoredEmitter_t *)anim_arena_take(&arena, (size_t)emitterCount * sizeof(*emitters));
 
         for (uint32_t n = 0; n < nodeCount; n++) {
             uint32_t parentIndex = BZ_QUEST_WC3_NO_PARENT;
@@ -714,6 +779,95 @@ static bzQuestWc3ModelAnim_t *build_model_anim(const bzTTAsset_t *asset, const c
             if (geosetAnims) geosetAnims[outIndex] = ga;
         }
 
+        for (uint32_t e = 0; e < emitterCount; e++) {
+            bzQuestWc3StoredEmitter_t em;
+            memset(&em, 0, sizeof(em));
+            const bzTTParticleEmitterInfo_t *ei = &s_animEmitterInfo[e];
+            em.nodeIndex = ei->node_index < nodeCount ? ei->node_index : BZ_QUEST_WC3_NO_PARENT;
+            em.blendMode = ei->blend_mode;
+            em.headOrTail = ei->head_or_tail;
+            em.rows = ei->rows;
+            em.columns = ei->columns;
+            em.speed = ei->speed; em.latitude = ei->latitude;
+            em.gravity = ei->gravity; em.lifeSpan = ei->life_span; em.emissionRate = ei->emission_rate;
+            em.length = ei->length; em.width = ei->width;
+            em.tailLength = ei->tail_length; em.timeMiddle = ei->time_middle;
+            memcpy(em.segmentColor, ei->segment_color, sizeof(em.segmentColor));
+            memcpy(em.segmentAlpha, ei->segment_alpha, sizeof(em.segmentAlpha));
+            memcpy(em.particleScaling, ei->particle_scaling, sizeof(em.particleScaling));
+
+            /* Texture resolution: exactly mirrors decode_layers()'s own three-way
+             * replaceable_id contract (see bzQuestWc3StoredEmitter_t's doc comment) - reuses
+             * decode_and_offer_texture() rather than a second copy of that decode/validate/
+             * offer control flow (DRY). */
+            em.unsupported = true;
+            bzTTModelTextureInfo_t texInfo;
+            if (!BZ_TTAsset_ModelTextureInfo(asset, ei->texture_index, &texInfo)) {
+                LOG_ONCE(identity, "emitter-texture-missing",
+                         "bz_quest_wc3_capture: model '%s' emitter %u missing texture info\n",
+                         identity, e);
+            } else if (texInfo.replaceable_id == 1 || texInfo.replaceable_id == 2) {
+                em.unsupported = false;
+                em.teamColor = (texInfo.replaceable_id == 1);
+                em.teamGlow = (texInfo.replaceable_id == 2);
+            } else if (texInfo.replaceable_id != 0) {
+                LOG_ONCE(identity, "emitter-replaceable-texture-deferred",
+                         "bz_quest_wc3_capture: model '%s' emitter %u uses replaceable_id %u "
+                         "(per-entity image override) - deferred out of scope, emitter spawns "
+                         "no particles\n",
+                         identity, e, texInfo.replaceable_id);
+            } else {
+                const bzTTAsset_t *texAsset =
+                    BZ_TTA_RegisterModelTexture(BZ_TABLETOP_ASSETS_ABI_VERSION, asset, ei->texture_index);
+                if (!texAsset) {
+                    LOG_ONCE(identity, "emitter-texture-registration-failed",
+                             "bz_quest_wc3_capture: model '%s' emitter %u direct texture "
+                             "registration failed\n",
+                             identity, e);
+                } else {
+                    em.unsupported = !decode_and_offer_texture(texAsset, identity, em.textureIdentity,
+                                                               sizeof(em.textureIdentity), callbacks);
+                    BZ_TTAsset_Release(texAsset);
+                }
+            }
+
+            /* Table-driven: every one of these 4 channels is a plain float track (unlike node
+             * translation/rotation/scale's 3 distinct value types), so one small loop over
+             * {channel, destination field} pairs covers all 4 - see bzTTEmitterChannel_t's own
+             * doc comment on why this is DRY versus 4 near-identical hand-written blocks. Only
+             * visibility/emissionRate/speed/gravity get a track at all here - see
+             * bzQuestWc3StoredEmitter_t's doc comment (bz_quest_wc3_render.h) for why
+             * width/length/latitude/variation are deliberately excluded. */
+            bzQuestWc3StoredTrack_t *trackFields[4] = {
+                &em.visibilityTrack, &em.emissionRateTrack, &em.speedTrack, &em.gravityTrack,
+            };
+            for (uint32_t ci = 0; ci < 4; ci++) {
+                const bzTTTrackInfo_t *ti = &s_animEmitterTrackInfo[e][ci];
+                bzQuestWc3StoredTrack_t *track = trackFields[ci];
+                track->keyCount = ti->key_count;
+                track->interp = (bzQuestWc3Interp_t)ti->interp;
+                track->globalSequence = (ti->global_sequence == BZ_TTA_NO_GLOBAL_SEQUENCE)
+                                            ? BZ_QUEST_WC3_NO_GLOBAL_SEQUENCE
+                                            : ti->global_sequence;
+                if (track->keyCount > 0) {
+                    bzQuestWc3FloatKey_t *dst =
+                        (bzQuestWc3FloatKey_t *)anim_arena_take(&arena, (size_t)track->keyCount * sizeof(*dst));
+                    track->floatKeys = dst;
+                    if (dst) {
+                        uint32_t got = BZ_TTAsset_CopyEmitterFloatKeys(asset, e, kEmitterTrackChannels[ci],
+                                                                       s_animRawFloatKeys, track->keyCount);
+                        for (uint32_t k = 0; k < got && k < track->keyCount; k++) {
+                            dst[k].timeMsec = s_animRawFloatKeys[k].time_msec;
+                            dst[k].value = s_animRawFloatKeys[k].value;
+                            dst[k].inTan = s_animRawFloatKeys[k].in_tan;
+                            dst[k].outTan = s_animRawFloatKeys[k].out_tan;
+                        }
+                    }
+                }
+            }
+            if (emitters) emitters[e] = em;
+        }
+
         if (pass == 0) {
             if (arena.offset == 0) {
                 ok = false; /* legitimately no animation data worth retaining */
@@ -748,6 +902,8 @@ static bzQuestWc3ModelAnim_t *build_model_anim(const bzTTAsset_t *asset, const c
             anim->globalSeqDurations = globalSeqDurations;
             anim->geosetAnimCount = outGeosetCount;
             anim->geosetAnims = geosetAnims;
+            anim->emitterCount = emitterCount;
+            anim->emitters = emitters;
             return anim;
         }
     }
@@ -823,7 +979,7 @@ static void decode_model(const bzTTAsset_t *asset, const char *identity,
      * is safe/no-op, geometry/texture decode is simply skipped" contract,
      * skip the allocation entirely when there is no consumer. */
     s_scratchModel.meta.anim = (callbacks && callbacks->onModelReady)
-        ? build_model_anim(asset, identity, &modelInfo, s_rawToOutGeoset, geosetCount, outGeosetCount)
+        ? build_model_anim(asset, identity, &modelInfo, s_rawToOutGeoset, geosetCount, outGeosetCount, callbacks)
         : NULL;
 
     if (callbacks && callbacks->onModelReady) {

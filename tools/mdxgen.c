@@ -141,6 +141,7 @@ static void wb_free(wbuf_t *b) { free(b->data); b->data = NULL; b->size = b->cap
 
 /* MDLXNODE flags */
 #define MDLXNODE_Bone      256u
+#define MDLXNODE_ParticleEmitter 4096u
 
 /* =========================================================================
  * Geometry helpers
@@ -501,6 +502,80 @@ static void emit_GEOS_RIGGED(wbuf_t *b, float hw, float hh) {
     wb_patch_size(b, chunk_size_off);
 }
 
+/* PIVT for the particle-emitter fixture: Bone_Root at origin, ParticleEmitter1 offset +1 on Z
+ * (its own pivot, independent of its KGTR track's animated offset - matches how a real MDX
+ * separates a node's fixed pivot from its animated translation). */
+static void emit_PIVT_EMITTER(wbuf_t *b) {
+    wb_tag(b, "PIVT");
+    wb_u32(b, 24);
+    wb_vec3(b, 0.0f, 0.0f, 0.0f);
+    wb_vec3(b, 0.0f, 0.0f, 1.0f);
+}
+
+/* PRE2 chunk: ONE particle emitter v2 (object 1, parented to Bone_Root/object 0), exercising:
+ * - the node hierarchy/pivot/KGTR track a PRE2 emitter carries exactly like any other node
+ *   (see games/warcraft-3/visionos/wc3_mdx_decode.c's parse_particle_emitters());
+ * - every static PRE2 field r_mdx_load.c's ReadParticleEmitter reads, in its exact on-disk
+ *   order (Speed..ReplaceableId - see games/warcraft-3/docs/file-formats/mdx.md);
+ * - one KP2E (EmissionRate) keytrack overriding the static EmissionRate default.
+ *
+ * On-disk layout is the NESTED double size field this project traced empirically against the
+ * real host parser (see wc3_mdx_decode.c's parse_particle_emitters() doc comment): an OUTER
+ * inclusive size wraps the whole record; an INNER inclusive size immediately follows and wraps
+ * only the generic node header + its own KGTR/KGRT/KGSC tracks. */
+static void emit_PRE2(wbuf_t *b) {
+    wb_tag(b, "PRE2");
+    size_t chunk_size_off = wb_reserve_u32(b);
+    {
+        size_t outer_size_off = wb_reserve_u32(b);
+        {
+            size_t inner_size_off = wb_reserve_u32(b);
+            wb_str(b, "ParticleEmitter1", MDX_NODE_NAME_LEN);
+            wb_u32(b, 1);                       /* objectId */
+            wb_u32(b, 0);                       /* parentId = Bone_Root */
+            wb_u32(b, MDLXNODE_ParticleEmitter); /* flags */
+            {
+                uint32_t times[2] = { 0, 2000 };
+                float values[6] = { 0,0,0,  0,0,1 }; /* animated offset on top of the pivot above */
+                wb_track(b, "KGTR", 0xFFFFFFFF, times, values, 2, 3);
+            }
+            wb_patch_record_size(b, inner_size_off);
+        }
+        wb_f32(b, 10.0f);   /* Speed */
+        wb_f32(b, 0.5f);    /* Variation */
+        wb_f32(b, 45.0f);   /* Latitude (degrees, matching the raw on-disk convention) */
+        wb_f32(b, 9.8f);    /* Gravity */
+        wb_f32(b, 2.0f);    /* LifeSpan */
+        wb_f32(b, 20.0f);   /* EmissionRate (static default; overridden by the KP2E track below) */
+        wb_f32(b, 0.0f);    /* Length */
+        wb_f32(b, 0.0f);    /* Width */
+        wb_u32(b, 1);       /* FilterMode = Additive (raw PRE2 enum: Blend=0,Additive=1,...) */
+        wb_u32(b, 2);       /* Rows */
+        wb_u32(b, 2);       /* Columns */
+        wb_u32(b, 2);       /* FrameFlags = Both (raw HeadOrTail enum: Head=0,Tail=1,Both=2) */
+        wb_f32(b, 0.1f);    /* TailLength */
+        wb_f32(b, 0.5f);    /* Time (timeMiddle) */
+        {
+            float segment_color[9] = { 1,1,1,  1,0.5f,0,  1,0,0 }; /* white -> orange -> red */
+            wb_write(b, segment_color, sizeof(segment_color));
+        }
+        { uint8_t alpha[3] = { 255, 200, 0 }; wb_write(b, alpha, sizeof(alpha)); }
+        { float scale[3] = { 1, 1, 1 }; wb_write(b, scale, sizeof(scale)); }
+        { uint32_t uv_anim[12] = {0}; wb_write(b, uv_anim, sizeof(uv_anim)); } /* 4x{start,end,repeat}, unused */
+        wb_u32(b, 0);       /* TextureID */
+        wb_u32(b, 0);       /* Squirt */
+        wb_u32(b, 0);       /* PriorityPlane */
+        wb_u32(b, 0);       /* ReplaceableId */
+        {
+            uint32_t times[2] = { 0, 2000 };
+            float values[2] = { 5.0f, 25.0f };
+            wb_track(b, "KP2E", 0xFFFFFFFF, times, values, 2, 1);
+        }
+        wb_patch_record_size(b, outer_size_off);
+    }
+    wb_patch_size(b, chunk_size_off);
+}
+
 /* =========================================================================
  * Model builders
  * =========================================================================*/
@@ -621,6 +696,47 @@ static int build_model_rigged(const char *tex_path, const char *out_path,
     return 1;
 }
 
+/* Simple (non-rigged) quad geoset skinned to Bone_Root (object 0) only, plus a PRE2 particle
+ * emitter (object 1, parented to Bone_Root) with its own KGTR track, static fields, and one
+ * KP2E override track - see emit_PRE2()'s doc comment. Exercises the particle-emitter decode
+ * path (games/warcraft-3/visionos/wc3_mdx_decode.c's parse_particle_emitters()) sharing the
+ * SAME node array a regular bone hierarchy uses. */
+static int build_model_particle_emitter(const char *tex_path, const char *out_path, const char *model_name,
+                                        float hw, float hh) {
+    wbuf_t b = { 0 };
+    const char *names[] = { "Stand" };
+    uint32_t starts[] = { 0 };
+    uint32_t ends[] = { 2000 };
+
+    wb_tag(&b, MDX_MAGIC);
+    emit_VERS(&b);
+    emit_MODL(&b, model_name);
+    emit_SEQS(&b, names, starts, ends, 1);
+    emit_TEXS(&b, tex_path);
+    emit_MTLS(&b);
+    emit_GEOS(&b, hw, hh);
+    emit_BONE(&b);
+    emit_PRE2(&b);
+    emit_PIVT_EMITTER(&b);
+
+    FILE *f = fopen(out_path, "wb");
+    if (!f) {
+        fprintf(stderr, "mdxgen: cannot open '%s' for writing\n", out_path);
+        wb_free(&b);
+        return 0;
+    }
+    if (fwrite(b.data, 1, b.size, f) != b.size) {
+        fprintf(stderr, "mdxgen: short write %s\n", out_path);
+        fclose(f);
+        wb_free(&b);
+        return 0;
+    }
+    fclose(f);
+    fprintf(stderr, "mdxgen: wrote %s (%zu bytes)\n", out_path, b.size);
+    wb_free(&b);
+    return 1;
+}
+
 /* =========================================================================
  * Presets
  * =========================================================================*/
@@ -696,6 +812,16 @@ static int gen_rigged_anim(int argc, char **argv) {
     return build_model_rigged(tex, out, "RiggedAnim", 0.5f, 0.5f) ? 0 : 1;
 }
 
+static int gen_particle_emitter(int argc, char **argv) {
+    if (argc < 3) {
+        fprintf(stderr, "usage: mdxgen particle_emitter <tex_path> <out.mdx>\n");
+        return 1;
+    }
+    const char *tex = argv[1];
+    const char *out = argv[2];
+    return build_model_particle_emitter(tex, out, "ParticleEmitterFixture", 0.5f, 0.5f) ? 0 : 1;
+}
+
 /* =========================================================================
  * main
  * =========================================================================*/
@@ -704,11 +830,12 @@ static void usage(void) {
         "mdxgen - MDX binary model fixture generator\n"
         "\n"
         "Usage:\n"
-        "  mdxgen quad_sprite   <tex_path> <out.mdx>\n"
-        "  mdxgen panel_sprite  <tex_path> <out.mdx>\n"
-        "  mdxgen ui_panel      <tex_path> <out.mdx>\n"
-        "  mdxgen anim_pulse    <tex_path> <out.mdx>\n"
-        "  mdxgen rigged_anim   <tex_path> <out.mdx>\n"
+        "  mdxgen quad_sprite       <tex_path> <out.mdx>\n"
+        "  mdxgen panel_sprite      <tex_path> <out.mdx>\n"
+        "  mdxgen ui_panel          <tex_path> <out.mdx>\n"
+        "  mdxgen anim_pulse        <tex_path> <out.mdx>\n"
+        "  mdxgen rigged_anim       <tex_path> <out.mdx>\n"
+        "  mdxgen particle_emitter  <tex_path> <out.mdx>\n"
         "\n"
         "Examples:\n"
         "  mdxgen quad_sprite   TestUI/Textures/checker_8x8.blp  quad_sprite.mdx\n"
@@ -716,6 +843,7 @@ static void usage(void) {
         "  mdxgen ui_panel      TestUI/Textures/solid_white.blp  ui_panel.mdx\n"
         "  mdxgen anim_pulse    TestUI/Textures/alpha_ring_16x16.blp  anim_pulse.mdx\n"
         "  mdxgen rigged_anim   TestUI/Textures/checker_8x8.blp  rigged_anim.mdx\n"
+        "  mdxgen particle_emitter  TestUI/Textures/checker_8x8.blp  particle_emitter.mdx\n"
     );
 }
 
@@ -731,6 +859,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "ui_panel")     == 0) return gen_ui_panel(sub_argc, sub_argv);
     if (strcmp(cmd, "anim_pulse")   == 0) return gen_anim_pulse(sub_argc, sub_argv);
     if (strcmp(cmd, "rigged_anim")  == 0) return gen_rigged_anim(sub_argc, sub_argv);
+    if (strcmp(cmd, "particle_emitter") == 0) return gen_particle_emitter(sub_argc, sub_argv);
 
     fprintf(stderr, "mdxgen: unknown command '%s'\n\n", cmd);
     usage();

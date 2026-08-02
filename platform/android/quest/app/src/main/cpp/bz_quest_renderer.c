@@ -81,6 +81,7 @@ bool bz_quest_renderer_init(void *vm, void *context, bzQuestRenderer_t *renderer
     if (!bz_quest_vk_wc3_create(vk, &renderer->wc3)) goto fail;
     if (!bz_quest_vk_wc3_terrain_create(vk, &renderer->wc3Terrain)) goto fail;
     if (!bz_quest_vk_wc3_fog_create(vk, &renderer->wc3Fog)) goto fail;
+    if (!bz_quest_vk_wc3_particles_create(vk, &renderer->wc3, &renderer->wc3Particles)) goto fail;
     if (!bz_quest_vk_wc3_hud_create(vk, &renderer->wc3Hud)) goto fail;
 
     /* Layer 6: OpenXR Touch action set (needs session+space, created above)
@@ -327,20 +328,25 @@ static bool bz_quest_renderer_render_warcraft_target(
      * between them, as an earlier revision mistakenly did): darkening the
      * scene before blended terrain/model passes run left water and
      * transparent doodads compositing back on TOP of the fog mask, fully
-     * visible through unseen/explored-not-visible fog. Recording fog last -
-     * immediately before selection markers - makes it a true final
-     * visibility mask over the complete opaque+blended scene. Selection
-     * markers run last so they stay readable atop fogged content but still
-     * depth-test against the opaque geometry already in the depth buffer.
-     * The layer 5E status/command-card HUD is recorded last of all - after
-     * fog and selection markers - so the bridge-authored HUD is always
-     * legible on top of the board, matching visionOS's own overlay-panel
-     * placement (see docs/quest-tabletop.md's Layer 5E section). */
+     * visible through unseen/explored-not-visible fog. Layer 9 particles are
+     * recorded right after the model renderer's own blended pass, still
+     * before fog, for the identical reason - a burning building's smoke must
+     * be masked by unexplored fog exactly like blended terrain/doodads are.
+     * Recording fog last - immediately before selection markers - makes it a
+     * true final visibility mask over the complete opaque+blended+particle
+     * scene. Selection markers run last so they stay readable atop fogged
+     * content but still depth-test against the opaque geometry already in
+     * the depth buffer. The layer 5E status/command-card HUD is recorded
+     * last of all - after fog and selection markers - so the bridge-authored
+     * HUD is always legible on top of the board, matching visionOS's own
+     * overlay-panel placement (see docs/quest-tabletop.md's Layer 5E
+     * section). */
     bz_quest_vk_wc3_terrain_record_opaque(&renderer->wc3Terrain, target->commandBuffer, viewProj, cameraWorldPos,
                                           terrainList);
     bz_quest_vk_wc3_record_opaque(&renderer->wc3, target->commandBuffer, viewProj, cameraWorldPos, wc3List);
     bz_quest_vk_wc3_terrain_record_blended(&renderer->wc3Terrain, target->commandBuffer, viewProj, terrainList);
     bz_quest_vk_wc3_record_blended(&renderer->wc3, target->commandBuffer, viewProj, wc3List);
+    bz_quest_vk_wc3_particles_record(&renderer->wc3Particles, target->commandBuffer, viewProj);
     bz_quest_vk_wc3_fog_record_overlay(&renderer->wc3Fog, target->commandBuffer, viewProj);
     bz_quest_vk_wc3_fog_record_selection(&renderer->wc3Fog, target->commandBuffer, viewProj, wc3List);
     bz_quest_vk_wc3_hud_record(&renderer->wc3Hud, target->commandBuffer, viewProj);
@@ -414,9 +420,13 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
     memset(&wc3RenderList, 0, sizeof(wc3RenderList));
     memset(&terrainRenderList, 0, sizeof(terrainRenderList));
     if (haveViews) {
-        bz_quest_vk_wc3_capture_and_upload(&renderer->wc3, &wc3RenderList);
+        bz_quest_vk_wc3_capture_and_upload(&renderer->wc3, &wc3RenderList, renderer->interaction.mapEpoch);
         bz_quest_vk_wc3_terrain_capture_and_upload(&renderer->wc3Terrain, &terrainRenderList);
         bz_quest_vk_wc3_fog_capture_and_upload(&renderer->wc3Fog);
+        /* Must run after bz_quest_vk_wc3_capture_and_upload() above - see
+         * bz_quest_vk_wc3_particles_capture_and_upload()'s doc comment (that call already spawned/
+         * aged this frame's particles as part of building wc3RenderList). */
+        bz_quest_vk_wc3_particles_capture_and_upload(&renderer->wc3Particles);
         bz_quest_vk_wc3_hud_capture_and_upload(&renderer->wc3Hud);
     }
 
@@ -439,6 +449,7 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
                 haveViews = false;
             } else if (wc3RenderList.count > 0 || terrainRenderList.count > 0 ||
                        bz_quest_vk_wc3_fog_has_overlay(&renderer->wc3Fog) ||
+                       bz_quest_vk_wc3_particles_has_geometry(&renderer->wc3Particles) ||
                        bz_quest_vk_wc3_hud_has_frame(&renderer->wc3Hud) ||
                        bz_quest_vk_wc3_pointer_has_geometry(&renderer->wc3Pointer)) {
                 /* Warcraft III terrain and/or models exist this frame: record
@@ -534,6 +545,7 @@ void bz_quest_renderer_shutdown(bzQuestRenderer_t *renderer) {
     bz_quest_xr_actions_destroy(&renderer->xr, &renderer->xrActions);
     bz_quest_xr_hands_destroy(&renderer->xrHands);
     bz_quest_vk_wc3_hud_destroy(&renderer->wc3Hud);
+    bz_quest_vk_wc3_particles_destroy(&renderer->wc3Particles);
     bz_quest_vk_wc3_fog_destroy(&renderer->wc3Fog);
     bz_quest_vk_wc3_terrain_destroy(&renderer->wc3Terrain);
     bz_quest_vk_wc3_destroy(&renderer->wc3);

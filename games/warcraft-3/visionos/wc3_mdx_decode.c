@@ -10,6 +10,14 @@
 #define MDX_MAX_RECORDS 65536u
 #define MDX_TEXTURE_RECORD 268u
 #define MDX_SEQUENCE_RECORD 132u
+/* PRE2 particle emitter v2 fixed trailing fields (everything after the nested generic/inner
+ * node size+header+tracks - see mdxTempEmitter_t's doc comment): Speed..Width (8 floats=32) +
+ * FilterMode,Rows,Columns,FrameFlags (4 dwords=16) + TailLength,Time (2 floats=8) +
+ * SegmentColor[9] (36) + Alpha[3] (3) + ParticleScaling[3] (12) + 4x{start,end,repeat} UV-anim
+ * dword triples (48) + TextureID,Squirt,PriorityPlane,ReplaceableId (4 dwords=16). Matches
+ * games/warcraft-3/renderer/mdx/r_mdx_load.c's ReadParticleEmitter field order exactly - see
+ * games/warcraft-3/docs/file-formats/mdx.md's "Particle Emitters (PRE2)" section. */
+#define MDX_PRE2_TRAILING_FIELDS_SIZE (32 + 16 + 8 + 36 + 3 + 12 + 48 + 16)
 
 #define FOURCC(a,b,c,d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
 
@@ -48,6 +56,17 @@ typedef struct {
     mdxTempTrack_t translation, rotation, scale;
 } mdxTempNode_t;
 
+/* One PRE2 particle emitter. `info.node_index` is filled in immediately after the emitter's
+ * own node record is appended to model->nodes (see parse_particle_emitters()) - the emitter IS
+ * a node (mdxParticleEmitter_t embeds mdxNode_t in the classic renderer, r_mdx.h), not a
+ * separate hierarchy, so no parent/pivot/transform-track fields are duplicated here. The 8
+ * tracks below are this emitter's own KP2x channels (see bzTTEmitterChannel_t) - always floats,
+ * unlike node translation/rotation/scale which need 3 distinct value types. */
+typedef struct {
+    bzTTParticleEmitterInfo_t info;
+    mdxTempTrack_t visibility, emission_rate, width, length, speed, latitude, gravity, variation;
+} mdxTempEmitter_t;
+
 typedef struct {
     uint32_t geoset_id; /* GEOS index, or UINT32_MAX = none */
     float static_alpha;
@@ -63,8 +82,9 @@ typedef struct {
     mdxTempNode_t *nodes;
     uint32_t *global_sequences;
     mdxTempGeosetAnim_t *geoset_anims;
+    mdxTempEmitter_t *emitters;
     uint32_t geoset_count, material_count, layer_count, texture_count, sequence_count, node_count;
-    uint32_t global_sequence_count, geoset_anim_count;
+    uint32_t global_sequence_count, geoset_anim_count, emitter_count;
     bzTTBounds3_t bounds;
     uint32_t version;
 } mdxTempModel_t;
@@ -158,9 +178,14 @@ static void free_temp_model(mdxTempModel_t *model) {
         free(model->nodes[i].scale.keys);
     }
     for (uint32_t i = 0; i < model->geoset_anim_count; i++) free(model->geoset_anims[i].alpha.keys);
+    for (uint32_t i = 0; i < model->emitter_count; i++) {
+        mdxTempEmitter_t *e = &model->emitters[i];
+        free(e->visibility.keys); free(e->emission_rate.keys); free(e->width.keys); free(e->length.keys);
+        free(e->speed.keys); free(e->latitude.keys); free(e->gravity.keys); free(e->variation.keys);
+    }
     free(model->geosets); free(model->materials); free(model->layers);
     free(model->textures); free(model->sequences); free(model->nodes);
-    free(model->global_sequences); free(model->geoset_anims);
+    free(model->global_sequences); free(model->geoset_anims); free(model->emitters);
     memset(model, 0, sizeof(*model));
 }
 
@@ -367,50 +392,172 @@ static bool parse_geosets(mdxReader_t *r, mdxTempModel_t *model) {
     return true;
 }
 
+/* Reads one node's header (name/objectId/parentId/flags) plus its own KGTR/KGRT/KGSC tracks
+ * from `node_reader` (already bounded to exactly this portion by the caller - see this
+ * function's two call sites: parse_nodes() for HELP/BONE, and parse_particle_emitters() for
+ * PRE2's nested inner/generic size), then fills the rest-pose initial_translation/rotation/
+ * scale from each track's first keyframe when present. Factored out of parse_nodes() (which
+ * used to inline this) so PRE2 emitters - which are ordinary nodes wrapped in an additional
+ * outer per-emitter record (see mdxTempEmitter_t's doc comment) - reuse the identical
+ * header/track parsing rather than a second copy of this control flow. */
+static bool parse_node_header_and_tracks(mdxReader_t *node_reader, mdxTempNode_t *node) {
+    uint32_t tag;
+    node->info.parent_id = UINT32_MAX;
+    node->info.initial_rotation_w = 1;
+    node->info.initial_scale = (bzTTVec3_t){ 1, 1, 1 };
+    if (!read_bytes(node_reader, node->info.name, sizeof(node->info.name)) ||
+        !read_u32(node_reader, &node->info.object_id) || !read_u32(node_reader, &node->info.parent_id) ||
+        !read_u32(node_reader, &node->info.flags))
+        return false;
+    node->info.name[sizeof(node->info.name) - 1] = '\0';
+    while (node_reader->pos + 4 <= node_reader->size) {
+        if (!read_u32(node_reader, &tag)) return false;
+        if (tag == FOURCC('K','G','T','R')) { if (!parse_vec3_track(node_reader, &node->translation)) return false; }
+        else if (tag == FOURCC('K','G','S','C')) { if (!parse_vec3_track(node_reader, &node->scale)) return false; }
+        else if (tag == FOURCC('K','G','R','T')) { if (!parse_quat_track(node_reader, &node->rotation)) return false; }
+        else return false;
+    }
+    /* Rest pose falls back to the track's first keyframe when present, matching the classic
+     * renderer's node bind pose (the value used before any sequence samples it). */
+    if (node->translation.key_count)
+        node->info.initial_translation = ((bzTTVec3Key_t *)node->translation.keys)[0].value;
+    if (node->scale.key_count)
+        node->info.initial_scale = ((bzTTVec3Key_t *)node->scale.keys)[0].value;
+    if (node->rotation.key_count) {
+        bzTTQuat_t q = ((bzTTQuatKey_t *)node->rotation.keys)[0].value;
+        node->info.initial_rotation_x = q.x; node->info.initial_rotation_y = q.y;
+        node->info.initial_rotation_z = q.z; node->info.initial_rotation_w = q.w;
+    }
+    return true;
+}
+
 static bool parse_nodes(mdxReader_t *r, mdxTempModel_t *model, bool bones) {
     while (r->pos < r->size) {
-        uint32_t record_size, tag;
+        uint32_t record_size;
         size_t record_start = r->pos, node_end, total_end;
         mdxTempNode_t node;
         mdxReader_t node_reader;
         memset(&node, 0, sizeof(node));
-        node.info.parent_id = UINT32_MAX;
-        node.info.initial_rotation_w = 1;
-        node.info.initial_scale = (bzTTVec3_t){ 1, 1, 1 };
         if (!read_u32(r, &record_size) || record_size < 96) return false;
         node_end = record_start + record_size;
         total_end = node_end + (bones ? 8 : 0);
         if (total_end > r->size || node_end < r->pos) return false;
         node_reader = (mdxReader_t){ r->data + r->pos, node_end - r->pos, 0 };
-        if (!read_bytes(&node_reader, node.info.name, sizeof(node.info.name)) ||
-            !read_u32(&node_reader, &node.info.object_id) || !read_u32(&node_reader, &node.info.parent_id) ||
-            !read_u32(&node_reader, &node.info.flags))
-            goto node_fail;
-        node.info.name[sizeof(node.info.name) - 1] = '\0';
-        while (node_reader.pos + 4 <= node_reader.size) {
-            if (!read_u32(&node_reader, &tag)) goto node_fail;
-            if (tag == FOURCC('K','G','T','R')) { if (!parse_vec3_track(&node_reader, &node.translation)) goto node_fail; }
-            else if (tag == FOURCC('K','G','S','C')) { if (!parse_vec3_track(&node_reader, &node.scale)) goto node_fail; }
-            else if (tag == FOURCC('K','G','R','T')) { if (!parse_quat_track(&node_reader, &node.rotation)) goto node_fail; }
-            else goto node_fail;
-        }
-        /* Rest pose falls back to the track's first keyframe when present, matching the
-         * classic renderer's node bind pose (the value used before any sequence samples it). */
-        if (node.translation.key_count)
-            node.info.initial_translation = ((bzTTVec3Key_t *)node.translation.keys)[0].value;
-        if (node.scale.key_count)
-            node.info.initial_scale = ((bzTTVec3Key_t *)node.scale.keys)[0].value;
-        if (node.rotation.key_count) {
-            bzTTQuat_t q = ((bzTTQuatKey_t *)node.rotation.keys)[0].value;
-            node.info.initial_rotation_x = q.x; node.info.initial_rotation_y = q.y;
-            node.info.initial_rotation_z = q.z; node.info.initial_rotation_w = q.w;
-        }
+        if (!parse_node_header_and_tracks(&node_reader, &node)) goto node_fail;
         if (!append_record((void **)&model->nodes, &model->node_count, sizeof(node), &node))
             goto node_fail;
         r->pos = total_end;
         continue;
 node_fail:
         free(node.translation.keys); free(node.rotation.keys); free(node.scale.keys);
+        return false;
+    }
+    return true;
+}
+
+/* PRE2 particle emitter v2. On-disk layout is a NESTED double size field (see
+ * docs/quest-tabletop.md's Layer 9 section and games/warcraft-3/docs/file-formats/mdx.md for
+ * the full empirical trace and citations): an OUTER inclusive size (read here, per-record,
+ * exactly like parse_nodes()'s own per-record `record_size`) wraps the ENTIRE emitter
+ * (generic node header/tracks + all PRE2-specific fields + PRE2's own KP2x tracks); a SECOND,
+ * INNER inclusive size immediately follows and wraps ONLY the generic node header + its own
+ * KGTR/KGRT/KGSC tracks (parsed via the shared parse_node_header_and_tracks() helper above -
+ * an emitter IS a node, mdxParticleEmitter_t embeds mdxNode_t in the classic renderer). This
+ * matches Light/LITE and Attachment/ATCH exactly (r_mdx_load.c's ReadLight/ReadAttachment use
+ * the identical two-size-field shape) - confirmed empirically against the real host parser
+ * (r_mdx_load.c) with a byte-exact synthetic fixture round-trip, not guessed. */
+static bool parse_particle_emitters(mdxReader_t *r, mdxTempModel_t *model) {
+    /* Raw on-disk FilterMode (Blend/Additive/Modulate/Modulate2x/AlphaKey, in THIS declared
+     * order) translated to the shared bzTTBlendMode_t vocabulary - NOT the same numeric
+     * convention as material layers' own blend_mode (bzTTMaterialLayerInfo_t), which already
+     * matches bzTTBlendMode_t directly with no translation. See games/warcraft-3/docs/
+     * file-formats/mdx.md for the citation trail. */
+    static const uint32_t kFilterModeToBlend[5] = {
+        BZ_TTA_BLEND_ALPHA, BZ_TTA_BLEND_ADDITIVE, BZ_TTA_BLEND_MODULATE,
+        BZ_TTA_BLEND_MODULATE_2X, BZ_TTA_BLEND_TRANSPARENT,
+    };
+    while (r->pos < r->size) {
+        uint32_t outer_size, inner_size;
+        size_t record_start = r->pos, outer_end, inner_end;
+        mdxReader_t record, node_reader;
+        mdxTempNode_t node;
+        mdxTempEmitter_t emitter;
+        uint32_t filter_mode, frame_flags, uv_anim_discard[12], squirt_discard, priority_plane_discard;
+        memset(&node, 0, sizeof(node));
+        memset(&emitter, 0, sizeof(emitter));
+        if (!read_u32(r, &outer_size) || outer_size < 4 + 96 + MDX_PRE2_TRAILING_FIELDS_SIZE) return false;
+        outer_end = record_start + outer_size;
+        if (outer_end > r->size || outer_end < r->pos) return false;
+        record = (mdxReader_t){ r->data + r->pos, outer_end - r->pos, 0 };
+        if (!read_u32(&record, &inner_size) || inner_size < 96) goto fail;
+        inner_end = record.pos + (inner_size - 4);
+        if (inner_end > record.size) goto fail;
+        node_reader = (mdxReader_t){ record.data + record.pos, inner_end - record.pos, 0 };
+        if (!parse_node_header_and_tracks(&node_reader, &node)) goto fail;
+        record.pos = inner_end;
+        if (!read_bytes(&record, &emitter.info.speed, 4) || !read_bytes(&record, &emitter.info.variation, 4) ||
+            !read_bytes(&record, &emitter.info.latitude, 4) || !read_bytes(&record, &emitter.info.gravity, 4) ||
+            !read_bytes(&record, &emitter.info.life_span, 4) ||
+            !read_bytes(&record, &emitter.info.emission_rate, 4) ||
+            !read_bytes(&record, &emitter.info.length, 4) || !read_bytes(&record, &emitter.info.width, 4) ||
+            !read_u32(&record, &filter_mode) ||
+            !read_u32(&record, &emitter.info.rows) || !read_u32(&record, &emitter.info.columns) ||
+            !read_u32(&record, &frame_flags) ||
+            !read_bytes(&record, &emitter.info.tail_length, 4) ||
+            !read_bytes(&record, &emitter.info.time_middle, 4) ||
+            !read_bytes(&record, emitter.info.segment_color, sizeof(emitter.info.segment_color)) ||
+            !read_bytes(&record, emitter.info.segment_alpha, sizeof(emitter.info.segment_alpha)) ||
+            !read_bytes(&record, emitter.info.particle_scaling, sizeof(emitter.info.particle_scaling)) ||
+            /* LifeSpan/Decay/Tail/TailDecay UV-anim {start,end,repeat} triples: parsed (to stay
+             * byte-aligned with the real format) but not exported - the authoritative CPU
+             * particle simulation (renderer/r_particles.c's FX_GetFrame) never reads them
+             * either, deriving the atlas frame purely from the particle's own lifetime
+             * fraction - see games/warcraft-3/docs/file-formats/mdx.md. */
+            !read_bytes(&record, uv_anim_discard, sizeof(uv_anim_discard)) ||
+            !read_u32(&record, &emitter.info.texture_index) || !read_u32(&record, &squirt_discard) ||
+            !read_u32(&record, &priority_plane_discard) || !read_u32(&record, &emitter.info.replaceable_id))
+            goto fail;
+        (void)squirt_discard; (void)priority_plane_discard;
+        if (filter_mode >= 5) goto fail; /* out of the documented raw FilterMode range - malformed */
+        emitter.info.blend_mode = kFilterModeToBlend[filter_mode];
+        if (frame_flags > BZ_TTA_PARTICLE_BOTH) goto fail; /* out of the documented HeadOrTail range */
+        emitter.info.head_or_tail = frame_flags;
+        /* Rows/Columns 0 means "1x1" for atlas purposes (r_particles.c's FX_GetFrame applies
+         * this same `? 1` fallback at draw time on every frame; normalizing once here at
+         * decode time is the identical effective behavior without repeating the check every
+         * frame this ABI's consumer draws a particle). */
+        if (!emitter.info.rows) emitter.info.rows = 1;
+        if (!emitter.info.columns) emitter.info.columns = 1;
+        while (record.pos + 4 <= record.size) {
+            uint32_t tag;
+            if (!read_u32(&record, &tag)) goto fail;
+            if (tag == FOURCC('K','P','2','V')) { if (!parse_float_track(&record, &emitter.visibility)) goto fail; }
+            else if (tag == FOURCC('K','P','2','E')) { if (!parse_float_track(&record, &emitter.emission_rate)) goto fail; }
+            else if (tag == FOURCC('K','P','2','W')) { if (!parse_float_track(&record, &emitter.width)) goto fail; }
+            else if (tag == FOURCC('K','P','2','N')) { if (!parse_float_track(&record, &emitter.length)) goto fail; }
+            else if (tag == FOURCC('K','P','2','S')) { if (!parse_float_track(&record, &emitter.speed)) goto fail; }
+            else if (tag == FOURCC('K','P','2','L')) { if (!parse_float_track(&record, &emitter.latitude)) goto fail; }
+            else if (tag == FOURCC('K','P','2','G')) { if (!parse_float_track(&record, &emitter.gravity)) goto fail; }
+            else if (tag == FOURCC('K','P','2','R')) { if (!parse_float_track(&record, &emitter.variation)) goto fail; }
+            else goto fail;
+        }
+        if (!append_record((void **)&model->nodes, &model->node_count, sizeof(node), &node)) goto fail;
+        emitter.info.node_index = model->node_count - 1;
+        if (!append_record((void **)&model->emitters, &model->emitter_count, sizeof(emitter), &emitter)) {
+            /* The node was already appended and must stay - only the emitter record failed to
+             * append (out of memory); the node otherwise remains a harmless, unreferenced
+             * hierarchy entry, matching this decoder's existing all-or-nothing failure
+             * contract at the top level (the whole decode fails and free_temp_model() reclaims
+             * everything, including this node). */
+            goto fail;
+        }
+        r->pos = outer_end;
+        continue;
+fail:
+        free(node.translation.keys); free(node.rotation.keys); free(node.scale.keys);
+        free(emitter.visibility.keys); free(emitter.emission_rate.keys); free(emitter.width.keys);
+        free(emitter.length.keys); free(emitter.speed.keys); free(emitter.latitude.keys);
+        free(emitter.gravity.keys); free(emitter.variation.keys);
         return false;
     }
     return true;
@@ -657,6 +804,7 @@ static bool parse_mdx(const uint8_t *data, size_t size, mdxTempModel_t *model) {
             case FOURCC('G','E','O','A'): if (!parse_geoset_anims(&chunk, model)) return false; break;
             case FOURCC('B','O','N','E'): if (!parse_nodes(&chunk, model, true)) return false; break;
             case FOURCC('H','E','L','P'): if (!parse_nodes(&chunk, model, false)) return false; break;
+            case FOURCC('P','R','E','2'): if (!parse_particle_emitters(&chunk, model)) return false; break;
             case FOURCC('P','I','V','T'): assign_pivots(&chunk, model); break;
             default: break; /* Known-but-unexported chunks remain bounded by the top-level chunk size. */
         }
@@ -679,10 +827,11 @@ static bzTTAsset_t *flatten_model(const mdxTempModel_t *src, const char *identit
                                   const bzTTAssetMetadata_t *metadata, bzTTAResult_t *status) {
     size_t payload = 0;
     uint32_t geosets_offset, materials_offset, layers_offset, textures_offset, sequences_offset;
-    uint32_t nodes_offset, global_sequences_offset;
+    uint32_t nodes_offset, global_sequences_offset, emitters_offset;
     bzTTAsset_t *asset;
     bzTTGeosetRecord_t *records;
     bzTTNodeRecord_t *node_records;
+    bzTTEmitterRecord_t *emitter_records;
     if (!payload_add(&payload, src->geoset_count, sizeof(bzTTGeosetRecord_t),
                      _Alignof(bzTTGeosetRecord_t), &geosets_offset) ||
         !payload_add(&payload, src->material_count, sizeof(*src->materials),
@@ -696,7 +845,9 @@ static bzTTAsset_t *flatten_model(const mdxTempModel_t *src, const char *identit
         !payload_add(&payload, src->node_count, sizeof(bzTTNodeRecord_t),
                      _Alignof(bzTTNodeRecord_t), &nodes_offset) ||
         !payload_add(&payload, src->global_sequence_count, sizeof(uint32_t),
-                     _Alignof(uint32_t), &global_sequences_offset)) {
+                     _Alignof(uint32_t), &global_sequences_offset) ||
+        !payload_add(&payload, src->emitter_count, sizeof(bzTTEmitterRecord_t),
+                     _Alignof(bzTTEmitterRecord_t), &emitters_offset)) {
         *status = BZ_TTA_ERR_OUT_OF_MEMORY; return NULL;
     }
     for (uint32_t i = 0; i < src->geoset_count; i++) {
@@ -726,6 +877,20 @@ static bzTTAsset_t *flatten_model(const mdxTempModel_t *src, const char *identit
             *status = BZ_TTA_ERR_OUT_OF_MEMORY; return NULL;
         }
     }
+    for (uint32_t i = 0; i < src->emitter_count; i++) {
+        const mdxTempEmitter_t *e = src->emitters + i;
+        uint32_t ignored;
+        if (!payload_add(&payload, e->visibility.key_count, sizeof(bzTTFloatKey_t), _Alignof(bzTTFloatKey_t), &ignored) ||
+            !payload_add(&payload, e->emission_rate.key_count, sizeof(bzTTFloatKey_t), _Alignof(bzTTFloatKey_t), &ignored) ||
+            !payload_add(&payload, e->width.key_count, sizeof(bzTTFloatKey_t), _Alignof(bzTTFloatKey_t), &ignored) ||
+            !payload_add(&payload, e->length.key_count, sizeof(bzTTFloatKey_t), _Alignof(bzTTFloatKey_t), &ignored) ||
+            !payload_add(&payload, e->speed.key_count, sizeof(bzTTFloatKey_t), _Alignof(bzTTFloatKey_t), &ignored) ||
+            !payload_add(&payload, e->latitude.key_count, sizeof(bzTTFloatKey_t), _Alignof(bzTTFloatKey_t), &ignored) ||
+            !payload_add(&payload, e->gravity.key_count, sizeof(bzTTFloatKey_t), _Alignof(bzTTFloatKey_t), &ignored) ||
+            !payload_add(&payload, e->variation.key_count, sizeof(bzTTFloatKey_t), _Alignof(bzTTFloatKey_t), &ignored)) {
+            *status = BZ_TTA_ERR_OUT_OF_MEMORY; return NULL;
+        }
+    }
     asset = BZ_TTA_AssetAlloc(payload, BZ_TTA_ASSET_MODEL, identity, metadata);
     if (!asset) { *status = BZ_TTA_ERR_OUT_OF_MEMORY; return NULL; }
     asset->u.model.info = (bzTTModelInfo_t){
@@ -734,13 +899,16 @@ static bzTTAsset_t *flatten_model(const mdxTempModel_t *src, const char *identit
         .texture_count = src->texture_count, .sequence_count = src->sequence_count,
         .node_count = src->node_count, .bounds = src->bounds,
         .global_sequence_count = src->global_sequence_count,
+        .emitter_count = src->emitter_count,
     };
     asset->u.model.geosets_offset = geosets_offset; asset->u.model.materials_offset = materials_offset;
     asset->u.model.layers_offset = layers_offset; asset->u.model.textures_offset = textures_offset;
     asset->u.model.sequences_offset = sequences_offset; asset->u.model.nodes_offset = nodes_offset;
     asset->u.model.global_sequences_offset = global_sequences_offset;
+    asset->u.model.emitters_offset = emitters_offset;
     records = BZ_TTA_AssetData(asset, geosets_offset, (size_t)src->geoset_count * sizeof(*records));
     node_records = BZ_TTA_AssetData(asset, nodes_offset, (size_t)src->node_count * sizeof(*node_records));
+    emitter_records = BZ_TTA_AssetData(asset, emitters_offset, (size_t)src->emitter_count * sizeof(*emitter_records));
     if (src->material_count)
         memcpy(BZ_TTA_AssetData(asset, materials_offset, (size_t)src->material_count * sizeof(*src->materials)),
               src->materials, (size_t)src->material_count * sizeof(*src->materials));
@@ -757,7 +925,12 @@ static bzTTAsset_t *flatten_model(const mdxTempModel_t *src, const char *identit
         memcpy(BZ_TTA_AssetData(asset, global_sequences_offset,
               (size_t)src->global_sequence_count * sizeof(uint32_t)),
               src->global_sequences, (size_t)src->global_sequence_count * sizeof(uint32_t));
-    payload = global_sequences_offset + (size_t)src->global_sequence_count * sizeof(uint32_t);
+    /* Resume the running cursor at the end of the fixed-size top-level arrays (the LAST of
+     * which is now the emitters struct array, appended for ABI v4 - see this function's
+     * payload_add() sizing pass above) before the variable-length per-geoset/per-node/
+     * per-emitter arrays below. Forgetting to advance past a newly-appended fixed-size array
+     * here would let the very next variable-length write silently overlap it. */
+    payload = emitters_offset + (size_t)src->emitter_count * sizeof(bzTTEmitterRecord_t);
     for (uint32_t i = 0; i < src->geoset_count; i++) {
         const mdxTempGeoset_t *geo = src->geosets + i;
         bool has_track = geo->has_anim && geo->alpha.key_count > 0;
@@ -819,6 +992,29 @@ static bzTTAsset_t *flatten_model(const mdxTempModel_t *src, const char *identit
         COPY_TRACK(rotation, rotation, bzTTQuatKey_t);
         COPY_TRACK(scale, scale, bzTTVec3Key_t);
 #undef COPY_TRACK
+    }
+    for (uint32_t i = 0; i < src->emitter_count; i++) {
+        const mdxTempEmitter_t *e = src->emitters + i;
+        emitter_records[i].info = e->info;
+#define COPY_EMITTER_TRACK(FIELD, TRACK) \
+        payload = mdx_align_size(payload, _Alignof(bzTTFloatKey_t)); \
+        emitter_records[i].FIELD.key_count = e->TRACK.key_count; \
+        emitter_records[i].FIELD.interp = e->TRACK.interp; \
+        emitter_records[i].FIELD.global_sequence = e->TRACK.global_sequence; \
+        emitter_records[i].FIELD.keys_offset = (uint32_t)payload; \
+        if (e->TRACK.key_count) memcpy(BZ_TTA_AssetData(asset, emitter_records[i].FIELD.keys_offset, \
+            (size_t)e->TRACK.key_count * sizeof(bzTTFloatKey_t)), e->TRACK.keys, \
+            (size_t)e->TRACK.key_count * sizeof(bzTTFloatKey_t)); \
+        payload += (size_t)e->TRACK.key_count * sizeof(bzTTFloatKey_t)
+        COPY_EMITTER_TRACK(visibility, visibility);
+        COPY_EMITTER_TRACK(emission_rate, emission_rate);
+        COPY_EMITTER_TRACK(width, width);
+        COPY_EMITTER_TRACK(length, length);
+        COPY_EMITTER_TRACK(speed, speed);
+        COPY_EMITTER_TRACK(latitude, latitude);
+        COPY_EMITTER_TRACK(gravity, gravity);
+        COPY_EMITTER_TRACK(variation, variation);
+#undef COPY_EMITTER_TRACK
     }
     *status = BZ_TTA_OK;
     return asset;

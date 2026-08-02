@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E/6/7/8
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E/6/7/8/9
 
-This document tracks layers 5A/5B/5C/5D/5E/6/7/8 of a stacked Meta Quest port:
+This document tracks layers 5A/5B/5C/5D/5E/6/7/8/9 of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -94,7 +94,7 @@ This document tracks layers 5A/5B/5C/5D/5E/6/7/8 of a stacked Meta Quest port:
   below for full scope, the staging safety/idempotency design, the ROC/TFT
   archive rules (and the one documented runtime `-tft` gap), and the AAudio
   parser/mixer/lifecycle design.
-- **Layer 8 (this layer, `clancey-add-quest-hand-tracking`)**: adds
+- **Layer 8 (`clancey-add-quest-hand-tracking`)**: adds
   native Meta Quest **hand-tracking** input parity alongside (never
   replacing) layer 6's Touch controllers: optional, explicitly-negotiated
   `XR_EXT_hand_tracking` + `XR_FB_hand_tracking_aim` OpenXR capability
@@ -111,6 +111,23 @@ This document tracks layers 5A/5B/5C/5D/5E/6/7/8 of a stacked Meta Quest port:
   below for the exact extension matrix, capability-negotiation contract,
   gesture/arbitration state machine, and the honest Quest-vs-visionOS
   differences.
+- **Layer 9 (this layer, `clancey-render-quest-effects`)**: adds Warcraft III
+  **particle-emitter (PRE2) rendering** - the only MDX "effect" class this
+  codebase's authoritative renderer actually parses+simulates+draws end to
+  end (traced and audited; `PREM`/`RIBB` have no parser anywhere in this
+  codebase, and `EVTS` is parsed but consumed by nothing). Additive bridge
+  asset ABI v3 -> v4 (`bzTTParticleEmitterInfo_t`/`bzTTEmitterChannel_t`), a
+  pure Quest-side bounded-pool particle simulation
+  (`bz_quest_wc3_particles.h`/`.c` - deterministic phase-locked spawn timing,
+  closed-form kinematics, 3-segment color/alpha/scale blend, atlas-frame
+  selection, all transcribed from `renderer/r_particles.c`/
+  `r_mdx_geoset.c`'s `MDLX_RenderEmitter`), and a new Vulkan billboard draw
+  module (`bz_quest_vk_wc3_particles.h`/`.c`) reusing the model renderer's own
+  blend-mode mapping and texture cache. See
+  "[Layer 9: Warcraft III particle emitters](#layer-9-warcraft-iii-particle-emitters-bz_quest_wc3_particleshbz_quest_vk_wc3_particlesc)"
+  below for the full scope audit, ABI diff, a traced authoritative quirk this
+  layer deliberately reproduces rather than "fixes", and the coordinate/
+  blend/depth/pool/reset contracts.
 
 **These layers now render fog of war, per-entity selection markers, and a
 status/command-card HUD, (layer 6) read Touch controllers to select
@@ -3803,6 +3820,331 @@ environment** — every item in this procedure is written from the OpenXR
 layer's own pure-logic test evidence, not from having run it. Do not report
 any of it as confirmed until checked on real hardware.
 
+## Layer 9: Warcraft III particle emitters (`bz_quest_wc3_particles.h`/`bz_quest_vk_wc3_particles.c`)
+
+### Authoritative scope audit
+
+Of every MDX chunk that could plausibly be called a "particle/spell/transient
+effect", **PRE2 (particle emitter v2) is the only one this codebase's
+authoritative renderer parses, simulates, AND draws end to end** -
+`games/warcraft-3/renderer/mdx/r_mdx_load.c`'s `ReadParticleEmitter` ->
+`r_mdx_geoset.c`'s `MDLX_RenderEmitter` -> `renderer/r_particles.c`'s
+`R_SpawnParticle`/`R_UpdateParticles`/`R_DrawParticles`. Traced and rejected:
+
+| Chunk | Parsed? | Simulated? | Drawn? | In scope? |
+|-------|---------|------------|--------|-----------|
+| `PRE2` (particle emitter v2) | Yes | Yes | Yes | **Yes** |
+| `PREM` (particle emitter v1) | No parser anywhere in this codebase | - | - | No |
+| `RIBB` (ribbon emitter) | No parser anywhere in this codebase | - | - | No |
+| `EVTS` (event object) | Yes | No - sound uses a wholly separate `entityState_t.event` mechanism (`doc/architecture/sound.md`) | No | No - would require hardcoding external asset-name conventions, forbidden by AGENTS.md |
+
+See `games/warcraft-3/docs/file-formats/mdx.md`'s "Particle Emitters (PRE2)"
+section for the full chunk/record layout, FilterMode/FrameFlags mapping
+tables, and citations.
+
+### Bridge asset ABI (v3 -> v4)
+
+`platform/bridge/bz_tabletop_assets.h` bumped `BZ_TABLETOP_ASSETS_ABI_VERSION`
+3 -> 4, purely additively:
+
+- `bzTTModelInfo_t` gained `emitter_count`.
+- New `bzTTParticleEmitterInfo_t` (one PRE2 emitter's static/immutable data -
+  node index, already-translated `blend_mode`/`head_or_tail`, texture/
+  replaceable-id, atlas rows/columns, and all 7 physical-channel static
+  defaults + `life_span`/`tail_length`/`time_middle`/segment color-alpha-scale
+  stops).
+- New `bzTTEmitterChannel_t` (the 8 animatable channels: Visibility,
+  EmissionRate, Width, Length, Speed, Latitude, Gravity, Variation) plus one
+  generic `BZ_TTAsset_EmitterTrackInfo()`/`BZ_TTAsset_CopyEmitterFloatKeys()`
+  accessor pair covering all 8 (DRY - every emitter channel is a plain float
+  track, unlike node translation/rotation/scale's 3 distinct value types).
+- New `bzTTParticleHeadTail_t` (Head/Tail/Both, translated from raw
+  `FrameFlags`).
+
+`test_bz_tabletop_assets.c`'s ABI-version assertion was updated 3 -> 4 (this
+IS the required "test incompatible rejection" case: a caller still compiled
+against v3 that calls a v4-only accessor is rejected by the existing
+`abi_version` guard the same way every prior bump already was - no new
+rejection path needed, the existing one-version-field check already covers
+it). New tests: `test_mdx_particle_emitter_decode_and_blend_translation`
+(end-to-end PRE2 fixture -> decode -> ABI accessor round trip, including the
+FilterMode/FrameFlags translation) and
+`test_particle_emitter_abi_version_rejects_stale_caller`.
+**1189/1189 bridge assertions pass** (`make test-bz-tabletop-assets`).
+
+`games/warcraft-3/visionos/wc3_mdx_decode.c` parses `PRE2` using the same
+nested-double-inclusive-size-field format as `LITE`/`ATCH` (see mdx.md) - an
+outer size wraps the whole emitter, an inner size wraps just the generic node
+header + its KGTR/KGRT/KGSC tracks. `tools/mdxgen.c`'s `gen_particle_emitter`
+command emits a synthetic fixture exercising this exact shape, wired into
+`test-assets` via `games/warcraft-3/game.mk`.
+
+### Traced authoritative quirk: only 3 of 7 physical channels are ever sampled
+
+A careful re-reading of `MDLX_RenderEmitter` (`r_mdx_geoset.c`, verified via
+`git blame` - one atomic commit, `2bfbd4e0`, never revisited) shows its own
+`GET_PARTICLE_ANIM_PARAM` macro samples all 7 physical channels
+(EmissionRate/Width/Length/Speed/Latitude/Gravity/Variation) into local
+variables, but only **EmissionRate/Speed/Gravity**'s sampled locals are ever
+actually read: `FX_GenerateRandomOrigin(emitter->Length, emitter->Width)` and
+`FX_GenerateRandomDirection(emitter->Latitude * M_PI/180)` read the **static**
+struct fields directly, bypassing their own already-computed sampled locals of
+the same name, and the sampled `Variation` local is never read by anything at
+all (confirmed by an exhaustive grep of every "Variation" occurrence in this
+codebase). This is the authoritative renderer's real, observable behavior -
+this project's mandate is to reproduce traced behavior, not an idealized
+version of it. Accordingly:
+
+- `bzQuestWc3StoredEmitter_t` (`bz_quest_wc3_render.h`) only stores tracks for
+  visibility/emissionRate/speed/gravity; width/length/latitude are plain
+  static scalars (never track-sampled); there is no `variation` field at all
+  in the Quest particle pipeline.
+- `bz_quest_wc3_capture.c` only calls `BZ_TTAsset_EmitterTrackInfo()`/
+  `_CopyEmitterFloatKeys()` for those same 4 channels.
+- `bz_quest_vk_wc3.c`'s `process_item_particle_emitters()` samples
+  emissionRate/speed/gravity via track, and copies width/length/latitude
+  directly from their static fields.
+
+See `games/warcraft-3/docs/file-formats/mdx.md`'s "Animatable channels and a
+traced authoritative quirk" subsection for the full line-by-line citation.
+This is a deliberate, evidence-traced design choice - "fixing" it to sample
+all 7 uniformly would diverge from traced authoritative behavior.
+
+### Coordinate conversion and world transform
+
+Only a spawned particle's **origin** is transformed by the emitter's world
+matrix (`Matrix4_multiply_vector3`, `r_mdx_geoset.c:113`); velocity
+(`FX_GenerateRandomDirection * Speed`) and acceleration (constant
+`{0,0,-Gravity}`) are **never** matrix-transformed - computed directly in
+absolute engine/world space (`r_mdx_geoset.c:114-115`), independent of model/
+node rotation. Since `bz_quest_wc3_particles.c` synthesizes brand-new random
+origin/direction vectors (not converting pre-existing MDX track data), it is
+correct to generate them directly in Y-up convention: Y-up gravity =
+`(0,-Gravity,0)`, Y-up cone axis = local +Y (not +Z) - this does not violate
+`bz_quest_wc3_anim.h`'s "convert only whole finished matrices, never
+per-component" rule, which applies to *existing* MDX-authored vectors, not
+freshly-synthesized ones.
+
+The emitter's world matrix is `item->world * (nodeGlobal_Yup *
+Translate(pivot_Yup))`, composed once per (render item, active emitter) in
+`bz_quest_vk_wc3.c` right after the item's node pose is built (the same place
+the bone palette is built). `M * Translate(pivot)` applied to a local offset
+`p` gives `R*p + P + T` (`P` = the pivot itself) - algebraically identical to
+desktop's own "add pivot to origin, then transform by M" as long as the SAME
+pivot used to build `M` is used in the `Translate` - this lets the pure
+particle module take one combined world matrix instead of a separate pivot
+parameter.
+
+Particles are recorded in the **board-folded `mvpBoard`** space (the same
+composed space models/terrain/fog/HUD use), not the plain per-eye `mvp` the
+ray pointer uses (controllers are physical tracking-space objects, never
+board-folded).
+
+### Deterministic emission, aging, and pool semantics
+
+`bz_quest_wc3_particles.h`/`.c` is a pure module (plain float/int/char arrays
+and small POD structs only, never a `bzTTAsset_t`/`VkBuffer`/`VkImage`) so
+`platform/android/quest/tests/test_bz_quest_wc3_particles.c` can build and
+check it with a plain host C compiler:
+
+- **Pool**: `bzQuestWc3ParticlePool_t`, a fixed `BZ_QUEST_WC3_MAX_PARTICLES =
+  2048` array (smaller than desktop's 10000 `MAX_PARTICLES` - scaled to a
+  tabletop view, not a full RTS camera), index-based (`uint16_t`)
+  freelist/active-list (never raw pointers), one explicit seedable SplitMix64
+  PRNG per pool (never libc `rand()`/`srand()`, which is process-global and
+  unfit for independent host-test determinism - this repo's own precedent is
+  `mdxtool.c --seed`).
+- **Emission** (`bz_quest_wc3_particles_emit()`): phase-locked-to-whole-real-
+  seconds timing transcribed exactly from `MDLX_RenderEmitter`'s
+  `start = lastFrameTime - lastFrameTime % 1000` / `time += 1000 /
+  EmissionRate` loop, `EmissionRate = MAX(1, EmissionRate)` floor included.
+  Bounded by `BZ_QUEST_WC3_MAX_PARTICLE_SPAWNS_PER_EMITTER_PER_FRAME = 64` and
+  by the pool's own remaining capacity - stops immediately once exhausted
+  (`R_SpawnParticle()`'s own `NULL`-return contract), never blocks/waits/
+  grows, and reports overflow via `*outOverflowed` (logged once per model
+  identity by `bz_quest_vk_wc3.c`, never a hard failure).
+- **Aging** (`bz_quest_wc3_particles_age()`): one shared delta-time advance
+  per frame for the whole pool (never per-emitter), expires particles whose
+  age exceeds `lifespanSec`.
+- **Packing** (`bz_quest_wc3_particles_pack()`): kinematics/color/atlas-frame
+  evaluation transcribed from `R_DrawParticles()`/`FX_BlendColor()`/
+  `FX_BlendFloat()`/`FX_GetFrame()`, closed-form position
+  `org = org0 + vel0*t + 0.5*accel*t^2` (the closed form of desktop's own
+  semi-implicit-Euler per-frame integration). Groups into contiguous
+  per-(blendMode,textureIdentity) runs (`BZ_QUEST_WC3_MAX_PARTICLE_DRAW_RUNS =
+  64`, excess merges into the last run) via a bounded stable sort over a
+  fixed-size scratch array - deliberately NOT depth-sorted (desktop's own
+  `R_DrawParticles()` does not depth-sort particles either, only groups by
+  texture via list-order change detection).
+- **Reset semantics**: `bz_quest_wc3_particles_pool_reset()` is the ONLY
+  function that clears the pool - called on a REAL map-identity change
+  (`bzQuestVkWc3_t::particlePoolMapEpoch` vs the frame's `mapEpoch`, never a
+  mere snapshot-generation bump) - "no stale effects across resets". The
+  first-ever frame does not reset (the pool was already freshly reset at
+  `bz_quest_vk_wc3_particles_create()` time), it only records the baseline
+  epoch.
+- **Frame-critical bound**: every one of the functions above never allocates,
+  locks, touches a file, or logs - purely arithmetic plus the pool's own PRNG
+  state, proven both by each function's own doc comment and by
+  `test-wc3-particles-layout.sh`'s anchored-declaration-line forbidden-call
+  scan (see "Tests and build wiring" below).
+
+`platform/android/quest/tests/test_bz_quest_wc3_particles.c` (**25 test
+functions**) covers pool reset/determinism, hand-derived exact-count spawn-
+timing scenarios, overflow/capacity bounding, the coordinate convention
+(proven via identity/translation/rotation-free deterministic scenarios),
+aging/expiration, and pack/grouping/atlas/color-blend. Two regressions were
+injected during development (removing the `MAX(1,rate)` floor; swapping the
+gravity axis Y<->Z) to prove the relevant tests actually fail, then reverted.
+**5336/5336 Quest host assertions pass** (baseline 5243 + 93 new).
+
+### GPU representation, blend/depth/atlas contracts, and draw order
+
+`bz_quest_vk_wc3_particles.h`/`.c` owns its own pipeline-variant cache (keyed
+by **blend mode only** - 7 variants, always `VK_CULL_MODE_NONE` (a billboard
+has no meaningful winding) and depth-test-**on** with
+`bz_quest_vk_wc3_blend_state_for_mode()`'s own per-mode depth-write default -
+reused, not re-derived, from the model renderer's already-proven 7-way
+mapping) and one persistently-mapped, host-visible dynamic vertex buffer
+(`bz_quest_wc3_particles_pack()` writes directly into the mapped GPU pointer -
+no intermediate host-side staging array, since `BZ_QUEST_WC3_MAX_PARTICLES *
+6` vertices would be tens of KB, too large for a comfortable stack temporary
+and would just be `memcpy`'d right afterward anyway).
+
+It does **not** own a second texture cache: a PRE2 emitter's texture is
+decoded/uploaded through the exact same `bz_quest_wc3_capture.c`
+`onTextureReady` path a material layer's texture already is, landing in
+`bz_quest_vk_wc3.c`'s own existing model texture cache - this module reads it
+back via the read-only `bz_quest_vk_wc3_find_texture()` accessor rather than
+duplicating the upload (a texture shared between a unit's material and its
+own weapon-glow emitter is uploaded exactly once). A run whose texture is not
+yet resident is skipped for this frame (transient, matches the model
+renderer's own "hit path never triggers an upload, a miss just doesn't draw
+yet" contract) - never a placeholder-textured draw.
+
+Billboard expansion happens entirely in `warcraft_particle_vert.vert`,
+mirroring `renderer/r_particles.c`'s `vs_particle` GLSL exactly: the camera-
+facing left/up axes are derived from the view*projection matrix's own first
+two columns (not a separate inverse-view uniform - this is desktop's own
+established, working technique, not re-derived or improved on here); the
+per-corner atlas UV is `mix(uvRect.xy, uvRect.zw, axis)`, mathematically
+identical to desktop's CPU-precomputed-per-vertex-UV approach given the same
+6-vertex/2-triangle winding and the same `{0,0},{1,0},{1,1},{1,1},{0,1},{0,0}`
+axis values per corner. `warcraft_particle_frag.frag` mirrors `fs_particle`
+exactly: `texture(uTexture, uv) * vertexColor`, no alpha-test discard (every
+particle blend mode is expressed purely via the pipeline's blend state,
+matching desktop's own `fs_particle`, which has no discard either).
+
+This Quest renderer does not use `VK_KHR_multiview` - each eye renders via a
+fully separate sequential render pass, so particles follow the same per-eye-
+sequential pattern as models/terrain/fog/HUD, no special multiview handling
+needed. Draw order: recorded right after the model renderer's own blended
+pass (`bz_quest_vk_wc3_record_blended()`), still before the fog overlay - a
+burning building's smoke must be masked by unexplored fog exactly like
+blended terrain/doodads are; fog remains the true final visibility mask over
+the complete opaque+blended+particle scene.
+
+Pipeline-variant creation is lazy (created on first encounter of each blend
+mode, cached thereafter - at most 7 `vkCreateGraphicsPipelines` calls ever,
+mirroring `bz_quest_vk_wc3.c`'s own established
+`get_or_create_pipeline_variant()` precedent exactly, not a new pattern).
+
+### Supported vs. unsupported behavior
+
+| Behavior | Status |
+|----------|--------|
+| PRE2 spawn timing, kinematics, 3-segment color/alpha/scale blend, atlas frame selection | Supported, transcribed exactly |
+| All 7 blend modes (opaque/transparent/alpha/additive/add-alpha/modulate/modulate2x) | Supported, reusing the model renderer's own mapping |
+| Team-color/team-glow emitter textures | Supported, resolved per-entity at draw time |
+| Other (non-0/1/2) `replaceable_id` emitter textures | Unsupported - logged once per model, emitter spawns nothing (matches material layers' own contract) |
+| Head/Tail/Both differentiated rendering | **Not implemented** - desktop's own `R_DrawParticles()` never differentiates head/tail either (`cparticle_t` has no such distinction); `head_or_tail` is carried through the ABI so a future slice has the data already plumbed |
+| PREM (particle v1), RIBB (ribbon emitters) | **Out of scope** - no parser anywhere in this codebase |
+| EVTS (event objects) as a visual/particle effect | **Out of scope** - not consumed by any runtime; sound uses a separate mechanism |
+| Width/Length/Latitude/Variation *animated* values | **Not sampled** - the authoritative renderer itself never uses their sampled values either (see the traced quirk above) |
+
+### Tests and build wiring
+
+- `platform/bridge/bz_tabletop_assets.h`/`.c` + `wc3_mdx_decode.c` +
+  `tools/mdxgen.c` + `games/warcraft-3/tests/test_bz_tabletop_assets.c`:
+  ABI v4 particle emitter decode/accessor tests. **1189/1189 assertions
+  pass** (`make test-bz-tabletop-assets`).
+- `platform/android/quest/tests/test_bz_quest_wc3_particles.c` (25 test
+  functions, wired into `test_bz_quest_pure_main.c` and `build.mk`):
+  pool/spawn/age/pack coverage. **5336/5336 assertions pass**
+  (`make -f platform/android/quest/build.mk test-quest-host-tests`).
+- `platform/android/quest/scripts/test-wc3-particles-layout.sh` (wired into
+  `make test`/`make quest` as `test-quest-wc3-particles-layout`) guards:
+  CMakeLists/shader-pipeline source registration; the 7-variant blend-mode-
+  keyed pipeline (cull-none, depth-test-on, reusing the shared blend
+  mapping); the 5-attribute vertex format matching `bzQuestWc3ParticleVertex_t`
+  field-for-field; renderer create/capture/record/destroy wiring and its
+  exact ordering relative to fog/HUD/the model renderer's own capture/
+  record_blended calls; and a frame-critical forbidden-call scan (anchored at
+  real declaration lines, never a call-site false match) across the pure
+  module's 4 entry points + 12 helpers and the impure Vulkan module's 2 entry
+  points + its pipeline-variant-cache helper (which is allowed the
+  documented, bounded `vkCreateGraphicsPipelines`/log-on-failure exception,
+  matching the model renderer's own unguarded precedent for the identical
+  pattern). Proven to catch injected violations (a `malloc()` in the pure
+  emit function, a bridge-ABI call in the pipeline-variant helper, a reversed
+  fog/particle record order, and a removed CMakeLists source entry), each
+  reverted and reconfirmed clean afterward.
+- `platform/android/quest/scripts/build-shaders.sh` and `CMakeLists.txt`
+  compile/embed `warcraft_particle_vert.vert`/`warcraft_particle_frag.frag`
+  alongside the existing shader pairs - no SPIR-V binary is ever committed,
+  only the GLSL sources.
+
+### Acceptance gates
+
+This layer was **not** verified on a physical Quest device and was **not**
+verified with a real loaded Warcraft III map in this environment. When
+hardware and retail data are available:
+
+```
+1. Build + install (see "Build/run/log commands" above).
+2. Stage a ROC-only directory (exactly War3.mpq) - see Layer 7's staging
+   procedure above.
+3. Launch and load a retail (or custom, PRE2-using) map/campaign whose units
+   have particle-emitting spell effects, abilities, or weapon glows (e.g. a
+   basic melee unit's attack-impact effect, or a caster's channeled spell).
+4. Capture a bounded logcat window across a session where at least one
+   particle-emitting effect triggers:
+     adb logcat -d -s bz_quest_native:V | tail -1000
+   Expect: no per-frame particle log line at all (spawn/age/pack are silent
+   by contract - only a "particle-pool-overflow" or
+   "emitter-replaceable-texture-deferred"/"emitter-texture-missing"-class
+   line, each logged ONCE per (model, condition), never repeating every
+   frame for the same model).
+5. Visual checklist (real headset, both eyes):
+   - particles appear anchored to the correct unit/node (not floating free
+     of the model, not offset), following that unit's own animated pose;
+   - particles fall/rise per the emitter's Gravity - correct direction (not
+     inverted), correct in BOTH eyes identically (no stereo divergence);
+   - particle color/alpha visibly blends across the emitter's 3 segment
+     stops over each particle's lifetime (not a flat, unchanging color);
+   - additive/alpha-blended particles composite correctly over the AR
+     passthrough background (no black halo, no fully-opaque unlit quad);
+   - particles are masked by fog-of-war exactly like blended terrain/
+     doodads are (a particle effect in unexplored territory is not visible
+     through the fog);
+   - reloading/switching maps clears all particles from the previous map
+     instantly (no stale particles surviving a map change);
+   - suspending the app (removing the headset) and resuming does not leave
+     stuck/frozen/runaway particles.
+6. Confirm no visible frame-rate stutter attributable to particle emission/
+   draw specifically (toggle a particle-heavy ability repeatedly and watch
+   for a correlated frame-time spike beyond what terrain/model draws alone
+   already cost).
+```
+
+**No physical Meta Quest device and no retail Warcraft III data were
+available in this development environment** - every item in this procedure
+is written from the traced desktop reference implementation
+(`renderer/r_particles.c`/`r_mdx_geoset.c`), the bridge ABI's own decode
+tests, and this layer's pure-logic host test evidence, not from having run
+it on hardware or against retail assets. Do not report any of it as confirmed
+until checked on real hardware with real ROC/TFT data.
+
 ## Manifest requirements
 
 Unchanged from layer 2: `AndroidManifest.xml`'s NativeActivity metadata,
@@ -4600,6 +4942,120 @@ gone completely undetected.
   gates above — this is a test-infrastructure-only fix, so it carries no
   new hardware-only surface of its own.
 
+### What *was* verified this session (layer 9)
+
+- Audited every MDX chunk that could plausibly be an "effect" and traced
+  which are actually parsed+simulated+drawn by the authoritative renderer:
+  only PRE2 qualifies (`PREM`/`RIBB` have no parser anywhere in this
+  codebase; `EVTS` is parsed but consumed by nothing). Documented the full
+  audit in `games/warcraft-3/docs/file-formats/mdx.md`'s new "Particle
+  Emitters (PRE2)" section, including the chunk/record layout, the nested-
+  double-size-field format (shared with `LITE`/`ATCH`), and the FilterMode/
+  FrameFlags mapping tables.
+- Extended the bridge asset ABI 3 -> 4 purely additively
+  (`bzTTParticleEmitterInfo_t`/`bzTTEmitterChannel_t`/
+  `BZ_TTAsset_EmitterTrackInfo`/`_CopyEmitterFloatKeys`), updated
+  `test_bz_tabletop_assets.c`'s ABI-version assertion, and added a synthetic
+  PRE2 fixture (`tools/mdxgen.c`'s `gen_particle_emitter`) plus two new
+  tests (decode/blend-translation round trip, stale-caller-version
+  rejection). **1189/1189 assertions pass** (`make test-bz-tabletop-assets`,
+  up from a 1128/1129 baseline before this fixture existed - the +1 delta
+  from a genuine arena-overlap bug this slice found and fixed via
+  `fprintf` bisection, not guessed, then removed the diagnostics).
+- While wiring `bz_quest_vk_wc3.c`'s emitter-frame sampling, a compile error
+  (`no member named 'variation'`) led to tracing `MDLX_RenderEmitter`
+  (`r_mdx_geoset.c`) via `git blame` and an exhaustive grep: only
+  EmissionRate/Speed/Gravity's sampled channel locals are ever read back;
+  Width/Length/Latitude always read the static struct field directly, and
+  Variation's sampled local is never read anywhere. Fixed `bz_quest_wc3_
+  render.h`'s `bzQuestWc3StoredEmitter_t`, `bz_quest_wc3_capture.c`'s track-
+  copy loop, and `bz_quest_vk_wc3.c`'s sampling call site to match this
+  traced behavior exactly (removed 4 of 8 now-provably-dead track fields
+  rather than leave dead weight); updated the ABI doc comment
+  (`bz_tabletop_assets.h`) and `mdx.md` with the full citation; stored a
+  repository memory. This is a deliberate reproduction of authoritative
+  behavior, not a bug fix to the desktop renderer itself.
+- Built a pure, host-testable Quest particle simulation module
+  (`bz_quest_wc3_particles.h`/`.c`): bounded 2048-particle pool, index-based
+  freelist, explicit seedable SplitMix64 PRNG, phase-locked-to-whole-
+  seconds spawn timing and closed-form kinematics transcribed exactly from
+  `MDLX_RenderEmitter`/`R_DrawParticles`. Corrected an initial design
+  mistake (matrix-transforming velocity/gravity) after re-verifying
+  `r_mdx_geoset.c:112-115` shows only the origin is matrix-transformed.
+  `platform/android/quest/tests/test_bz_quest_wc3_particles.c` (25 test
+  functions) covers pool/spawn/age/pack, and two injected regressions
+  (removing the `MAX(1,rate)` floor; swapping the gravity axis Y<->Z) were
+  proven to fail the relevant tests, then reverted. **5336/5336 Quest host
+  assertions pass** (`make -f platform/android/quest/build.mk
+  test-quest-host-tests`, baseline 5243 + 93 new).
+- Built the impure Vulkan draw module (`bz_quest_vk_wc3_particles.h`/`.c`)
+  and shader pair (`warcraft_particle_vert.vert`/`_frag.frag`, mirroring
+  `renderer/r_particles.c`'s `vs_particle`/`fs_particle` GLSL exactly),
+  wired into `bz_quest_renderer.c`/`.h` (create after fog/before HUD;
+  capture after the model renderer's own capture_and_upload, passing
+  `mapEpoch`; record after the model renderer's own blended pass, before
+  fog overlay; destroy after HUD/before fog) and `CMakeLists.txt`/
+  `build-shaders.sh`.
+- No OpenXR SDK is installed on this development host, so
+  `bz_quest_renderer.c`/`.h`, `bz_quest_vk_wc3.c`/`.h`, and the new
+  `bz_quest_vk_wc3_particles.c`/`.h` could not be syntax-checked with a
+  plain host compiler out of the box. Built a disposable,
+  NOT-FOR-COMMIT OpenXR/Android-log stub (deleted before this commit,
+  never part of the diff) reproducing just enough of the real OpenXR 1.0 +
+  `KHR_vulkan_enable2`/`FB_passthrough`/`EXT_hand_tracking`/
+  `FB_hand_tracking_aim` surface (real spec field names/values, so
+  `bz_quest_pure.h`'s mirrored-constant `_Static_assert` cross-checks
+  stayed truthful) to run `gcc -fsyntax-only` over every new/modified
+  Vulkan-touching file - all passed cleanly. Separately, this host's local
+  Homebrew `glslc` (a genuinely different binary from the NDK's own
+  `shader-tools/darwin-x86_64/glslc`, but exercising the identical
+  `--target-env=vulkan1.0` invocation `build-shaders.sh` uses) compiled
+  both new GLSL shaders and, via a symlinked fake `$ANDROID_NDK_HOME`, the
+  real unmodified `build-shaders.sh` script end to end, producing a real
+  `bz_quest_shaders_generated.h` used to complete the syntax checks above.
+  **This host-only verification was later superseded by the real,
+  authoritative NDK/Gradle/CMake build below** (which is what actually
+  matters) - it was a useful earlier signal, not a substitute.
+- Wrote `platform/android/quest/scripts/test-wc3-particles-layout.sh`
+  (wired into `make test`/`make quest` as
+  `test-quest-wc3-particles-layout`): CMake/shader source-sync, pipeline
+  blend-mode-variant/cull/depth-test contract, 5-attribute vertex format,
+  renderer wiring + exact ordering (7 ordered pairs checked), and a frame-
+  critical forbidden-call scan (anchored at real declaration lines, per
+  this task's explicit requirement) across the pure module's 4 entry
+  points + 12 helpers and the impure module's 2 entry points + its
+  pipeline-variant-cache helper. Proved it catches: a `malloc()` injected
+  into the pure emit function; a bridge-ABI call injected into the
+  pipeline-variant helper; a reversed fog/particle record order; a removed
+  CMakeLists source entry - each injected, confirmed FAIL, reverted,
+  reconfirmed `OK`.
+- `make test-quest-bridge` — **95/95** (unchanged; this slice never touches
+  the lifecycle/transport bridge). `make run-sc2 ARGS="+com_frame_limit
+  100"` fails with `Failed to add data directory: data/StarCraft2` - a
+  genuine, pre-existing environment/data-only limitation (no `data/`
+  directory exists in this sandbox at all, and zero StarCraft II files were
+  touched this session), not a regression.
+- **The real arm64 Gradle/CMake `assembleDebug` build succeeded**
+  (`make quest-assemble-debug`, `BUILD SUCCESSFUL`, then reproduced via the
+  full `make quest` target chain) using this host's local Android SDK
+  (NDK 27.2.12479018) and Temurin JDK 17 - this is the authoritative
+  compile of every Vulkan-touching file the local stub above could only
+  approximate, and it compiled cleanly with zero source changes needed
+  after the stub-based pass. `make quest-verify-native-lib` confirmed the
+  resulting `libbz_quest_native.so` stays arm64-v8a-only with no forbidden
+  dependency and intact NativeActivity entry points.
+- The full repo-root `make test` passes end-to-end (`EXIT_CODE=0`,
+  confirmed via a full log file grep for `assertions passed` vs `assertions
+  failed`/`BUILD FAILED`, not a truncated scrollback), including
+  `test-wc3-particles-layout: OK` and every other Quest structural guard,
+  the ROC (`test_single_player_screen_loads_roc_campaigns`) and TFT
+  (`test_single_player_screen_loads_tft_campaigns`) UI/campaign paths, and
+  every pre-existing test suite unchanged.
+- **Not verified this session (hardware/retail-data-only)**: no physical
+  Meta Quest device and no retail Warcraft III data were available in this
+  environment - see "Layer 9"'s own "Acceptance gates" section above for
+  the exact on-device/retail-data procedure this still needs.
+
 ## Related documents
 
 - [visionos-tabletop.md](visionos-tabletop.md) — the shared
@@ -4624,6 +5080,19 @@ gone completely undetected.
   geoset-anim data — see "Layer 5C: Warcraft III model animation"'s "ABI
   decision" subsection above for the exact accessor list and why tunneling
   a Vulkan-specific/engine pointer through the ABI was rejected instead.
+  Layer 9 extended it further in place to v4 to expose PRE2 particle emitter
+  data (`bzTTParticleEmitterInfo_t`/`bzTTEmitterChannel_t`) — see "Layer 9:
+  Warcraft III particle emitters" above.
+- `games/warcraft-3/docs/file-formats/mdx.md`'s "Particle Emitters (PRE2)"
+  section — the PRE2 chunk/record layout, FilterMode/FrameFlags mapping
+  tables, and the traced authoritative quirk (only EmissionRate/Speed/
+  Gravity's sampled channel values are ever read by `MDLX_RenderEmitter`)
+  layer 9's ABI/decoder/Quest simulation all cite and reproduce.
+- `renderer/r_particles.c` — the authoritative desktop CPU particle
+  simulation/draw (`R_SpawnParticle`/`R_UpdateParticles`/`R_DrawParticles`,
+  `vs_particle`/`fs_particle` GLSL) layer 9's
+  `bz_quest_wc3_particles.h`/`.c` and `warcraft_particle_vert.vert`/
+  `warcraft_particle_frag.frag` transcribe exactly.
 - `games/warcraft-3/visionos/wc3_mdx_decode.c` — the single shared MDX
   decoder (despite living under the `visionos/` directory, it is linked by
   both the visionOS and Quest builds — see `games/warcraft-3/game.mk`) that

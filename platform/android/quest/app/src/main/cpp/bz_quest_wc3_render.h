@@ -236,6 +236,11 @@ enum {
      * (still drawn, just not skinned that frame - never a dropped/frozen
      * draw, per this slice's "never silently demote" rule). */
     BZ_QUEST_WC3_MAX_SKINNED_DRAWS_PER_FRAME = 256,
+    /* Real shipped MDX models carry at most a handful of PRE2 particle
+     * emitters (a heavily-effected hero tops out around a dozen); 64 is a
+     * generous multiple - a model exceeding it is truncated with a logged
+     * reason (see bz_quest_wc3_capture.c), never silently mis-indexed. */
+    BZ_QUEST_WC3_MAX_EMITTERS_PER_MODEL = 64,
 };
 
 /* One material layer, already resolved to a concrete texture identity by the
@@ -366,14 +371,85 @@ typedef struct {
     const uint32_t *paletteNodeIndices;
 } bzQuestWc3StoredGeosetAnim_t;
 
+/* One PRE2 particle emitter's persistent (arena-backed) data - see
+ * platform/bridge/bz_tabletop_assets.h's bzTTParticleEmitterInfo_t and
+ * bzTTEmitterChannel_t doc comments for the traced field-by-field origin
+ * (games/warcraft-3/renderer/mdx/r_mdx_geoset.c's MDLX_RenderEmitter/
+ * renderer/r_particles.c, the only MDX effect class this project's
+ * authoritative runtime actually parses+simulates+draws - see
+ * games/warcraft-3/docs/file-formats/mdx.md for the full audit). `nodeIndex`
+ * is this emitter's own entry in the SAME bzQuestWc3StoredNode_t array every
+ * other node (bone/helper) lives in - an emitter follows the model's
+ * animated hierarchy exactly like a bone would, no separate transform path
+ * (BZ_QUEST_WC3_NO_PARENT iff the emitter's own node fell past this slice's
+ * node-count truncation - see bz_quest_wc3_capture.c - such an emitter is
+ * decoded but never spawns). `blendMode`/`headOrTail` are already-translated
+ * bzTTBlendMode_t/bzTTParticleHeadTail_t values stored as plain uint32_t,
+ * matching bzQuestWc3LayerDesc_t::blendMode's own "raw uint32_t, mirrored
+ * constants in the impure Vulkan file" convention (see that field's
+ * comment) - this pure header never includes the bridge ABI.
+ * `textureIdentity`/`teamColor`/`teamGlow`/`unsupported` mirror
+ * bzQuestWc3LayerDesc_t's own exact three-way texture-resolution contract
+ * (see that struct's doc comment) - replaceable_id 0 is resolved once per
+ * model here (direct texture); 1/2 defer to the render item's own
+ * per-entity teamColorTextureIdentity/teamGlowTextureIdentity (an emitter's
+ * team color must match its owning entity, not a per-model constant); any
+ * other replaceable_id is `unsupported` (logged once, this emitter spawns
+ * no particles - never a substituted texture).
+ *
+ * Only 4 of PRE2's 8 animatable float channels get a *Track field here
+ * (visibility/emissionRate/speed/gravity) - NOT width/length/latitude/
+ * variation. This is a deliberate, evidence-traced omission, not a missed
+ * channel: games/warcraft-3/renderer/mdx/r_mdx_geoset.c's MDLX_RenderEmitter
+ * samples ALL 7 physical channels via GET_PARTICLE_ANIM_PARAM, but its own
+ * FX_GenerateRandomOrigin/FX_GenerateRandomDirection call sites read
+ * `emitter->Length`/`emitter->Width`/`emitter->Latitude` directly (the
+ * STATIC struct fields, bypassing their own already-sampled locals), and
+ * the sampled Variation local is never read by anything at all - confirmed
+ * by git blame (single atomic commit 2bfbd4e0, never revisited) and an
+ * exhaustive grep of every "Variation" occurrence in this codebase - see
+ * platform/bridge/bz_tabletop_assets.h's bzTTParticleEmitterInfo_t doc
+ * comment and games/warcraft-3/docs/file-formats/mdx.md's "Particle
+ * Emitters (PRE2)" section for the full citation. Reproducing the
+ * authoritative renderer's OBSERVABLE behavior means `width`/`length`/
+ * `latitude` below are always the STATIC value (bz_quest_wc3_capture.c
+ * copies bzTTParticleEmitterInfo_t's static fields directly, never calling
+ * BZ_TTAsset_EmitterTrackInfo()/_CopyEmitterFloatKeys() for these 3
+ * channels or for variation at all) - this is not an oversight, "fixing"
+ * it would diverge from traced behavior. Every *Track field mirrors
+ * bzQuestWc3StoredTrack_t's own "arena-sized to real key count" contract;
+ * floatKeys is the only populated array (every emitter channel is scalar). */
+typedef struct {
+    uint32_t nodeIndex;
+    uint32_t blendMode;   /* bzTTBlendMode_t, see above */
+    uint32_t headOrTail;  /* bzTTParticleHeadTail_t, see above */
+    bool unsupported;     /* true: replaceable_id was not 0/1/2 - this emitter spawns nothing */
+    bool teamColor;       /* true: replaceable_id 1 - resolve via the render item's team color texture */
+    bool teamGlow;        /* true: replaceable_id 2 - resolve via the render item's team glow texture */
+    char textureIdentity[BZ_QUEST_WC3_MAX_IDENTITY]; /* empty iff unsupported/teamColor/teamGlow */
+    uint32_t rows, columns;
+    /* latitude/gravity/lifeSpan/emissionRate/length/width are ALWAYS static (see above) - speed
+     * is the static default, overridden per-frame by speedTrack when present. variation is
+     * intentionally absent (see above). */
+    float speed, latitude, gravity, lifeSpan, emissionRate, length, width;
+    float tailLength, timeMiddle;
+    float segmentColor[9];
+    uint8_t segmentAlpha[3];
+    float particleScaling[3];
+    bzQuestWc3StoredTrack_t visibilityTrack, emissionRateTrack, speedTrack, gravityTrack;
+} bzQuestWc3StoredEmitter_t;
+
 /* Top-level persistent per-model animation data: one heap arena backs every
- * pointer below (nodes/sequences/globalSeqDurations/geosetAnims and every
- * key array they point into), allocated by a first ABI-Info()-only sizing
- * pass and filled by a second pass of real ABI Copy*() calls straight into
- * arena-relative addresses (see bz_quest_wc3_capture.c) - one malloc(), one
- * free(), sized to the model's REAL data rather than any fixed worst-case
+ * pointer below (nodes/sequences/globalSeqDurations/geosetAnims/emitters and
+ * every key array they point into), allocated by a first ABI-Info()-only
+ * sizing pass and filled by a second pass of real ABI Copy*() calls straight
+ * into arena-relative addresses (see bz_quest_wc3_capture.c) - one malloc(),
+ * one free(), sized to the model's REAL data rather than any fixed worst-case
  * cap. `geosetAnims`/`geosetAnimCount` is index-aligned with the owning
- * bzQuestWc3ModelMeta_t::geosets[] array (same index means same geoset). */
+ * bzQuestWc3ModelMeta_t::geosets[] array (same index means same geoset).
+ * `emitters`/`emitterCount` (appended for the particle-effects slice) has no
+ * such index alignment requirement - each emitter carries its own
+ * `nodeIndex` instead, since emitters are not one-per-geoset. */
 typedef struct {
     void *arena;
     uint32_t nodeCount;
@@ -384,6 +460,8 @@ typedef struct {
     const uint32_t *globalSeqDurations;
     uint32_t geosetAnimCount;
     const bzQuestWc3StoredGeosetAnim_t *geosetAnims;
+    uint32_t emitterCount;
+    const bzQuestWc3StoredEmitter_t *emitters;
 } bzQuestWc3ModelAnim_t;
 
 /*

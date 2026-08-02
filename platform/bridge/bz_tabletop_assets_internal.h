@@ -26,6 +26,14 @@ typedef struct {
     bzTTTrackRecord_t translation, rotation, scale;
 } bzTTNodeRecord_t;
 
+/* PRE2 particle emitter (ABI v4). Each of the 8 tracks is a plain float track (see
+ * bzTTEmitterChannel_t) - one bzTTTrackRecord_t per channel, in bzTTEmitterChannel_t's own
+ * declared order, mirrored by node_emitter_track_record()'s switch in bz_tabletop_assets.c. */
+typedef struct {
+    bzTTParticleEmitterInfo_t info;
+    bzTTTrackRecord_t visibility, emission_rate, width, length, speed, latitude, gravity, variation;
+} bzTTEmitterRecord_t;
+
 typedef struct {
     uint32_t id;
     uint32_t corner_count;
@@ -53,6 +61,7 @@ struct bzTTAsset {
             uint32_t sequences_offset;
             uint32_t nodes_offset; /* array of bzTTNodeRecord_t (not bzTTNodeInfo_t directly) */
             uint32_t global_sequences_offset; /* array of uint32_t durations, count = info.global_sequence_count */
+            uint32_t emitters_offset; /* array of bzTTEmitterRecord_t, count = info.emitter_count (ABI v4) */
         } model;
     } u;
     size_t allocation_size;

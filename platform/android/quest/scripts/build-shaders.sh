@@ -77,6 +77,8 @@ compile_one warcraft_hud_panel_vert vertex vert
 compile_one warcraft_hud_panel_frag fragment frag
 compile_one warcraft_hud_text_vert vertex vert
 compile_one warcraft_hud_text_frag fragment frag
+compile_one warcraft_particle_vert vertex vert
+compile_one warcraft_particle_frag fragment frag
 compile_one terrain_vert vertex vert
 compile_one terrain_frag fragment frag
 
@@ -98,6 +100,8 @@ GEN_HEADER="$OUT_DIR/bz_quest_shaders_generated.h"
     cat "$OUT_DIR/warcraft_hud_panel_frag.spv.h"
     cat "$OUT_DIR/warcraft_hud_text_vert.spv.h"
     cat "$OUT_DIR/warcraft_hud_text_frag.spv.h"
+    cat "$OUT_DIR/warcraft_particle_vert.spv.h"
+    cat "$OUT_DIR/warcraft_particle_frag.spv.h"
     cat "$OUT_DIR/terrain_vert.spv.h"
     cat "$OUT_DIR/terrain_frag.spv.h"
     echo "#endif /* BZ_QUEST_SHADERS_GENERATED_H */"

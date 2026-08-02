@@ -47,7 +47,7 @@ static void test_abi_and_asymmetric_blp_orientation(void) {
     uint8_t pixels[16];
     reset_assets();
     ASSERT_EQ_INT(BZ_TTA_AbiVersion(), BZ_TABLETOP_ASSETS_ABI_VERSION);
-    ASSERT_EQ_INT(BZ_TABLETOP_ASSETS_ABI_VERSION, 3);
+    ASSERT_EQ_INT(BZ_TABLETOP_ASSETS_ABI_VERSION, 4);
     ASSERT_EQ_INT(BZ_TTA_CATEGORY_ITEM, 6);
     ASSERT_EQ_INT(sizeof(bzTTAssetMetadata_t), 36);
     ASSERT_EQ_INT(sizeof(bzTTImageInfo_t), 24);
@@ -311,6 +311,102 @@ static void test_mdx_animation_hierarchy_tracks_and_dynamic_material(void) {
     ASSERT_EQ_INT(skin[3].bone_weight[0] + skin[3].bone_weight[1], 255);
 
     BZ_TTAsset_Release(asset);
+}
+
+/* Exercises the ABI v4 PRE2 particle emitter decode path (tools/mdxgen.c "particle_emitter"
+ * preset): Bone_Root (object 0, node index 0) with a simple quad geoset skinned to it, plus
+ * ParticleEmitter1 (object 1, parent 0, node index 1) carrying its own pivot/KGTR track (an
+ * emitter IS a node - see wc3_mdx_decode.c's parse_particle_emitters()), every PRE2 static
+ * field in its exact on-disk order, and one KP2E override track. Expected values are
+ * hand-derived from the fixture's authored fields, not from the production code under test. */
+static void test_mdx_particle_emitter_decode_and_blend_translation(void) {
+    DWORD size;
+    uint8_t *source;
+    bzTTAResult_t status = BZ_TTA_OK;
+    bzTTAsset_t *asset;
+    bzTTModelInfo_t model = { 0 };
+    bzTTNodeInfo_t emitterNode;
+    bzTTParticleEmitterInfo_t info = { 0 };
+    bzTTTrackInfo_t track;
+    bzTTVec3Key_t vec3_keys[2];
+    bzTTFloatKey_t float_keys[2];
+
+    source = FS_ReadFile("TestUI/Models/particle_emitter.mdx", &size);
+    ASSERT_NOT_NULL(source);
+    asset = BZ_WC3_TTA_DecodeMDX(source, size, "particle_emitter.mdx", NULL, &status);
+    FS_FreeFile(source);
+    ASSERT_NOT_NULL(asset); ASSERT_EQ_INT(status, BZ_TTA_OK);
+
+    ASSERT(BZ_TTAsset_ModelInfo(asset, &model));
+    ASSERT_EQ_INT(model.node_count, 2);   /* Bone_Root + ParticleEmitter1 */
+    ASSERT_EQ_INT(model.emitter_count, 1);
+
+    ASSERT(BZ_TTAsset_ParticleEmitterInfo(asset, 0, &info));
+    ASSERT_EQ_INT(info.node_index, 1);    /* Bone_Root is index 0, the emitter is index 1 */
+    /* FilterMode=1 (raw PRE2 "Additive") -> BZ_TTA_BLEND_ADDITIVE, NOT the raw value 1 itself
+     * (which would collide with bzTTBlendMode_t's own BZ_TTA_BLEND_TRANSPARENT=1) - proves the
+     * translation table runs, not a passthrough. */
+    ASSERT_EQ_INT(info.blend_mode, BZ_TTA_BLEND_ADDITIVE);
+    /* FrameFlags=2 (raw PRE2 "Both") -> BZ_TTA_PARTICLE_BOTH. */
+    ASSERT_EQ_INT(info.head_or_tail, BZ_TTA_PARTICLE_BOTH);
+    ASSERT_EQ_FLOAT(info.speed, 10.0f, 0.001f);
+    ASSERT_EQ_FLOAT(info.variation, 0.5f, 0.001f);
+    ASSERT_EQ_FLOAT(info.latitude, 45.0f, 0.001f);
+    ASSERT_EQ_FLOAT(info.gravity, 9.8f, 0.001f);
+    ASSERT_EQ_FLOAT(info.life_span, 2.0f, 0.001f);
+    ASSERT_EQ_FLOAT(info.emission_rate, 20.0f, 0.001f); /* static default (overridden below by KP2E) */
+    ASSERT_EQ_FLOAT(info.length, 0.0f, 0.001f);
+    ASSERT_EQ_FLOAT(info.width, 0.0f, 0.001f);
+    ASSERT_EQ_INT(info.rows, 2); ASSERT_EQ_INT(info.columns, 2);
+    ASSERT_EQ_FLOAT(info.tail_length, 0.1f, 0.001f);
+    ASSERT_EQ_FLOAT(info.time_middle, 0.5f, 0.001f);
+    ASSERT_EQ_FLOAT(info.segment_color[0], 1.0f, 0.001f); ASSERT_EQ_FLOAT(info.segment_color[1], 1.0f, 0.001f);
+    ASSERT_EQ_FLOAT(info.segment_color[3], 1.0f, 0.001f); ASSERT_EQ_FLOAT(info.segment_color[4], 0.5f, 0.001f);
+    ASSERT_EQ_FLOAT(info.segment_color[6], 1.0f, 0.001f); ASSERT_EQ_FLOAT(info.segment_color[8], 0.0f, 0.001f);
+    ASSERT_EQ_INT(info.segment_alpha[0], 255); ASSERT_EQ_INT(info.segment_alpha[1], 200);
+    ASSERT_EQ_INT(info.segment_alpha[2], 0);
+    ASSERT_EQ_FLOAT(info.particle_scaling[0], 1.0f, 0.001f);
+    ASSERT_EQ_INT(info.texture_index, 0); ASSERT_EQ_INT(info.replaceable_id, 0);
+    ASSERT(!BZ_TTAsset_ParticleEmitterInfo(asset, 1, &info)); /* out of range: only 1 emitter */
+
+    /* The emitter's own node entry: shares BZ_TTAsset_NodeInfo()/NodeTrackInfo() with every
+     * other node - no separate hierarchy/pivot/track surface for emitters. */
+    ASSERT(BZ_TTAsset_NodeInfo(asset, 1, &emitterNode));
+    ASSERT_STR_EQ(emitterNode.name, "ParticleEmitter1");
+    ASSERT_EQ_INT(emitterNode.object_id, 1); ASSERT_EQ_INT(emitterNode.parent_id, 0);
+    ASSERT_EQ_FLOAT(emitterNode.pivot.z, 1.0f, 0.001f);
+    ASSERT(BZ_TTAsset_NodeTrackInfo(asset, 1, BZ_TTA_NODE_TRANSLATION, &track));
+    ASSERT_EQ_INT(track.key_count, 2); ASSERT_EQ_INT(track.global_sequence, BZ_TTA_NO_GLOBAL_SEQUENCE);
+    ASSERT_EQ_INT(BZ_TTAsset_CopyNodeTranslationKeys(asset, 1, vec3_keys, 2), 2);
+    ASSERT_EQ_INT(vec3_keys[0].time_msec, 0); ASSERT_EQ_FLOAT(vec3_keys[0].value.z, 0.0f, 0.001f);
+    ASSERT_EQ_INT(vec3_keys[1].time_msec, 2000); ASSERT_EQ_FLOAT(vec3_keys[1].value.z, 1.0f, 0.001f);
+
+    /* The emitter's own KP2E EmissionRate track overrides the static default above. */
+    ASSERT(BZ_TTAsset_EmitterTrackInfo(asset, 0, BZ_TTA_EMITTER_EMISSION_RATE, &track));
+    ASSERT_EQ_INT(track.key_count, 2); ASSERT_EQ_INT(track.interp, BZ_TTA_INTERP_LINEAR);
+    ASSERT_EQ_INT(BZ_TTAsset_CopyEmitterFloatKeys(asset, 0, BZ_TTA_EMITTER_EMISSION_RATE, float_keys, 2), 2);
+    ASSERT_EQ_INT(float_keys[0].time_msec, 0); ASSERT_EQ_FLOAT(float_keys[0].value, 5.0f, 0.001f);
+    ASSERT_EQ_INT(float_keys[1].time_msec, 2000); ASSERT_EQ_FLOAT(float_keys[1].value, 25.0f, 0.001f);
+    /* No KP2V (Visibility) track was authored: absent, matching NodeTrackInfo's own
+     * "key_count 0 = no track" contract exactly. */
+    ASSERT(BZ_TTAsset_EmitterTrackInfo(asset, 0, BZ_TTA_EMITTER_VISIBILITY, &track));
+    ASSERT_EQ_INT(track.key_count, 0);
+    ASSERT(!BZ_TTAsset_EmitterTrackInfo(asset, 1, BZ_TTA_EMITTER_SPEED, &track)); /* out of range */
+
+    BZ_TTAsset_Release(asset);
+}
+
+/* Confirms an ABI-v3 caller (this project's previous version, before particle emitters were
+ * added) is explicitly rejected by this v4 build rather than silently misreading v4-shaped
+ * data with a stale version number - see BZ_TTA_ERR_ABI_VERSION's contract. */
+static void test_particle_emitter_abi_version_rejects_stale_caller(void) {
+    struct bzTTSnapshot snapshot = { 0 };
+    const bzTTAsset_t *asset;
+    reset_assets();
+    test_assets_set_configstring(&snapshot, 1, "TestUI/Textures/orientation_2x2.blp");
+    asset = BZ_TTA_RegisterConfigString(BZ_TABLETOP_ASSETS_ABI_VERSION - 1, &snapshot, 1,
+                                        BZ_TTA_ASSET_IMAGE, NULL);
+    ASSERT_NULL(asset); /* stale (v3) abi_version argument: rejected, not serviced */
 }
 
 static void test_desktop_model_identity_fallbacks(void) {
@@ -1345,6 +1441,8 @@ void run_bz_tabletop_assets_tests(void) {
     RUN_TEST(test_placeholder_path_confinement_and_log_once_cache);
     RUN_TEST(test_mdx_geometry_materials_sequences_and_bounds);
     RUN_TEST(test_mdx_animation_hierarchy_tracks_and_dynamic_material);
+    RUN_TEST(test_mdx_particle_emitter_decode_and_blend_translation);
+    RUN_TEST(test_particle_emitter_abi_version_rejects_stale_caller);
     RUN_TEST(test_desktop_model_identity_fallbacks);
     RUN_TEST(test_spawn_model_variation_resolution);
     RUN_TEST(test_model_identity_output_bounds);

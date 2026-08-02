@@ -39,6 +39,7 @@
 
 #include "bz_quest_vk.h"
 #include "bz_quest_wc3_cache.h"
+#include "bz_quest_wc3_particles.h"
 #include "bz_quest_wc3_render.h"
 
 #ifdef __cplusplus
@@ -203,6 +204,22 @@ typedef struct bzQuestVkWc3_s {
 
     uint32_t newModelUploadsThisFrame;
     uint32_t newTextureUploadsThisFrame;
+
+    /* Layer 9: PRE2 particle emitter simulation - see bz_quest_wc3_particles.h. Owned here
+     * (a plain value, not a pointer) since particles are conceptually part of "wc3 models";
+     * bz_quest_vk_wc3_particles.c (the Vulkan-owning draw module) reads it via
+     * bz_quest_vk_wc3_particle_pool() below rather than owning a second copy. `lastClockMsec`/
+     * `haveLastClockMsec` let build_frame_dynamic_material() compute one shared
+     * previousClockMsec/currentClockMsec delta per FRAME (never per render item - matches
+     * desktop's own single tr.viewDef.time/deltaTime, see bz_quest_wc3_particles.h's header
+     * comment) across calls. `poolMapEpoch`/`havePoolMapEpoch` detect a real map reload (never
+     * a mere snapshot-generation bump) to reset the pool - see
+     * bz_quest_wc3_particles_pool_reset()'s "no stale effects across resets" contract. */
+    bzQuestWc3ParticlePool_t particlePool;
+    uint32_t lastParticleClockMsec;
+    bool haveLastParticleClockMsec;
+    uint64_t particlePoolMapEpoch;
+    bool havePoolMapEpoch;
 } bzQuestVkWc3_t;
 
 /*
@@ -221,9 +238,40 @@ bool bz_quest_vk_wc3_create(const bzQuestVk_t *vk, bzQuestVkWc3_t *out);
  * BZ_QUEST_VK_WC3_MAX_NEW_TEXTURE_UPLOADS_PER_FRAME (see those constants'
  * doc comments), and fills `outRenderList`. Must run once per frame (not
  * once per eye) on the Quest XR/render thread, before either eye's
- * bz_quest_vk_wc3_render_target() call.
+ * bz_quest_vk_wc3_render_target() call. `mapEpoch` (BZ_TT identity-of-the-
+ * currently-loaded-map, see bz_quest_wc3_capture.h's bz_quest_map_epoch())
+ * drives this frame's particle-pool reset check (see
+ * bzQuestVkWc3_t::particlePoolMapEpoch's doc comment) - callers already
+ * compute this once per frame for layer 6's interaction state machine
+ * (bz_quest_renderer.c's renderer->interaction.mapEpoch), so no extra ABI/
+ * snapshot round trip is introduced here.
  */
-void bz_quest_vk_wc3_capture_and_upload(bzQuestVkWc3_t *vk3, bzQuestWc3RenderList_t *outRenderList);
+void bz_quest_vk_wc3_capture_and_upload(bzQuestVkWc3_t *vk3, bzQuestWc3RenderList_t *outRenderList,
+                                        uint64_t mapEpoch);
+
+/*
+ * Read-only accessor for bz_quest_vk_wc3_particles.c (the Vulkan-owning
+ * particle draw module) to build this frame's GPU vertex buffer from -
+ * mirrors bz_quest_vk_wc3_hud_has_frame()/_frame()'s own "one module reads
+ * another's already-computed per-frame state via an accessor" precedent
+ * (bz_quest_vk_wc3_hud.h). Never NULL (points at `vk3`'s own field).
+ */
+const bzQuestWc3ParticlePool_t *bz_quest_vk_wc3_particle_pool(const bzQuestVkWc3_t *vk3);
+
+/*
+ * Read-only texture-cache lookup by identity string, exposed so
+ * bz_quest_vk_wc3_particles.c can bind an already-uploaded material texture
+ * for a particle draw run without owning (or duplicating the upload of) a
+ * second texture cache - a PRE2 emitter's texture is decoded/uploaded
+ * through the exact same bz_quest_wc3_capture.c onTextureReady path a
+ * material layer's texture already is (see bz_quest_wc3_capture.c's emitter
+ * texture-resolution code), landing in this SAME cache. Returns NULL (never
+ * an error) when the texture has not finished uploading yet this frame -
+ * matching this file's own "hit path never triggers an upload, a miss is
+ * transient not an error" contract (see this header's "Miss path" doc
+ * comment on the model/texture caches above).
+ */
+const bzQuestVkWc3Texture_t *bz_quest_vk_wc3_find_texture(const bzQuestVkWc3_t *vk3, const char *identity);
 
 /*
  * Records only the non-blended MDX layers into an already-begun render pass
@@ -273,6 +321,21 @@ bool bz_quest_vk_wc3_render_target(bzQuestVkWc3_t *vk3, uint32_t viewIndex, uint
  * own safety contract).
  */
 void bz_quest_vk_wc3_destroy(bzQuestVkWc3_t *vk3);
+
+/*
+ * Maps a bzTTBlendMode_t value (mirrored as BZ_QUEST_TTA_BLEND_* in
+ * bz_quest_vk_wc3.c - see that file's header comment) to a Vulkan color-
+ * blend-attachment state and this blend mode's own depth-write default,
+ * reproducing games/warcraft-3/renderer/mdx/r_mdx_geoset.c's
+ * MDLX_SetBlendMode() exactly (see bz_quest_vk_wc3.c's header comment for
+ * the full per-case citation table). Exposed (not `static`) so
+ * bz_quest_vk_wc3_particles.c's own pipeline-variant cache can reuse the
+ * identical, already-proven 7-way mapping for PRE2 particle emitters'
+ * translated blend mode, rather than a second copy of this switch - DRY,
+ * matching AGENTS.md's "no duplicated logic" rule.
+ */
+void bz_quest_vk_wc3_blend_state_for_mode(uint32_t blendMode, VkPipelineColorBlendAttachmentState *outBlend,
+                                          bool *outDepthWriteDefault);
 
 #ifdef __cplusplus
 }

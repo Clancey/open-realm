@@ -17,6 +17,7 @@
 #include "bz_quest_vk_wc3.h"
 #include "bz_quest_vk_wc3_fog.h"
 #include "bz_quest_vk_wc3_hud.h"
+#include "bz_quest_vk_wc3_particles.h"
 #include "bz_quest_vk_wc3_pointer.h"
 #include "bz_quest_vk_wc3_terrain.h"
 #include "bz_quest_input_state.h"
@@ -40,6 +41,14 @@ typedef struct bzQuestRenderer_s {
     bzQuestVkWc3_t wc3;
     bzQuestVkWc3Terrain_t wc3Terrain;
     bzQuestVkWc3Fog_t wc3Fog;
+    /* Layer 9: PRE2 particle-emitter billboard rendering. Simulation state (the pool) lives
+     * inside `wc3` itself (bz_quest_vk_wc3.h's own bzQuestVkWc3_t::particlePool) since particles
+     * are conceptually part of "wc3 models"; wc3Particles only owns the Vulkan draw-side pipeline/
+     * vertex buffer, reading the pool back via bz_quest_vk_wc3_particle_pool() - see
+     * bz_quest_vk_wc3_particles.h's header comment. Recorded right after wc3's own blended pass
+     * (before fog), so the fog overlay/selection markers below still composite on top of visible
+     * particles exactly like they do for blended terrain/model draws. */
+    bzQuestVkWc3Particles_t wc3Particles;
     /* Layer 5E: WC3 status/command-card HUD. Renders last (after fog/
      * selection) so it is never occluded by board geometry - see
      * bz_quest_vk_wc3_hud.h's header comment for authority/scope. */

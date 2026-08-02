@@ -8,7 +8,7 @@
  * re-deriving) --
  * games/warcraft-3/renderer/mdx/r_mdx_geoset.c's MDLX_SetBlendMode() is the
  * desktop engine's own OpenGL mapping for every bzTTBlendMode_t value; this
- * file's blend_state_for_mode() below reproduces it 1:1 in Vulkan terms
+ * file's bz_quest_vk_wc3_blend_state_for_mode() below reproduces it 1:1 in Vulkan terms
  * (glBlendFunc(src,dst) with no glBlendFuncSeparate call maps to identical
  * color/alpha blend factors - see that function's per-case comments):
  *
@@ -32,7 +32,7 @@
  * disables culling, MODEL_GEO_NO_DEPTH_TEST disables the depth test,
  * MODEL_GEO_NO_DEPTH_SET forces depth-write off (only ever an additional
  * override, never a way to force depth-write back on over a blended mode's
- * own off default - see blend_state_for_mode()).
+ * own off default - see bz_quest_vk_wc3_blend_state_for_mode()).
  *
  * This slice does not implement any lighting model (MODEL_GEO_UNSHADED is
  * not distinguished - see warcraft_vert.vert/warcraft_frag.frag's header
@@ -90,6 +90,12 @@ enum {
     BZ_QUEST_TTA_BLEND_MODULATE = 5,
     BZ_QUEST_TTA_BLEND_MODULATE_2X = 6,
 };
+
+/* shared/cmath3.h's EPSILON (1e-6) - mirrored here for the same reason as the blend/geo-flag
+ * constants above: this module never includes the desktop engine's own internal headers. Used
+ * only for the particle emitter Visibility gate (r_mdx_geoset.c's MDLX_RenderParticleEmitters:
+ * `if (fVisibility < EPSILON) continue;`), transcribed exactly. */
+#define BZ_QUEST_VK_WC3_EPSILON 1e-6f
 
 static bool find_memory_type(VkPhysicalDevice physicalDevice, uint32_t typeBits,
                              VkMemoryPropertyFlags required, uint32_t *outIndex) {
@@ -634,9 +640,10 @@ static void texture_ready_cb(const char *identity, uint32_t width, uint32_t heig
  * never from record_opaque()/record_blended() (which run once per eye) -
  * see this function's full doc comment at its definition.
  */
-static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3RenderList_t *list);
+static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3RenderList_t *list, uint64_t mapEpoch);
 
-void bz_quest_vk_wc3_capture_and_upload(bzQuestVkWc3_t *vk3, bzQuestWc3RenderList_t *outRenderList) {
+void bz_quest_vk_wc3_capture_and_upload(bzQuestVkWc3_t *vk3, bzQuestWc3RenderList_t *outRenderList,
+                                       uint64_t mapEpoch) {
     vk3->newModelUploadsThisFrame = 0;
     vk3->newTextureUploadsThisFrame = 0;
     bzQuestWc3CaptureCallbacks_t callbacks;
@@ -653,17 +660,25 @@ void bz_quest_vk_wc3_capture_and_upload(bzQuestVkWc3_t *vk3, bzQuestWc3RenderLis
      * s_paletteByteOffset/s_geosetAlpha - see build_frame_dynamic_
      * material()'s own doc comment, defined further below in this file
      * (forward-declared just above). */
-    build_frame_dynamic_material(vk3, outRenderList);
+    build_frame_dynamic_material(vk3, outRenderList, mapEpoch);
+}
+
+const bzQuestWc3ParticlePool_t *bz_quest_vk_wc3_particle_pool(const bzQuestVkWc3_t *vk3) {
+    return &vk3->particlePool;
+}
+
+const bzQuestVkWc3Texture_t *bz_quest_vk_wc3_find_texture(const bzQuestVkWc3_t *vk3, const char *identity) {
+    return (const bzQuestVkWc3Texture_t *)cache_find(&vk3->textureCache, identity);
 }
 
 /* ---------------------------------------------------------------------- */
 /* Pipeline variants                                                       */
 /* ---------------------------------------------------------------------- */
 
-/* blend_state_for_mode()'s single source of truth - see this file's header
+/* bz_quest_vk_wc3_blend_state_for_mode()'s single source of truth - see this file's header
  * comment for the exact desktop-engine evidence each row reproduces. */
-static void blend_state_for_mode(uint32_t blendMode, VkPipelineColorBlendAttachmentState *outBlend,
-                                 bool *outDepthWriteDefault) {
+void bz_quest_vk_wc3_blend_state_for_mode(uint32_t blendMode, VkPipelineColorBlendAttachmentState *outBlend,
+                                          bool *outDepthWriteDefault) {
     memset(outBlend, 0, sizeof(*outBlend));
     outBlend->colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -781,7 +796,7 @@ static VkPipeline create_pipeline_variant(bzQuestVkWc3_t *vk3, uint32_t blendMod
 
     VkPipelineColorBlendAttachmentState blendAttachment;
     bool depthWriteDefaultUnused = false;
-    blend_state_for_mode(blendMode, &blendAttachment, &depthWriteDefaultUnused);
+    bz_quest_vk_wc3_blend_state_for_mode(blendMode, &blendAttachment, &depthWriteDefaultUnused);
 
     VkPipelineColorBlendStateCreateInfo colorBlend = {0};
     colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -994,6 +1009,11 @@ static bool create_palette_resources(bzQuestVkWc3_t *out) {
 bool bz_quest_vk_wc3_create(const bzQuestVk_t *vk, bzQuestVkWc3_t *out) {
     memset(out, 0, sizeof(*out));
     out->vk = vk;
+    /* Seeded from the Quest render clock at creation time - "different each real run" without
+     * a new entropy-source dependency; particle spawn placement is inherently non-reproducible
+     * production behavior anyway (matches desktop's own unseeded rand() at runtime) - a FIXED
+     * seed is only what host tests need (bz_quest_wc3_particles_pool_reset()'s own contract). */
+    bz_quest_wc3_particles_pool_reset(&out->particlePool, (uint64_t)bz_quest_wc3_render_clock_msec());
 
     VkDescriptorSetLayoutBinding binding = {0};
     binding.binding = 0;
@@ -1303,9 +1323,145 @@ static VkDeviceSize palette_identity_slot_offset(void) { return 0; }
  *     dropped/frozen draw - the geoset still draws, just unposed), real
  *     geoset alpha still applied (alpha sampling is not slot-bounded).
  */
-static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3RenderList_t *list) {
+
+/* Builds a column-major translation-only matrix - see bz_quest_pure.h's v[col*4+row] layout. */
+static void mat4_translation(float tx, float ty, float tz, float out[16]) {
+    memset(out, 0, sizeof(float) * 16);
+    out[0] = out[5] = out[10] = out[15] = 1.0f;
+    out[12] = tx; out[13] = ty; out[14] = tz;
+}
+
+/* Resolves one emitter's per-frame texture identity from its render item's already-resolved
+ * per-entity team textures (see bzQuestWc3StoredEmitter_t's doc comment - mirrors draw_layer()'s
+ * own team-color/glow resolution exactly). Returns NULL (never draws/spawns) for `unsupported`
+ * or an empty per-entity team texture (registration failed this frame - transient, not an
+ * error). */
+static const char *emitter_texture_identity(const bzQuestWc3StoredEmitter_t *em, const bzQuestWc3RenderItem_t *item) {
+    if (em->unsupported) return NULL;
+    if (em->teamColor) return item->teamColorTextureIdentity[0] ? item->teamColorTextureIdentity : NULL;
+    if (em->teamGlow) return item->teamGlowTextureIdentity[0] ? item->teamGlowTextureIdentity : NULL;
+    return em->textureIdentity[0] ? em->textureIdentity : NULL;
+}
+
+/*
+ * Spawns this frame's particles for every one of `anim`'s emitters attached to `item`, using
+ * `item`'s already-composed world matrix and the SAME resolved node-global pose
+ * (`nodeMatricesZup`) build_frame_dynamic_material() just built for skinning - see this
+ * function's call site. Only 4 of PRE2's 8 animatable channels are ever sampled from a track
+ * here (visibility/emissionRate/speed/gravity) via the exact same
+ * bz_quest_wc3_resolve_track_interval()/bz_quest_wc3_sample_float_track() calls (and the SAME
+ * seqStartMsec/seqEndMsec/renderClockMsec this item's pose already resolved) the geoset alpha
+ * sampling above uses - one active sequence per authoritative entity per frame, never a second,
+ * divergent resolution. width/length/latitude are always `em`'s STATIC field, and variation is
+ * never read at all - this is a deliberate, evidence-traced reproduction of
+ * games/warcraft-3/renderer/mdx/r_mdx_geoset.c's MDLX_RenderEmitter's own selective usage of its
+ * sampled locals, not a missed channel - see bzQuestWc3StoredEmitter_t's doc comment
+ * (bz_quest_wc3_render.h) for the full git-blame-verified citation. Visibility < EPSILON gates
+ * the WHOLE emitter (matches MDLX_RenderParticleEmitters' own wrapping check, r_mdx_geoset.c) -
+ * this function has no access to a "Visibility" static default since desktop's own emitter has
+ * none either (a track-less Visibility always means visible). An emitter whose node fell past
+ * this slice's node cap, or whose texture cannot be resolved this frame (unsupported/team-
+ * texture-not-yet-uploaded), spawns nothing this frame (transient/scope-limited, not an error -
+ * never logged as a hard failure since both conditions are already logged once, at decode time,
+ * by bz_quest_wc3_capture.c). */
+static void process_item_particle_emitters(bzQuestVkWc3_t *vk3, const bzQuestWc3RenderItem_t *item,
+                                           const bzQuestWc3ModelAnim_t *anim, uint32_t nodeCount,
+                                           const float nodeMatricesZup[][16], uint32_t seqStartMsec,
+                                           uint32_t seqEndMsec, uint32_t renderClockMsec,
+                                           uint32_t previousClockMsec) {
+    for (uint32_t e = 0; e < anim->emitterCount; e++) {
+        const bzQuestWc3StoredEmitter_t *em = &anim->emitters[e];
+        if (em->nodeIndex == BZ_QUEST_WC3_NO_PARENT || em->nodeIndex >= nodeCount) continue;
+        const char *textureIdentity = emitter_texture_identity(em, item);
+        if (!textureIdentity) continue;
+
+#define SAMPLE_EMITTER_FLOAT(TRACK, STATIC_DEFAULT, OUT)                                                    \
+        do {                                                                                                \
+            bzQuestWc3Track_t track;                                                                        \
+            convert_stored_track(&em->TRACK, &track);                                                       \
+            uint32_t gsd = global_seq_duration_for_track(anim, track.globalSequence);                       \
+            uint32_t intervalStart, intervalEnd, sampleTime;                                                \
+            bz_quest_wc3_resolve_track_interval(&track, seqStartMsec, seqEndMsec, item->frame,               \
+                                                renderClockMsec, gsd, &intervalStart, &intervalEnd,          \
+                                                &sampleTime);                                                \
+            bz_quest_wc3_sample_float_track(&track, intervalStart, intervalEnd, sampleTime,                  \
+                                            (STATIC_DEFAULT), &(OUT));                                       \
+        } while (0)
+
+        float visibility = 1.0f;
+        SAMPLE_EMITTER_FLOAT(visibilityTrack, 1.0f, visibility);
+        if (visibility < BZ_QUEST_VK_WC3_EPSILON) continue;
+
+        bzQuestWc3ParticleEmitterFrame_t frame;
+        memset(&frame, 0, sizeof(frame));
+        SAMPLE_EMITTER_FLOAT(emissionRateTrack, em->emissionRate, frame.emissionRate);
+        SAMPLE_EMITTER_FLOAT(speedTrack, em->speed, frame.speed);
+        SAMPLE_EMITTER_FLOAT(gravityTrack, em->gravity, frame.gravity);
+#undef SAMPLE_EMITTER_FLOAT
+        /* Static-only, never track-sampled - see this function's doc comment. */
+        frame.width = em->width;
+        frame.length = em->length;
+        frame.latitude = em->latitude;
+        frame.lifeSpan = em->lifeSpan;
+        frame.timeMiddle = em->timeMiddle;
+        frame.rows = em->rows; frame.columns = em->columns;
+        frame.blendMode = em->blendMode; frame.headOrTail = em->headOrTail;
+        frame.textureIdentity = textureIdentity;
+        memcpy(frame.segmentColor, em->segmentColor, sizeof(frame.segmentColor));
+        memcpy(frame.segmentAlpha, em->segmentAlpha, sizeof(frame.segmentAlpha));
+        memcpy(frame.particleScaling, em->particleScaling, sizeof(frame.particleScaling));
+
+        /* World matrix: item->world * (nodeGlobal_Yup * Translate(pivot_Yup)) - only the spawn
+         * ORIGIN is ever multiplied by this (see bz_quest_wc3_particles.h's header comment on
+         * why velocity/gravity are not); pivot is folded in here (not passed separately to the
+         * pure particle module) since M*Translate(pivot) applied to a local offset is
+         * algebraically identical to desktop's own "add pivot to the origin before
+         * transforming" (r_mdx_geoset.c) - see bz_quest_wc3_particles.h's header comment. */
+        float nodeYup[16];
+        bz_quest_wc3_convert_matrix_zup_to_yup(nodeMatricesZup[em->nodeIndex], nodeYup);
+        const bzQuestWc3StoredNode_t *emitterNode = &anim->nodes[em->nodeIndex];
+        float pivotTranslate[16];
+        /* Position swap only (x,y,z)_engine -> (x,z,y)_target - matches this file's own vertex/
+         * pivot conversion elsewhere (bz_quest_wc3_render.h's coordinate evidence). */
+        mat4_translation(emitterNode->pivot.x, emitterNode->pivot.z, emitterNode->pivot.y, pivotTranslate);
+        float nodeWorldYup[16];
+        bz_quest_mat4_multiply(nodeYup, pivotTranslate, nodeWorldYup);
+        bz_quest_mat4_multiply(item->world, nodeWorldYup, frame.worldMatrix);
+
+        bool overflowed = false;
+        bz_quest_wc3_particles_emit(&vk3->particlePool, &frame, previousClockMsec, renderClockMsec, &overflowed);
+        if (overflowed) {
+            VK_WC3_LOG_ONCE(item->modelIdentity, "particle-pool-overflow",
+                            "bz_quest_vk_wc3: particle pool exhausted or per-emitter spawn cap "
+                            "reached for model '%s' - some particles this frame were skipped\n",
+                            item->modelIdentity);
+        }
+    }
+}
+
+static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3RenderList_t *list, uint64_t mapEpoch) {
     vk3->paletteSlotsUsedThisFrame = 0;
     uint32_t renderClockMsec = bz_quest_wc3_render_clock_msec();
+
+    /* Particle pool reset: only on a REAL map-identity change (never a mere snapshot-generation
+     * bump) - "no stale effects across resets", see bz_quest_wc3_particles_pool_reset()'s own
+     * doc comment. The first-ever call (havePoolMapEpoch false) does NOT reset - the pool was
+     * already freshly reset at bz_quest_vk_wc3_create() time - it only records the baseline
+     * epoch to compare future frames against. */
+    if (!vk3->havePoolMapEpoch) {
+        vk3->particlePoolMapEpoch = mapEpoch;
+        vk3->havePoolMapEpoch = true;
+    } else if (mapEpoch != vk3->particlePoolMapEpoch) {
+        bz_quest_wc3_particles_pool_reset(&vk3->particlePool, (uint64_t)renderClockMsec);
+        vk3->particlePoolMapEpoch = mapEpoch;
+    }
+    /* One shared previousClockMsec/currentClockMsec window for every emitter processed this
+     * frame - matches desktop's own single tr.viewDef.time/deltaTime (see
+     * bz_quest_wc3_particles.h's header comment). The first-ever call uses a zero-width window
+     * (previousClockMsec == renderClockMsec), i.e. no spawns yet, rather than guessing a
+     * fabricated "previous" time - a clean, safe bootstrap, not a missed spawn (the very next
+     * frame spawns normally). */
+    uint32_t previousClockMsec = vk3->haveLastParticleClockMsec ? vk3->lastParticleClockMsec : renderClockMsec;
 
     for (uint32_t i = 0; i < list->count; i++) {
         const bzQuestWc3RenderItem_t *item = &list->items[i];
@@ -1350,6 +1506,11 @@ static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3Re
         bz_quest_wc3_build_pose(s_poseNodesScratch, nodeCount, seqStartMsec, seqEndMsec, item->frame,
                                 renderClockMsec, anim->globalSeqDurations, anim->globalSeqDurationCount,
                                 s_poseNodeMatricesScratch);
+
+        if (anim->emitterCount > 0) {
+            process_item_particle_emitters(vk3, item, anim, nodeCount, s_poseNodeMatricesScratch,
+                                           seqStartMsec, seqEndMsec, renderClockMsec, previousClockMsec);
+        }
 
         for (uint32_t g = 0; g < model->meta.geosetCount; g++) {
             if (g >= anim->geosetAnimCount) {
@@ -1407,6 +1568,22 @@ static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3Re
             s_paletteByteOffset[i][g] = byteOffset;
         }
     }
+
+    /* Aging/draw-packing is a GLOBAL post-pass, run once per frame after every entity's own
+     * spawning above - mirrors desktop's own per-frame order exactly (MDLX_RenderEmitter/
+     * MDLX_RenderParticleEmitters spawn per-entity during model rendering; R_UpdateParticles()/
+     * R_DrawParticles() run once afterward - see bz_quest_wc3_particles.h's header comment). A
+     * particle spawned this frame is therefore aged by this SAME frame's delta before it is
+     * first packed/drawn - an already-in-motion first frame, not a frozen spawn frame.
+     * `renderClockMsec - previousClockMsec` is unsigned (uint32_t) subtraction, which computes
+     * the correct small forward delta via modular arithmetic even across
+     * bz_quest_wc3_render_clock_msec()'s own documented ~49.7-day wraparound - no explicit
+     * wraparound branch needed (a signed/float comparison after the fact would be too late:
+     * the wrap has already been resolved correctly by the subtraction itself). */
+    float deltaSec = (float)(renderClockMsec - previousClockMsec) / 1000.0f;
+    bz_quest_wc3_particles_age(&vk3->particlePool, deltaSec);
+    vk3->lastParticleClockMsec = renderClockMsec;
+    vk3->haveLastParticleClockMsec = true;
 }
 
 static void draw_layer(VkCommandBuffer cmd, bzQuestVkWc3_t *vk3, const bzQuestVkWc3Model_t *model,
@@ -1435,7 +1612,7 @@ static void draw_layer(VkCommandBuffer cmd, bzQuestVkWc3_t *vk3, const bzQuestVk
     bool noDepthSet = (layer->flags & (uint32_t)BZ_QUEST_MDX_GEO_NO_DEPTH_SET) != 0;
     VkPipelineColorBlendAttachmentState blendUnused;
     bool depthWriteDefault = true;
-    blend_state_for_mode(layer->blendMode, &blendUnused, &depthWriteDefault);
+    bz_quest_vk_wc3_blend_state_for_mode(layer->blendMode, &blendUnused, &depthWriteDefault);
     bool depthWriteEnable = depthWriteDefault && !noDepthSet;
     VkPipeline pipeline = get_or_create_pipeline_variant(vk3, layer->blendMode, twoSided,
                                                         !noDepthTest, depthWriteEnable);

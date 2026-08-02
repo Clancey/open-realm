@@ -217,6 +217,8 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/warcraft_hud_panel_frag.frag"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/warcraft_hud_text_vert.vert"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/warcraft_hud_text_frag.frag"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/warcraft_particle_vert.vert"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/warcraft_particle_frag.frag"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_vert.vert"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_frag.frag"
     COMMENT "bz_quest: compiling GLSL shaders to SPIR-V and embedding as C headers"
@@ -255,11 +257,13 @@ add_library(bz_quest_native SHARED
     bz_quest_wc3_capture.c
     bz_quest_wc3_terrain_capture.c
     bz_quest_wc3_anim.c
+    bz_quest_wc3_particles.c
     bz_quest_wc3_hud_font.c
     bz_quest_wc3_hud.c
     bz_quest_vk_wc3.c
     bz_quest_vk_wc3_fog.c
     bz_quest_vk_wc3_terrain.c
+    bz_quest_vk_wc3_particles.c
     bz_quest_vk_wc3_hud.c
     bz_quest_input_state.c
     bz_quest_hand_input.c
