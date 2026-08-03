@@ -1,5 +1,5 @@
 #import "bz_tabletop_bridge.h"
-#include "bz_tabletop_lifecycle.h"
+#include "../../../../tabletop/bridge/bz_tabletop_lifecycle.h"
 #include <stdlib.h>
 #include <string.h>
 

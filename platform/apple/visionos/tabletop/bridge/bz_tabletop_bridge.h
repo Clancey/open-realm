@@ -5,8 +5,9 @@
 
 /*
  * BZTabletopBridge — thin Objective-C++ NSObject wrapper around the
- * portable bz_tabletop_lifecycle.h/.c core, satisfying this layer's
- * "minimal Objective-C++ lifecycle host" requirement.
+ * portable platform/tabletop/bridge/bz_tabletop_lifecycle.h/.c core,
+ * satisfying this layer's "minimal Objective-C++ lifecycle host"
+ * requirement.
  *
  * This class holds no business logic of its own: every method below is a
  * direct forward to the matching BZ_Tabletop* call. It contains zero

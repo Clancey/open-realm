@@ -14,6 +14,24 @@ Detailed controls and asset contracts live in:
 The parallel snapshot-only StarCraft II foundation is documented in
 [games/starcraft-2/docs/visionos-foundation.md](../games/starcraft-2/docs/visionos-foundation.md).
 
+## Source layout
+
+The tabletop host lifecycle state machine and headless null client/renderer/UI
+seams are platform-neutral C with no Apple/ObjC/Swift dependency and live under
+the shared `platform/tabletop/` tree, not under `platform/apple/visionos/`:
+
+```text
+platform/tabletop/bridge/bz_tabletop_lifecycle.{c,h}     # pthreads host state machine
+platform/tabletop/client/bz_tabletop_client_glue.h       # headless client seam contract
+platform/tabletop/client/{cl_console,cl_fx,cl_input,cl_scrn,r,s,ui}_tabletop_null.c
+```
+
+visionOS is the only host today; Android/Meta Quest is expected to link this
+same shared code later without modification. Only genuinely Apple-specific
+glue (`bz_tabletop_bridge.h/.mm`, `bz_tabletop_swift.h`, the module map, and the
+ObjC++ link smoke test) stays under
+`platform/apple/visionos/tabletop/bridge/`.
+
 ## Local data contract
 
 Retail archives are local-only and must never be committed. Set:

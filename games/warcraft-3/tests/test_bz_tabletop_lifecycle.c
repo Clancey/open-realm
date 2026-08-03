@@ -1,6 +1,6 @@
 /*
  * test_bz_tabletop_lifecycle.c — coverage for
- * platform/apple/visionos/tabletop/bridge/bz_tabletop_lifecycle.c, the
+ * platform/tabletop/bridge/bz_tabletop_lifecycle.c, the
  * portable pthreads-based state machine and dedicated-thread driver the
  * Objective-C++ bridge (bz_tabletop_bridge.mm) forwards to. Runs on the
  * normal desktop toolchain (no visionOS SDK needed) using the same

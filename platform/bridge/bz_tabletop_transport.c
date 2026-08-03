@@ -30,7 +30,7 @@
 #include "common/cmodel.h"
 #include "common/common.h"
 #include "common/net.h"
-#include "platform/apple/visionos/tabletop/client/bz_tabletop_client_glue.h"
+#include "platform/tabletop/client/bz_tabletop_client_glue.h"
 
 /* --- ABI/engine constant parity -----------------------------------------
  * These structs are transport-owned copies, not aliases, of engine
@@ -745,8 +745,8 @@ void BZ_TT_PublishSnapshotFromClient(void) {
     memcpy(snap->configstrings, cl.configstrings, sizeof(snap->configstrings));
     snap->num_configstrings = MAX_CONFIGSTRINGS;
     /* Unit command-card layouts: populated only via BZTT_CopyCachedUnitUI()
-     * (see platform/apple/visionos/tabletop/client/ui_tabletop_null.c),
-     * which mirrors whatever the last CL_ParseUnitUI() decode delivered to
+     * (see platform/tabletop/client/ui_tabletop_null.c), which mirrors
+     * whatever the last CL_ParseUnitUI() decode delivered to
      * ui.UpdateUnitUI(). Left at 0 (all-zero, versioned-empty) otherwise. */
     snap->num_unit_layouts = BZTT_CopyCachedUnitUI(snap->unit_layouts, BZ_TT_MAX_UNIT_LAYOUTS);
     BuildActionLayout(&snap->action_layout);

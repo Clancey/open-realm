@@ -1,7 +1,10 @@
 /*
- * Native-host sound handoff for visionOS. The engine remains the owner of
- * event/path resolution; copied WAV payloads cross a bounded C queue to the
- * platform AVFoundation sink.
+ * Native-host sound handoff for the shared tabletop client (see
+ * platform/tabletop/client), linked by every native host (visionOS
+ * today; Android/Meta Quest later). The engine remains the owner of
+ * event/path resolution; copied WAV payloads cross a bounded C queue to
+ * whichever platform audio sink (AVFoundation, AAudio, ...) the host
+ * drains BZ_TTAudio_Dequeue() from.
  */
 #include <pthread.h>
 #include <stdio.h>
@@ -44,8 +47,8 @@ bool BZ_TTAudio_Configure(uint32_t abi_version, bzTTAudioMode_t mode) {
     audio_mode = mode;
     audio_dropped = 0;
     pthread_mutex_unlock(&audio_lock);
-    fprintf(stderr, "S_Init: visionOS tabletop audio sink is %s\n",
-            mode == BZ_TT_AUDIO_DEVICE ? "AVFoundation device" : "explicit simulator dummy");
+    fprintf(stderr, "S_Init: native tabletop audio sink is %s\n",
+            mode == BZ_TT_AUDIO_DEVICE ? "the platform device sink" : "explicit simulator dummy");
     return true;
 }
 

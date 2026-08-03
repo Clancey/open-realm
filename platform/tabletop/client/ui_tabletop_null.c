@@ -1,10 +1,11 @@
 /*
- * ui_tabletop_null.c - headless UI backend for the visionOS tabletop client
- * (Layer 2).
+ * ui_tabletop_null.c - headless UI backend for the shared tabletop client
+ * (see platform/tabletop/client), linked by every native host (visionOS
+ * today; Android/Meta Quest later).
  *
  * Real menu/glue UI (the per-game ui/ directories implementing client/ui.h's
- * uiExport_t) is out of scope for this layer (no Swift/RealityKit host exists yet to
- * render it to). This file supplies a no-op UI_GetAPI() so client/cl_main.c
+ * uiExport_t) is out of scope for this layer (no native UI host renders it
+ * yet). This file supplies a no-op UI_GetAPI() so client/cl_main.c
  * links and runs unmodified, plus a small cache that CL_ParseUnitUI()
  * (cl_scrn_tabletop_null.c) feeds via ui.UpdateUnitUI() - the one UI
  * callback that carries data the tabletop transport's snapshot needs (see
@@ -20,7 +21,7 @@
 #include <string.h>
 
 #include "client/ui.h"
-#include "platform/apple/visionos/tabletop/client/bz_tabletop_client_glue.h"
+#include "platform/tabletop/client/bz_tabletop_client_glue.h"
 
 static bzTTUnitLayout_t cached_layouts[BZ_TT_MAX_UNIT_LAYOUTS];
 static uint32_t cached_count;

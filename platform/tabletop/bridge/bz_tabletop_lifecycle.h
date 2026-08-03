@@ -9,16 +9,18 @@ extern "C" {
 
 /*
  * bz_tabletop_lifecycle — portable (no Objective-C, no Foundation, no
- * RealityKit) state machine and dedicated-thread driver for hosting the
- * static visionOS WC3 engine archive (see Makefile's xrsimulator/xros
- * targets) from an embedding app.
+ * RealityKit, no Android/JNI) state machine and dedicated-thread driver
+ * for hosting a static tabletop WC3 engine archive (see the visionOS
+ * build's xrsimulator/xros targets in platform/apple/visionos/build.mk)
+ * from an embedding native app on any platform.
  *
- * This is the host-independent core that
- * platform/apple/visionos/tabletop/bridge/bz_tabletop_bridge.mm's thin
- * Objective-C++ wrapper calls into. Keeping the actual logic here — plain
- * C, POSIX threads — makes it unit-testable via the normal `make test` C
- * harness on any desktop toolchain, without needing Xcode, a booted
- * simulator, or the Objective-C runtime at all.
+ * This is the host-independent core that a thin per-platform wrapper
+ * calls into — today platform/apple/visionos/tabletop/bridge/bz_tabletop_bridge.mm's
+ * Objective-C++ wrapper. Keeping the actual logic here — plain C, POSIX
+ * threads — makes it unit-testable via the normal `make test` C harness
+ * on any desktop toolchain, without needing Xcode, a booted simulator,
+ * or the Objective-C runtime at all, and lets a future Android/Meta
+ * Quest host link this same core.
  *
  * This header deliberately uses only plain C types (not common/shared.h's
  * LPCSTR/BOOL) so it can be #included directly from Objective-C++ (the

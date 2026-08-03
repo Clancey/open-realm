@@ -4,8 +4,9 @@
  * platform/bridge/bz_tabletop_transport.c.
  *
  * This header is NOT part of the public bz_tabletop_transport.h ABI: it is
- * only ever included by .c files linked into the visionOS tabletop archive,
- * and it is free to use engine types (uiUnitData_t, bzTTUnitLayout_t).
+ * only ever included by .c files linked into a headless tabletop engine
+ * archive (visionOS today; Android/Meta Quest later), and it is free to
+ * use engine types (uiUnitData_t, bzTTUnitLayout_t).
  */
 #ifndef BZ_TABLETOP_CLIENT_GLUE_H
 #define BZ_TABLETOP_CLIENT_GLUE_H

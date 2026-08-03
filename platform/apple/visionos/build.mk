@@ -7,8 +7,8 @@
 # `xcrun`/clang target triples and `ar` - no Xcode project is created or
 # required. The result is a set of `.a` archives under
 # build/lib/visionos/<platform>/ for a later Objective-C++/Swift host
-# (platform/apple/visionos/tabletop/bridge/, platform/bridge/) to link
-# against.
+# (platform/apple/visionos/tabletop/bridge/, platform/tabletop/bridge/,
+# platform/bridge/) to link against.
 #
 # This build target links the real client/*.c networking/parse/state path
 # (cl_main.c, cl_parse.c, cl_view.c, cl_tent.c, keys.c) so the tabletop
@@ -18,8 +18,9 @@
 # docs/visionos-tabletop.md). It still excludes renderer/ (SDL/OpenGL),
 # sound/ (SDL audio), and the SDL-tainted client/ files (cl_input.c,
 # cl_input_w3.c, cl_input_wow.c, cl_scrn.c, console.c, cl_fx.c, cl_layout.c):
-# platform/apple/visionos/tabletop/client/ supplies small, explicit,
-# link-selected headless replacements for exactly the renderer/input/sound/
+# platform/tabletop/client/ (shared, platform-neutral - see that
+# directory's header comments) supplies small, explicit, link-selected
+# headless replacements for exactly the renderer/input/sound/
 # UI-drawing seams the real client calls unconditionally (R_GetAPI/
 # R_StdoutGetAPI, S_Init/S_Shutdown/S_PlaySound*, UI_GetAPI, CL_Input,
 # CL_SetGameplayBindings, SCR_UpdateScreen, CL_ParseUnitUI, CON_printf/
@@ -28,7 +29,8 @@
 # window, open a GL context, or poll platform input.
 # ---------------------------------------------------------------------------
 BZ_XR_MIN_OS  ?= 1.0
-BZ_XR_TT_CLIENT_DIR := platform/apple/visionos/tabletop/client
+BZ_XR_TT_CLIENT_DIR := platform/tabletop/client
+BZ_XR_TT_BRIDGE_DIR := platform/tabletop/bridge
 BZ_XR_BRIDGE_TRANSPORT_DIR := platform/bridge
 BZ_XR_LIB_DIR  := $(LIB_DIR)/visionos
 BZ_XR_WC3_DATA_TOOL := platform/apple/visionos/scripts/wc3_data.sh
@@ -171,8 +173,9 @@ visionos: xrsimulator xros
 #
 # platform/apple/visionos/tabletop/bridge/ hosts the callable engine archive
 # above from a dedicated thread with explicit idle/starting/running/failed/
-# suspended/stopped state - no Swift, no RealityKit. bz_tabletop_lifecycle.c
-# is the portable pthreads core (tested by make test, see
+# suspended/stopped state - no Swift, no RealityKit.
+# platform/tabletop/bridge/bz_tabletop_lifecycle.c is the portable pthreads
+# core, shared with any future non-Apple host (tested by make test, see
 # games/warcraft-3/game.mk's test-bz-tabletop-lifecycle); bz_tabletop_bridge.mm
 # is a thin NSObject wrapper with zero logic beyond forwarding to that core.
 #
@@ -208,7 +211,7 @@ define bz_xr_bridge_rules
 BZ_XR_$(1)_BRIDGE_ARCHIVE := $$(BZ_XR_$(1)_DIR)/libopenwarcraft3-bridge.a
 BZ_XR_$(1)_BRIDGE_SMOKE   := $$(BZ_XR_$(1)_DIR)/bridge-link-smoke
 
-$$(eval $$(call bz_xr_bridge_c_o,$$(BZ_XR_$(1)_DIR)/bz_tabletop_lifecycle.o,$$(BZ_XR_BRIDGE_DIR)/bz_tabletop_lifecycle.c,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+$$(eval $$(call bz_xr_bridge_c_o,$$(BZ_XR_$(1)_DIR)/bz_tabletop_lifecycle.o,$$(BZ_XR_TT_BRIDGE_DIR)/bz_tabletop_lifecycle.c,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_bridge_c_o,$$(BZ_XR_$(1)_DIR)/bz_tabletop_catalog.o,$$(BZ_XR_BRIDGE_TRANSPORT_DIR)/bz_tabletop_catalog.c,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_bridge_mm_o,$$(BZ_XR_$(1)_DIR)/bz_tabletop_bridge.o,$$(BZ_XR_BRIDGE_DIR)/bz_tabletop_bridge.mm,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 
@@ -263,7 +266,7 @@ $$(eval $$(call bz_xr_unity_o,$$(BZ_XR_SC2_$(1)_DIR)/engine.o,sc2-engine,$$(BZ_X
 $$(eval $$(call bz_xr_unity_o,$$(BZ_XR_SC2_$(1)_DIR)/game.o,sc2-game,$$(BZ_XR_SC2_GAME_SRCS),$$(BZ_XR_SC2_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_unity_o,$$(BZ_XR_SC2_$(1)_DIR)/sheet.o,sc2-sheet,$$(BZ_XR_SHEET_SRCS),$$(BZ_XR_BASE_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_unity_o,$$(BZ_XR_SC2_$(1)_DIR)/shared.o,sc2-shared,$$(BZ_XR_SHARED_SRCS),$$(BZ_XR_BASE_CFLAGS),$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
-$$(eval $$(call bz_xr_bridge_c_o,$$(BZ_XR_SC2_$(1)_DIR)/bz_tabletop_lifecycle.o,$$(BZ_XR_BRIDGE_DIR)/bz_tabletop_lifecycle.c,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
+$$(eval $$(call bz_xr_bridge_c_o,$$(BZ_XR_SC2_$(1)_DIR)/bz_tabletop_lifecycle.o,$$(BZ_XR_TT_BRIDGE_DIR)/bz_tabletop_lifecycle.c,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 $$(eval $$(call bz_xr_bridge_mm_o,$$(BZ_XR_SC2_$(1)_DIR)/bz_tabletop_bridge.o,$$(BZ_XR_BRIDGE_DIR)/bz_tabletop_bridge.mm,$$(BZ_XR_SDK_$(1)),$$(BZ_XR_TRIPLE_$(1))))
 
 $$(BZ_XR_SC2_$(1)_ENGINE_ARCHIVE): $$(BZ_XR_SC2_$(1)_DIR)/engine.o $$(BZ_XR_SC2_$(1)_DIR)/game.o $$(BZ_XR_SC2_$(1)_DIR)/sheet.o $$(BZ_XR_SC2_$(1)_DIR)/shared.o
@@ -327,10 +330,10 @@ $(BZ_SC2_TT_TEST_GAME_O): $(BZ_XR_SC2_GAME_SRCS)
 		$(CC) $(SC2_IMPL_CFLAGS) -x c -c -o $@ -
 
 $(BZ_SC2_TT_TEST_BIN): $(BZ_SC2_TT_TEST_ENGINE_O) $(BZ_SC2_TT_TEST_GAME_O) \
-	$(BZ_XR_BRIDGE_DIR)/bz_tabletop_lifecycle.c $(SC2_TEST_DIR)/test_sc2_tabletop_runtime.c \
+	$(BZ_XR_TT_BRIDGE_DIR)/bz_tabletop_lifecycle.c $(SC2_TEST_DIR)/test_sc2_tabletop_runtime.c \
 	$(SHARED_LIB) $(SHEET_LIB) | $(BIN_DIR)
 	@$(CC) $(SC2_IMPL_CFLAGS) -o $@ $(SC2_TEST_DIR)/test_sc2_tabletop_runtime.c \
-		$(BZ_XR_BRIDGE_DIR)/bz_tabletop_lifecycle.c $(BZ_SC2_TT_TEST_ENGINE_O) $(BZ_SC2_TT_TEST_GAME_O) \
+		$(BZ_XR_TT_BRIDGE_DIR)/bz_tabletop_lifecycle.c $(BZ_SC2_TT_TEST_ENGINE_O) $(BZ_SC2_TT_TEST_GAME_O) \
 		$(RPATH) $(LDFLAGS) -lsheet -lshared -lxml2 -lm -lz -lpthread
 
 .PHONY: test-sc2-tabletop-runtime test-sc2-tabletop-live
