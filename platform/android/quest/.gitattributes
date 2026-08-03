@@ -1,0 +1,11 @@
+# gradlew.bat is the Gradle wrapper's Windows launcher script and must keep
+# its native CRLF line endings (Windows batch files require CRLF to run
+# correctly; converting it to LF would break the Windows wrapper). Without
+# this attribute, `git diff --check` flags every CRLF line in the file as
+# "trailing whitespace" (core.whitespace's default trailing-space rule does
+# not special-case a CR immediately before the LF) even though the file's
+# CRLF endings are intentional, not accidental whitespace. `cr-at-eol` tells
+# git's whitespace checker to treat that trailing CR as part of the line
+# terminator instead of stray trailing whitespace, without altering the
+# file's actual bytes/line endings in any way.
+gradlew.bat whitespace=cr-at-eol

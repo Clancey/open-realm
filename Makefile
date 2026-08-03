@@ -243,6 +243,16 @@ $(eval $(call unity_lib_schema,$(SHARED_LIB),$(call CSRC,shared),shared,shared,,
 
 include games/warcraft-3/game.mk
 include platform/apple/visionos/build.mk
+include platform/android/quest/build.mk
+
+# Generic variable-print debug target (standard Make idiom): `make print-FOO`
+# echoes FOO's expanded value. platform/android/quest's CMakeLists.txt uses
+# this at configure time to fetch the visionOS build's authoritative
+# BZ_XR_* engine/game/asset/jass/sheet/shared source lists and portable
+# cflags (platform/apple/visionos/build.mk) instead of duplicating those
+# `find`-derived lists as a second, driftable literal source list — see
+# docs/quest-tabletop.md's "source-list synchronization" section.
+print-%: ; @echo $*=$($*)
 
 WOW_TEST_RES_DIR := $(TESTS_DIR)/wow-resources
 WOW_TEST_SRC_DIR := $(WOW_TEST_DIR)/resources-src

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Meta Quest tabletop native shell manifest — Layer 2 sideloaded debug
+    prototype. Settings verified against Meta's documented mobile-native
+    manifest guidance (developers.meta.com/horizon/documentation/native/
+    android/mobile-native-manifest/, content last_updated 2026-05-28) and, for
+    the layer-8 hand-tracking permission/feature flag, Meta's hand-tracking
+    guidance (developers.meta.com/horizon/documentation/native/android/
+    mobile-hand-tracking/) — see docs/quest-tabletop.md for the full citation
+    and what must be rechecked before any wider (store) distribution, which
+    has additional submission manifest requirements this file does not
+    attempt to satisfy.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:installLocation="auto">
+
+    <!-- android:name is intentionally unset: this layer is a plain
+         NativeActivity (android.app.lib_name below) with zero Java/Kotlin
+         application code — the smallest justified shim per this layer's
+         scope (see docs/quest-tabletop.md). -->
+
+    <!-- Required for Meta Quest store v2 signing per the manifest guidance
+         above; also documents this app's actual runtime requirement (head
+         tracking is the one OpenXR capability this loader-init/probe layer
+         touches). -->
+    <uses-feature
+        android:name="android.hardware.vr.headtracking"
+        android:version="1"
+        android:required="true" />
+
+    <!-- Layer 8: OPTIONAL Meta Quest hand tracking. Per Meta's hand-tracking
+         guidance (developers.meta.com/horizon/documentation/native/android/
+         mobile-hand-tracking/, "Add Flag to Android Manifest to Enable Hand
+         Tracking" - see docs/quest-tabletop.md for the full citation),
+         Quest's OS/runtime broker will not enumerate hand-tracking devices
+         to ANY app - VrApi or OpenXR - lacking both of these, regardless of
+         which OpenXR extensions the app itself enables. android:required
+         is explicitly "false" (unlike headtracking above): this app's
+         Touch-controller path must keep working, and must not be filtered
+         from, on a device/account without hand tracking - see
+         docs/quest-tabletop.md's "hand support must not be required for
+         startup". -->
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <uses-feature
+        android:name="oculus.software.handtracking"
+        android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:hasCode="false"
+        android:label="@string/app_name">
+
+        <!-- com.oculus.supportedDevices scopes this developer prototype to
+             the Quest 3/3S hardware this layer targets (see
+             docs/quest-tabletop.md); widen only alongside re-validating on
+             the added hardware. -->
+        <meta-data
+            android:name="com.oculus.supportedDevices"
+            android:value="quest3|quest3s" />
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false">
+
+            <!-- Tells android.app.NativeActivity which .so to
+                 dlopen()/ANativeActivity_onCreate() — bz_quest_native maps
+                 to libbz_quest_native.so (CMakeLists.txt's bz_quest_native
+                 SHARED target). -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="bz_quest_native" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

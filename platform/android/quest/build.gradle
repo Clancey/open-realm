@@ -1,0 +1,6 @@
+// Meta Quest (Android/NDK + Khronos OpenXR) tabletop native shell — Layer 2.
+// See docs/quest-tabletop.md for prerequisites, architecture boundary, and
+// exact build commands.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

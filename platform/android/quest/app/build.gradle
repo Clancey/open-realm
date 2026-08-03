@@ -1,0 +1,73 @@
+// Meta Quest tabletop native shell app module — Layer 2.
+//
+// Package/app identifiers are project-private placeholders for a sideloaded
+// debug prototype (see docs/quest-tabletop.md); replace applicationId and
+// namespace with a real, project-owned identifier before any wider
+// distribution.
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'org.openrealm.quest'
+    compileSdk 34
+    ndkVersion '27.2.12479018'
+
+    defaultConfig {
+        applicationId 'org.openrealm.quest'
+        // Meta's documented mobile-native manifest guidance (verified
+        // 2026-05-28, developers.meta.com/horizon/documentation/native/
+        // android/mobile-native-manifest/) recommends minSdkVersion 29 /
+        // targetSdkVersion 32 for Quest 1/2/Pro/3 — see docs/quest-tabletop.md.
+        minSdk 29
+        targetSdk 32
+        versionCode 1
+        versionName '0.1.0-dev'
+
+        // First Quest 3/3S developer build targets arm64-v8a only (see
+        // docs/quest-tabletop.md) — never widen this without updating the
+        // matching check in CMakeLists.txt and verify-native-lib.sh.
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_shared'
+            }
+        }
+    }
+
+    buildFeatures {
+        prefab true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Khronos OpenXR Android loader — Maven Central org.khronos.openxr,
+    // NOT Meta's proprietary Mobile SDK/VrApi (forbidden, see
+    // docs/quest-tabletop.md). Verified present as org.khronos.openxr:
+    // openxr_loader_for_android:1.1.49 (aar) on Maven Central; ships Prefab
+    // modules "openxr_loader" (libopenxr_loader.so, arm64-v8a/armeabi-v7a/
+    // x86/x86_64) and "headers" (openxr/*.h), consumed from CMakeLists.txt
+    // via find_package(OpenXR CONFIG) / OpenXR::openxr_loader.
+    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.49'
+}

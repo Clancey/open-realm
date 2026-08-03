@@ -32,6 +32,10 @@ glue (`bz_tabletop_bridge.h/.mm`, `bz_tabletop_swift.h`, the module map, and the
 ObjC++ link smoke test) stays under
 `platform/apple/visionos/tabletop/bridge/`.
 
+A Meta Quest (Android/NDK + OpenXR) native build shell that links this same
+shared code is documented in
+[quest-tabletop.md](quest-tabletop.md).
+
 ## Local data contract
 
 Retail archives are local-only and must never be committed. Set:

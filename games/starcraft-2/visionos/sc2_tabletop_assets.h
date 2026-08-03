@@ -3,7 +3,7 @@
  *
  * Layer 2A: a distinct, independently versioned ABI. It is plain C99/POD, exposes no engine,
  * renderer, SDL, OpenGL, Objective-C, Swift, or RealityKit types, and must never be confused
- * with platform/bridge/bz_tabletop_assets.h (BZ_TABLETOP_ASSETS_ABI_VERSION 2, Warcraft-shaped).
+ * with platform/bridge/bz_tabletop_assets.h (BZ_TABLETOP_ASSETS_ABI_VERSION, Warcraft-shaped).
  * That header is untouched by this one; this ABI owns terrain plus generic encoded-image handles
  * consumed by the separate SC2 model ABI.
  */
