@@ -68,6 +68,15 @@
  * this without evidence it is wrong, and no such evidence exists (it is the
  * one shipped, exercised desktop behavior for this exact code path).
  *
+ * IMPORTANT: unlike desktop's own `float time = start` above (a real, unfixed latent defect in
+ * the reference implementation - out of scope to touch there), bz_quest_wc3_particles_emit()'s
+ * own implementation does NOT cast the absolute `start`/`currentClockMsec` into a float at all -
+ * doing so loses precision past float32's 2^24 exact-integer range (~4.66h of continuous Quest
+ * uptime) and was a real, empirically-reproduced High-severity defect fixed on this port (see
+ * the fix-site comment inside bz_quest_wc3_particles_emit() for the full citation/derivation).
+ * The implementation re-expresses this identical algorithm in terms of small, bounded offsets
+ * relative to `lastFrameTime` instead, which stays algebraically equivalent for any uptime.
+ *
  * -- Kinematics/color/atlas evidence (do not change without re-deriving) --
  *
  * Per-particle state at spawn (r_mdx_geoset.c's MDLX_RenderEmitter,
@@ -329,6 +338,11 @@ typedef struct {
  * exhausted or the per-emitter cap reached) - false otherwise. Never
  * allocates, locks, touches a file, or logs - purely arithmetic plus this
  * pool's own PRNG state, safe to call from a frame-critical path.
+ * `previousClockMsec`/`currentClockMsec` are correct for ANY absolute clock
+ * magnitude, including a session that has run continuously for many days
+ * (never cast to float as an absolute value - see this file's header
+ * comment's "IMPORTANT" note) and across `previousClockMsec`/
+ * `currentClockMsec`'s own uint32_t wraparound.
  */
 uint32_t bz_quest_wc3_particles_emit(bzQuestWc3ParticlePool_t *pool,
                                      const bzQuestWc3ParticleEmitterFrame_t *emitter,

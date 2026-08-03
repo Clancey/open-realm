@@ -145,20 +145,53 @@ uint32_t bz_quest_wc3_particles_emit(bzQuestWc3ParticlePool_t *pool,
     float rate = emitter->emissionRate < 1.0f ? 1.0f : emitter->emissionRate;
     float stepMsec = 1000.0f / rate;
     /* Phase-locked to whole real-world seconds - transcribed exactly from
-     * MDLX_RenderEmitter (r_mdx_geoset.c:91-129), see this file's header comment. */
+     * MDLX_RenderEmitter (r_mdx_geoset.c:91-129), see this file's header comment.
+     *
+     * FIX (High-severity reviewer finding on PR #28, reproduced against this exact production
+     * function before this fix - see the PR's commit history/discussion): the prior revision cast
+     * the ABSOLUTE CLOCK_MONOTONIC millisecond clock (`start`/`currentClockMsec`, both uint32_t,
+     * unbounded in magnitude over a long-running session) straight into the loop's `float time`.
+     * float32 exactly represents integers only up to 2^24 (~4.66h of continuous uptime); past
+     * that its ULP grows (16ms at ~1.55 days/2^27ms, 32ms at ~4 days/2^28.4ms, ...) and can exceed
+     * a typical stepMsec (e.g. ~14ms at a 70/sec emission rate), so `time += stepMsec` silently
+     * rounds to a no-op (confirmed empirically: at a 4-day epoch, `(float)345600000 + 14.285714f
+     * == (float)345600000` bit-for-bit) - freezing `time` for the rest of that frame's loop, which
+     * then either bursts every remaining iteration (if the freeze lands past `lastFrameTime`) or
+     * spawns nothing at all (if it freezes short of it), rather than emitting at the intended
+     * steady rate. Desktop's own MDLX_RenderEmitter has this identical latent defect (it also
+     * casts an absolute DWORD engine time into `float time`) - out of scope to fix there, but this
+     * Quest port must not propagate it into a renderer that (unlike a desktop process routinely
+     * restarted) can run continuously for days.
+     *
+     * The fix re-expresses the IDENTICAL algorithm purely in terms of SMALL, bounded offsets
+     * relative to `lastFrameTime` - never the raw absolute clock as a float. `phaseMsec =
+     * lastFrameTime % 1000` is already in [0,999]; `frameMsec = currentClockMsec - lastFrameTime`
+     * is the ordinary small (tens of ms) per-frame delta, computed via wrap-safe uint32_t
+     * subtraction - the SAME "compute the delta in integer space first, only then cast to float"
+     * pattern build_frame_dynamic_material() already uses for particle aging (bz_quest_vk_wc3.c's
+     * `deltaSec` comment), so a session spanning bz_quest_wc3_render_clock_msec()'s own documented
+     * ~49.7-day uint32_t wraparound is handled identically, with no separate wrap branch needed.
+     * Substituting `timeRel = time - lastFrameTime` into the original algorithm is an exact
+     * algebraic re-centering, not an approximation: `time < currentClockMsec` becomes `timeRel <
+     * frameMsec`, and `time >= lastFrameTime` becomes `timeRel >= 0`. Every float value this loop
+     * ever produces now stays within roughly [-1000, frameMsec] - always exactly representable
+     * in float32 regardless of how long the app has been running, so no precision cliff exists
+     * here at all. */
     uint32_t lastFrameTime = previousClockMsec;
-    uint32_t start = lastFrameTime - (lastFrameTime % 1000u);
+    uint32_t phaseMsec = lastFrameTime % 1000u;
+    uint32_t frameMsec = currentClockMsec - lastFrameTime; /* wrap-safe uint32_t subtraction */
+    float frameMsecF = (float)frameMsec;
     bool spawning = false;
     uint32_t iterations = 0;
-    for (float time = (float)start; time < (float)currentClockMsec;
-         time += stepMsec, iterations++) {
+    for (float timeRel = -(float)phaseMsec; timeRel < frameMsecF;
+         timeRel += stepMsec, iterations++) {
         if (iterations >= BZ_QUEST_WC3_MAX_PARTICLE_SPAWNS_PER_EMITTER_PER_FRAME * 4u) {
             /* Defense-in-depth only - see BZ_QUEST_WC3_MAX_PARTICLE_SPAWNS_PER_EMITTER_PER_FRAME's
              * doc comment; a real EmissionRate/frame-delta combination never reaches this. */
             overflowed = true;
             break;
         }
-        if (time >= (float)lastFrameTime) spawning = true;
+        if (timeRel >= 0.0f) spawning = true;
         if (!spawning) continue;
         if (spawned >= BZ_QUEST_WC3_MAX_PARTICLE_SPAWNS_PER_EMITTER_PER_FRAME) {
             overflowed = true;

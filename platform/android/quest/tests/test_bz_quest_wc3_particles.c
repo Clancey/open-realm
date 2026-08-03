@@ -182,6 +182,211 @@ static void test_emit_respects_per_emitter_per_frame_spawn_cap(void) {
     ASSERT(overflowed);
 }
 
+/* -- Large absolute clock precision (PR #28 reviewer High finding) --
+ *
+ * bz_quest_wc3_particles_emit() used to cast the absolute CLOCK_MONOTONIC uint32_t millisecond
+ * clock straight into the spawn loop's `float time`. float32 exactly represents integers only up
+ * to 2^24 (~4.66h); past that its ULP can exceed a typical stepMsec, silently freezing or
+ * corrupting the loop the longer the app has been running - see this file's own fix-site comment
+ * (bz_quest_wc3_particles.c, inside bz_quest_wc3_particles_emit()) for the full citation and the
+ * exact reproduction (previously) captured against this exact production function.
+ *
+ * Every expected count below is HAND-DERIVED using the same "lastFrameTime%1000 / time>=
+ * lastFrameTime / time<currentClockMsec" reasoning already used by this file's small-epoch tests
+ * above (e.g. test_emit_spawns_exactly_two_across_a_two_step_window) - never a second
+ * reimplementation of the production arithmetic - and cross-checked empirically against BOTH the
+ * pre-fix (PR #28 commit 05a16a0) and post-fix bz_quest_wc3_particles_emit() before being
+ * committed here, so every test that is meant to catch the regression is proven to actually do
+ * so (05a16a0 gives a different, wrong result; the fixed function gives the hand-derived one). */
+
+/* Hand-derived exactly like test_emit_spawns_exactly_one_across_a_single_step_window, just
+ * shifted by a whole-second-aligned BASE past the reviewer's own cited ~134,219,000ms failure
+ * magnitude (2^27 =~ 134,217,728ms, ULP 16ms there) - phase/window are identical, so the expected
+ * count is identical too: exactly 1. */
+static void test_emit_large_epoch_single_step_matches_small_epoch(void) {
+    bzQuestWc3ParticlePool_t pool;
+    bzQuestWc3ParticleEmitterFrame_t e = make_emitter(); /* rate=10, step=100ms */
+    bool overflowed = true;
+    const uint32_t BASE = 134219000u; /* whole-second aligned, past 2^27ms */
+    bz_quest_wc3_particles_pool_reset(&pool, 1);
+    uint32_t n = bz_quest_wc3_particles_emit(&pool, &e, BASE + 950u, BASE + 1050u, &overflowed);
+    ASSERT_EQ_INT(n, 1);
+    ASSERT(!overflowed);
+}
+
+/* Hand-derived exactly like test_emit_spawns_exactly_two_across_a_two_step_window, same BASE. */
+static void test_emit_large_epoch_two_step_matches_small_epoch(void) {
+    bzQuestWc3ParticlePool_t pool;
+    bzQuestWc3ParticleEmitterFrame_t e = make_emitter(); /* rate=10, step=100ms */
+    bool overflowed = true;
+    const uint32_t BASE = 134219000u;
+    bz_quest_wc3_particles_pool_reset(&pool, 1);
+    uint32_t n = bz_quest_wc3_particles_emit(&pool, &e, BASE + 1950u, BASE + 2150u, &overflowed);
+    ASSERT_EQ_INT(n, 2);
+    ASSERT(!overflowed);
+}
+
+/* This is the sharpest regression proof: BASE=691,200,000ms (~8 days) sits in float32's
+ * [2^29,2^30) bracket, ULP=32ms. rate=100 -> step=10ms, i.e. well under half a ULP (16), so the
+ * PRE-FIX loop's `time += stepMsec` was GUARANTEED to round to a complete no-op at this exact
+ * magnitude (confirmed empirically: `(float)691200000 + 10.0f == (float)691200000` bit-for-bit) -
+ * freezing `time` below lastFrameTime for the whole call, so `spawning` never latches and NOTHING
+ * spawns before the 256-iteration defense-in-depth cap forces an (incorrect) overflow. Hand
+ * derivation for the FIXED relative algorithm: lastFrameTime%1000=950, so timeRel starts at -950
+ * and crosses 0 after exactly 95 steps of 10ms (950/10); from timeRel=0 up to <100 (the 100ms
+ * window) at 10ms steps hits exactly 10 values (0,10,...,90) - so exactly 10 spawns, not
+ * overflowed. Empirically verified against 05a16a0 (gives n=0, overflowed=true) and the fixed
+ * function (gives n=10, overflowed=false) before being committed. */
+static void test_emit_guaranteed_precision_loss_epoch_is_fixed(void) {
+    bzQuestWc3ParticlePool_t pool;
+    bzQuestWc3ParticleEmitterFrame_t e = make_emitter();
+    e.emissionRate = 100.0f; /* step=10ms */
+    bool overflowed = true;
+    const uint32_t BASE = 691200000u; /* ~8 days, ULP=32ms there, step(10ms) < ULP/2 */
+    bz_quest_wc3_particles_pool_reset(&pool, 1);
+    uint32_t n = bz_quest_wc3_particles_emit(&pool, &e, BASE + 950u, BASE + 1050u, &overflowed);
+    ASSERT_EQ_INT(n, 10);
+    ASSERT(!overflowed);
+}
+
+/* Multiple emission rates at an even larger ~11.57-day epoch (1,000,000,000ms, float32 bracket
+ * [2^29,2^30), ULP=64ms) - each rate/window pair hand-derived the same way as the small-epoch
+ * tests above, and empirically cross-checked: 05a16a0 gives 1 (not 3), 0/overflowed (not 5), and
+ * 0/overflowed (not 20) respectively for these three; the fixed function gives the hand-derived
+ * counts below for all three, exactly matching the equivalent small-epoch (BASE=0) result. */
+static void test_emit_multiple_rates_at_huge_epoch(void) {
+    const uint32_t BASE = 1000000000u;
+    struct { float rate; uint32_t expected; } cases[] = {
+        {25.0f, 3u},  /* step=40ms: timeRel -950,-910,...,-30,10,...,90 -> {10,50,90} = 3 */
+        {45.0f, 5u},  /* step=22.222ms: 5 boundaries land in [0,100) */
+        {200.0f, 20u}, /* step=5ms: 20 boundaries (0,5,...,95) land in [0,100) */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bzQuestWc3ParticlePool_t pool;
+        bzQuestWc3ParticleEmitterFrame_t e = make_emitter();
+        e.emissionRate = cases[i].rate;
+        bool overflowed = true;
+        bz_quest_wc3_particles_pool_reset(&pool, 1);
+        uint32_t n = bz_quest_wc3_particles_emit(&pool, &e, BASE + 950u, BASE + 1050u, &overflowed);
+        ASSERT_EQ_INT(n, cases[i].expected);
+        ASSERT(!overflowed);
+    }
+}
+
+/* Near-UINT32_MAX with a genuine wraparound crossing: previous=UINT32_MAX-5 (4294967290),
+ * current=10 (wrapped past UINT32_MAX). True elapsed time is 16ms (5ms to reach UINT32_MAX, 1ms to
+ * wrap to 0, 10ms more) - `current - previous` as uint32_t subtraction already computes this
+ * correctly via modular arithmetic (16), matching build_frame_dynamic_material()'s own
+ * `deltaSec`/wraparound citation. lastFrameTime%1000 = 4294967290%1000 = 290, so timeRel starts at
+ * -290 and (step=100ms, rate=10 default) reaches 10 after 30 steps (-290+30*100=10), which is
+ * >=0 and <16 (the wrap-safe delta): exactly 1 spawn. This is not just a precision case - 05a16a0
+ * had NO wraparound handling at all here (`time < (float)currentClockMsec` compared a ~4.29
+ * billion absolute `time` against the small wrapped `10.0f` and was never true), giving n=0,
+ * overflowed=false; the fixed function gives the hand-derived n=1. */
+static void test_emit_wraps_correctly_across_uint32_max(void) {
+    bzQuestWc3ParticlePool_t pool;
+    bzQuestWc3ParticleEmitterFrame_t e = make_emitter(); /* rate=10, step=100ms */
+    bool overflowed = true;
+    uint32_t previous = UINT32_MAX - 5u;
+    uint32_t current = 10u;
+    bz_quest_wc3_particles_pool_reset(&pool, 1);
+    uint32_t n = bz_quest_wc3_particles_emit(&pool, &e, previous, current, &overflowed);
+    ASSERT_EQ_INT(n, 1);
+    ASSERT(!overflowed);
+}
+
+/* Decomposition invariance: splitting one contiguous time span into many small consecutive
+ * per-frame calls (handing each call's `current` off as the next call's `previous`, exactly like
+ * the real per-frame caller does) must spawn the SAME total as one call covering the identical
+ * span, since both are just counting the same fixed grid of phase-locked spawn instants - purely
+ * a property of the algorithm, independent of how the caller happens to chunk frames. Uses a
+ * non-whole-second BASE (345,600,123ms, ~4 days) and a window (1500ms at rate=20/step=50ms,
+ * ~30 spawns) comfortably under the per-frame cap for EITHER decomposition, so the cap itself
+ * never confounds the comparison. Calls the real bz_quest_wc3_particles_emit() on both sides -
+ * never a reimplemented oracle. Empirically cross-checked: 05a16a0 gives one-big-call=24 vs
+ * many-small-calls=23 (inconsistent with EACH OTHER and with the correct/fresh-boot count of 30);
+ * the fixed function gives 30==30, matching the fresh-boot baseline exactly. */
+static void test_emit_decomposition_invariant_holds_at_large_epoch(void) {
+    const uint32_t BASE = 345600123u;
+    const float RATE = 20.0f;
+    const uint32_t WINDOW_MSEC = 1500u;
+    const int SUBFRAME_COUNT = 108; /* ~1500ms / (1000/72)ms, 72Hz-realistic sub-deltas */
+
+    bzQuestWc3ParticlePool_t poolBig;
+    bzQuestWc3ParticleEmitterFrame_t e = make_emitter();
+    e.emissionRate = RATE;
+    bool overflowed = true;
+    bz_quest_wc3_particles_pool_reset(&poolBig, 1);
+    uint32_t nBig = bz_quest_wc3_particles_emit(&poolBig, &e, BASE, BASE + WINDOW_MSEC, &overflowed);
+    ASSERT(!overflowed);
+
+    bzQuestWc3ParticlePool_t poolSmall;
+    bz_quest_wc3_particles_pool_reset(&poolSmall, 1);
+    uint32_t nSmall = 0;
+    uint32_t prev = BASE;
+    for (int i = 0; i < SUBFRAME_COUNT; i++) {
+        uint32_t cur = BASE + (uint32_t)((double)(i + 1) * (1000.0 / 72.0));
+        nSmall += bz_quest_wc3_particles_emit(&poolSmall, &e, prev, cur, &overflowed);
+        prev = cur;
+    }
+    ASSERT_EQ_INT(nBig, nSmall);
+    ASSERT_EQ_INT(nBig, 30); /* matches the equivalent BASE=0 (fresh boot) count exactly */
+}
+
+/* Overflow/capacity bounding must remain correct regardless of absolute clock magnitude - reruns
+ * test_emit_stops_at_pool_capacity_and_reports_overflow's exact scenario shifted to a ~8-day
+ * epoch. */
+static void test_emit_overflow_still_bounded_at_large_epoch(void) {
+    bzQuestWc3ParticlePool_t pool;
+    bzQuestWc3ParticleEmitterFrame_t e = make_emitter();
+    e.emissionRate = 100000.0f;
+    bool overflowed = false;
+    const uint32_t BASE = 691200000u;
+    bz_quest_wc3_particles_pool_reset(&pool, 1);
+    uint32_t total = 0;
+    for (int frame = 0; frame < 200 && total < BZ_QUEST_WC3_MAX_PARTICLES; frame++) {
+        uint32_t prevClock = BASE + (uint32_t)frame * 1000u, curClock = prevClock + 1000u;
+        total += bz_quest_wc3_particles_emit(&pool, &e, prevClock, curClock, &overflowed);
+    }
+    ASSERT_EQ_INT(pool.activeCount, BZ_QUEST_WC3_MAX_PARTICLES);
+    ASSERT(overflowed);
+    uint32_t n = bz_quest_wc3_particles_emit(&pool, &e, BASE + 200000u, BASE + 201000u, &overflowed);
+    ASSERT_EQ_INT(n, 0);
+    ASSERT(overflowed);
+}
+
+/* Particle ages/fields must not be corrupted by a huge absolute spawn-time epoch: reruns
+ * test_velocity_and_gravity_use_world_plus_y_convention's exact kinematics checkpoint verbatim,
+ * plus an age-then-expire sequence in the same shape as test_age_advances_and_expires_particles
+ * (using this test's own emitter/BASE rather than duplicating its overridden lifeSpan/deltas), at
+ * a huge epoch, proving spawned particles' ageSec/lifespanSec/velocity/acceleration fields are
+ * exactly as correct as at a fresh-boot epoch. */
+static void test_emit_particle_fields_and_ages_correct_at_large_epoch(void) {
+    const uint32_t BASE = 134219000u;
+    bzQuestWc3ParticlePool_t pool;
+    bzQuestWc3ParticleEmitterFrame_t e = make_emitter();
+    bool overflowed;
+    bz_quest_wc3_particles_pool_reset(&pool, 1);
+    bz_quest_wc3_particles_emit(&pool, &e, BASE + 950u, BASE + 1050u, &overflowed);
+    ASSERT_EQ_INT(pool.activeCount, 1);
+    const bzQuestWc3Particle_t *p = &pool.particles[pool.activeHead];
+    ASSERT_EQ_FLOAT(p->ageSec, 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(p->lifespanSec, e.lifeSpan, 0.0001f);
+    ASSERT_EQ_FLOAT(p->velX, 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(p->velY, e.speed, 0.0001f);
+    ASSERT_EQ_FLOAT(p->velZ, 0.0f, 0.0001f);
+    ASSERT_EQ_FLOAT(p->accelY, -e.gravity, 0.0001f);
+
+    /* lifeSpan=2.0f (make_emitter()'s own default, unmodified): age by 1.0f (< lifespan, still
+     * alive), then another 1.5f (2.5f total > 2.0 lifespan, expires) - same age-then-expire shape
+     * as test_age_advances_and_expires_particles above (which uses its own overridden lifeSpan=1.0
+     * and 0.5f/0.6f deltas), just reusing this test's own already-established BASE/emitter. */
+    bz_quest_wc3_particles_age(&pool, 1.0f);
+    ASSERT_EQ_INT(pool.activeCount, 1);
+    bz_quest_wc3_particles_age(&pool, 1.5f);
+    ASSERT_EQ_INT(pool.activeCount, 0);
+}
+
 /* -- Kinematics / coordinate conversion (deterministic: length=width=latitude=0) -- */
 
 static void test_spawn_position_uses_identity_matrix_verbatim(void) {
@@ -465,6 +670,14 @@ void run_bz_quest_wc3_particles_tests(void) {
     RUN_TEST(test_emit_emission_rate_floored_to_one_per_second);
     RUN_TEST(test_emit_stops_at_pool_capacity_and_reports_overflow);
     RUN_TEST(test_emit_respects_per_emitter_per_frame_spawn_cap);
+    RUN_TEST(test_emit_large_epoch_single_step_matches_small_epoch);
+    RUN_TEST(test_emit_large_epoch_two_step_matches_small_epoch);
+    RUN_TEST(test_emit_guaranteed_precision_loss_epoch_is_fixed);
+    RUN_TEST(test_emit_multiple_rates_at_huge_epoch);
+    RUN_TEST(test_emit_wraps_correctly_across_uint32_max);
+    RUN_TEST(test_emit_decomposition_invariant_holds_at_large_epoch);
+    RUN_TEST(test_emit_overflow_still_bounded_at_large_epoch);
+    RUN_TEST(test_emit_particle_fields_and_ages_correct_at_large_epoch);
     RUN_TEST(test_spawn_position_uses_identity_matrix_verbatim);
     RUN_TEST(test_velocity_and_gravity_use_world_plus_y_convention);
     RUN_TEST(test_spawn_position_applies_world_matrix_translation);

@@ -3962,7 +3962,20 @@ check it with a plain host C compiler:
   by the pool's own remaining capacity - stops immediately once exhausted
   (`R_SpawnParticle()`'s own `NULL`-return contract), never blocks/waits/
   grows, and reports overflow via `*outOverflowed` (logged once per model
-  identity by `bz_quest_vk_wc3.c`, never a hard failure).
+  identity by `bz_quest_vk_wc3.c`, never a hard failure). **Precision fix
+  (PR #28 reviewer High finding)**: the loop's `time` is computed as a SMALL
+  offset relative to `lastFrameTime`, never the raw absolute
+  `previousClockMsec`/`currentClockMsec` cast to `float` - the prior
+  revision did the latter, which silently froze or corrupted emission once
+  continuous Quest uptime exceeded float32's 2^24 exact-integer range
+  (~4.66h; reproduced and fixed - see
+  `bz_quest_wc3_particles.c`'s `bz_quest_wc3_particles_emit()` fix-site
+  comment and `platform/android/quest/tests/test_bz_quest_wc3_particles.c`'s
+  large-absolute-epoch/wraparound test suite for the full evidence and
+  citations). Desktop's own `MDLX_RenderEmitter` has this identical latent
+  defect (also casts an absolute engine time into `float time`) - out of
+  scope to fix there, but this Quest port must not propagate it into a
+  renderer that can run continuously for days.
 - **Aging** (`bz_quest_wc3_particles_age()`): one shared delta-time advance
   per frame for the whole pool (never per-emitter), expires particles whose
   age exceeds `lifespanSec`.
@@ -3996,7 +4009,7 @@ timing scenarios, overflow/capacity bounding, the coordinate convention
 aging/expiration, and pack/grouping/atlas/color-blend. Two regressions were
 injected during development (removing the `MAX(1,rate)` floor; swapping the
 gravity axis Y<->Z) to prove the relevant tests actually fail, then reverted.
-**5336/5336 Quest host assertions pass** (baseline 5243 + 93 new).
+**5366/5366 Quest host assertions pass** (baseline 5243 + 93 new for the initial PRE2 slice + 30 new for the large-absolute-clock precision fix, PR #28).
 
 ### GPU representation, blend/depth/atlas contracts, and draw order
 
@@ -4068,9 +4081,9 @@ mirroring `bz_quest_vk_wc3.c`'s own established
   `tools/mdxgen.c` + `games/warcraft-3/tests/test_bz_tabletop_assets.c`:
   ABI v4 particle emitter decode/accessor tests. **1189/1189 assertions
   pass** (`make test-bz-tabletop-assets`).
-- `platform/android/quest/tests/test_bz_quest_wc3_particles.c` (25 test
+- `platform/android/quest/tests/test_bz_quest_wc3_particles.c` (33 test
   functions, wired into `test_bz_quest_pure_main.c` and `build.mk`):
-  pool/spawn/age/pack coverage. **5336/5336 assertions pass**
+  pool/spawn/age/pack coverage (including the large-absolute-clock precision fix's regression suite). **5366/5366 assertions pass**
   (`make -f platform/android/quest/build.mk test-quest-host-tests`).
 - `platform/android/quest/scripts/test-wc3-particles-layout.sh` (wired into
   `make test`/`make quest` as `test-quest-wc3-particles-layout`) guards:
@@ -4982,10 +4995,10 @@ gone completely undetected.
   `MDLX_RenderEmitter`/`R_DrawParticles`. Corrected an initial design
   mistake (matrix-transforming velocity/gravity) after re-verifying
   `r_mdx_geoset.c:112-115` shows only the origin is matrix-transformed.
-  `platform/android/quest/tests/test_bz_quest_wc3_particles.c` (25 test
+  `platform/android/quest/tests/test_bz_quest_wc3_particles.c` (33 test
   functions) covers pool/spawn/age/pack, and two injected regressions
   (removing the `MAX(1,rate)` floor; swapping the gravity axis Y<->Z) were
-  proven to fail the relevant tests, then reverted. **5336/5336 Quest host
+  proven to fail the relevant tests, then reverted. **5366/5366 Quest host
   assertions pass** (`make -f platform/android/quest/build.mk
   test-quest-host-tests`, baseline 5243 + 93 new).
 - Built the impure Vulkan draw module (`bz_quest_vk_wc3_particles.h`/`.c`)
@@ -5055,6 +5068,83 @@ gone completely undetected.
   Meta Quest device and no retail Warcraft III data were available in this
   environment - see "Layer 9"'s own "Acceptance gates" section above for
   the exact on-device/retail-data procedure this still needs.
+
+### What *was* verified this session (layer 9 follow-up: large-absolute-clock precision fix)
+
+A reviewer flagged a **High**-severity finding on the layer 9 PR (#28):
+`bz_quest_wc3_particles_emit()`'s spawn-timing loop cast the absolute
+CLOCK_MONOTONIC uint32_t millisecond clock straight into a `float time`
+loop variable. float32 exactly represents integers only up to 2^24
+(~4.66h of continuous uptime); past that its ULP can exceed a typical
+emission `stepMsec`, silently freezing or corrupting emission - worse the
+longer the Quest app has run continuously.
+
+- **Reproduced against the exact, unmodified production function** before
+  touching any code: added temporary `fprintf` diagnostics inside
+  `bz_quest_wc3_particles_emit()` and a disposable host harness (both
+  deleted before committing) simulating a continuous 72Hz session at
+  several absolute epochs. Fresh boot gave 702 spawns over 10 simulated
+  seconds at a 70/sec emission rate (matches the ~700 expected); ~2/~4/~8
+  days of prior continuous uptime gave 625/640/512 - a growing, clearly
+  non-random divergence. The diagnostic output additionally caught `time`
+  becoming bit-for-bit frozen (`(float)345600000 + 14.285714f ==
+  (float)345600000`) at a 4-day epoch, confirming the exact mechanism.
+  All diagnostics were removed immediately after capturing this evidence.
+- **Fixed** by re-expressing the identical phase-locked-to-whole-real-
+  seconds algorithm purely in terms of small, bounded offsets relative to
+  `lastFrameTime` (`phaseMsec = lastFrameTime % 1000`; `frameMsec =
+  currentClockMsec - lastFrameTime`, a wrap-safe uint32_t subtraction
+  matching `build_frame_dynamic_material()`'s own aging-delta pattern) -
+  never casting the raw absolute clock to `float` at all. This is an exact
+  algebraic re-centering of the original algorithm (`time < currentClockMsec`
+  becomes `timeRel < frameMsec`; `time >= lastFrameTime` becomes `timeRel
+  >= 0`), correct for any uptime and across the clock's own ~49.7-day
+  uint32_t wraparound. Desktop's own `MDLX_RenderEmitter` has this
+  identical latent defect (also casts an absolute engine time to `float`) -
+  out of scope to fix there; this Quest port must not propagate it.
+- **Added 8 new committed tests** (`test_bz_quest_wc3_particles.c`, 33 test
+  functions total) covering: large-epoch single/two-step consistency,
+  a guaranteed-precision-loss epoch (rate=100 at a ~8-day epoch), three
+  additional emission rates at an ~11.6-day epoch, a genuine UINT32_MAX
+  wraparound crossing, a decomposition-invariance check (one big call vs
+  many consecutive 72Hz-style calls must spawn the same total), bounded
+  overflow behavior at a large epoch, and particle field/age correctness
+  at a large epoch. Every expected count was hand-derived using the same
+  reasoning as this file's existing small-epoch tests - never a
+  reimplemented oracle with the same arithmetic - and cross-checked
+  empirically against BOTH the pre-fix (commit `05a16a0`) and post-fix
+  production function before being committed:
+  `test_emit_guaranteed_precision_loss_epoch_is_fixed`,
+  `test_emit_multiple_rates_at_huge_epoch`,
+  `test_emit_wraps_correctly_across_uint32_max`, and
+  `test_emit_decomposition_invariant_holds_at_large_epoch` were confirmed
+  to genuinely **FAIL** against `05a16a0` (e.g. `n == 10 (0 != 10)`,
+  `nBig == nSmall (24 != 23)`) and **PASS** against the fix; the remaining
+  4 new tests pass on both (valid consistency/correctness checks, not
+  regression differentiators, since their specific rate/epoch combination
+  does not happen to cross the precision cliff).
+- Updated `bz_quest_wc3_particles.h`'s header comment and this doc's own
+  "Deterministic emission, aging, and pool semantics" section to describe
+  the fix and explicitly distinguish it from desktop's own still-latent,
+  out-of-scope defect.
+- `make -f platform/android/quest/build.mk test-quest-host-tests` -
+  **5366/5366** (up from 5336; +30 new assertions across the 8 new tests).
+  `make test-quest-wc3-particles-layout` - **OK** (unaffected; this fix
+  never touches any Vulkan/renderer/CMake file). `make test-bz-tabletop-
+  assets` - **1189/1189** (unaffected; this fix never touches the bridge
+  ABI). `make test-quest-bridge` - **95/95** (unaffected). The full
+  repo-root `make test` passes end-to-end (`EXIT_CODE=0`, confirmed via a
+  full log file grep, not a truncated scrollback), including every other
+  Quest structural guard, the ROC/TFT UI/campaign paths, and every
+  pre-existing test suite unchanged. `git diff --check` against
+  `clancey-add-quest-hand-tracking` reports zero whitespace errors.
+  Production semantics outside this exact emission-clock computation are
+  byte-for-byte unchanged (confirmed via the diff itself - only the
+  documented loop-timing section of `bz_quest_wc3_particles_emit()`
+  changed, nothing else in the function or file).
+- **Not verified this session**: unchanged from layer 9's own hardware/
+  retail-data-only gates above - this is a pure host-logic fix with no new
+  hardware-only surface of its own.
 
 ## Related documents
 
