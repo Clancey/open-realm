@@ -116,6 +116,39 @@ bool bz_quest_wc3_cache_acquire(bzQuestWc3Cache_t *cache, const bzQuestWc3CacheK
  */
 void bz_quest_wc3_cache_shutdown(bzQuestWc3Cache_t *cache);
 
+/*
+ * bzQuestWc3EpochTracker_t: shared "did the map actually reload" detector for
+ * every per-map GPU resource that must reset exactly once on a real map
+ * change and never on a mere snapshot-generation bump within the same map -
+ * the particle pool (bz_quest_wc3_particles_pool_reset()'s "no stale effects
+ * across resets" contract) and the model/texture GPU caches above
+ * (bz_quest_vk_wc3.c's reset_model_texture_caches()) both compare the same
+ * authoritative bzQuestWc3CaptureFrame_t::mapEpoch this way; this type
+ * exists so that comparison - previously duplicated inline in more than one
+ * place - has exactly one implementation to get right.
+ */
+typedef struct {
+    uint64_t epoch;
+    bool have;
+} bzQuestWc3EpochTracker_t;
+
+/*
+ * Returns true exactly when `epoch` differs from the epoch recorded by a
+ * previous call (a real transition - reset your resource now) and false
+ * otherwise, including the very first call on a zero-initialized tracker
+ * (bootstrap: there is nothing to reset yet, the caller's own resource was
+ * already freshly created for this baseline epoch). Always records `epoch`
+ * as the new baseline before returning, whether or not the caller's own
+ * reset action actually succeeds - matching
+ * bz_quest_wc3_terrain_capture.c's existing s_lastTerrainKey precedent
+ * (the "a new generation was detected" bookkeeping advances unconditionally;
+ * a rare downstream Vulkan failure, e.g. vkDeviceWaitIdle, is logged and
+ * left as-is rather than retried forever, since it is not expected to be
+ * transient - see bz_quest_vk_wc3.c's reset_model_texture_caches() call
+ * site).
+ */
+bool bz_quest_wc3_epoch_changed(bzQuestWc3EpochTracker_t *tracker, uint64_t epoch);
+
 #ifdef __cplusplus
 }
 #endif

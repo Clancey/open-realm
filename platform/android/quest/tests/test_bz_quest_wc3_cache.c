@@ -4,6 +4,15 @@
  * (no Vulkan/ABI dependency - see bz_quest_wc3_cache.h's header comment).
  * Each case covers a normal path and its inverse (hit vs miss, eviction vs
  * no-eviction, shutdown-with-entries vs shutdown-of-empty-cache).
+ *
+ * Also covers bz_quest_wc3_epoch_changed() (PR #28's map-reload-detector
+ * fix) and the exact shutdown()+init() map-reset PATTERN
+ * bz_quest_vk_wc3.c's reset_model_texture_caches() uses in production -
+ * proving the actual "stale GPU asset across map reload" defect this fixes
+ * (a reused identity path silently keeping a previous map's content) and
+ * its correction, against the real production cache module rather than a
+ * reimplemented oracle - Vulkan is never touched, so this is exercised
+ * entirely at the host level.
  */
 #include <string.h>
 
@@ -392,6 +401,242 @@ static void test_shutdown_of_zero_initialized_cache_is_safe(void) {
     ASSERT_EQ_INT(cache.occupiedCount, 0);
 }
 
+/* ------------------------------------------------------------------ */
+/* bz_quest_wc3_epoch_changed - the shared map-reload detector used by   */
+/* both the particle pool (bz_quest_vk_wc3.c's particlePoolEpoch) and    */
+/* the model/texture GPU cache reset this fixes (PR #28,                */
+/* modelTextureCacheEpoch) - see bz_quest_wc3_cache.h's doc comment.     */
+/* ------------------------------------------------------------------ */
+
+static void test_epoch_changed_first_call_never_reports_change(void) {
+    /* "Zero/first epoch" case: a zero-initialized tracker's very first
+     * check must never report a change, no matter what epoch value is
+     * passed (including 0 itself - epoch value 0 is not a special
+     * "unset" sentinel; `have` is the actual bootstrap flag) - the
+     * caller's own resource was already freshly created for this
+     * baseline, there is nothing to reset yet. */
+    bzQuestWc3EpochTracker_t tracker;
+    memset(&tracker, 0, sizeof(tracker));
+    ASSERT(!bz_quest_wc3_epoch_changed(&tracker, 0));
+    ASSERT(tracker.have);
+    ASSERT_EQ_INT((int)tracker.epoch, 0);
+
+    bzQuestWc3EpochTracker_t tracker2;
+    memset(&tracker2, 0, sizeof(tracker2));
+    ASSERT(!bz_quest_wc3_epoch_changed(&tracker2, 42));
+    ASSERT(tracker2.have);
+    ASSERT_EQ_INT((int)tracker2.epoch, 42);
+}
+
+static void test_epoch_changed_same_epoch_repeated_never_reports_change(void) {
+    /* "Inverse/no unnecessary flush": once baselined, repeating the exact
+     * same epoch any number of times must never report a change - a
+     * caller resetting on every "true" must never do so merely because
+     * capture_and_upload() runs every frame within the same map. */
+    bzQuestWc3EpochTracker_t tracker;
+    memset(&tracker, 0, sizeof(tracker));
+    bz_quest_wc3_epoch_changed(&tracker, 7); /* bootstrap */
+    for (int i = 0; i < 5; i++) ASSERT(!bz_quest_wc3_epoch_changed(&tracker, 7));
+}
+
+static void test_epoch_changed_reports_true_exactly_once_per_transition(void) {
+    bzQuestWc3EpochTracker_t tracker;
+    memset(&tracker, 0, sizeof(tracker));
+    bz_quest_wc3_epoch_changed(&tracker, 100); /* bootstrap */
+    ASSERT(bz_quest_wc3_epoch_changed(&tracker, 200));  /* real transition: true */
+    ASSERT(!bz_quest_wc3_epoch_changed(&tracker, 200)); /* same epoch again: false */
+    ASSERT(!bz_quest_wc3_epoch_changed(&tracker, 200)); /* still false */
+}
+
+static void test_epoch_changed_multiple_transitions_each_reported_once(void) {
+    /* "Multiple changes": a sequence of distinct map reloads (A -> B -> C)
+     * must each be reported exactly once, in order, never merged/skipped/
+     * double-reported. */
+    bzQuestWc3EpochTracker_t tracker;
+    memset(&tracker, 0, sizeof(tracker));
+    ASSERT(!bz_quest_wc3_epoch_changed(&tracker, 1)); /* bootstrap: A */
+    ASSERT(bz_quest_wc3_epoch_changed(&tracker, 2));  /* A -> B */
+    ASSERT(!bz_quest_wc3_epoch_changed(&tracker, 2));
+    ASSERT(bz_quest_wc3_epoch_changed(&tracker, 3));  /* B -> C */
+    ASSERT(!bz_quest_wc3_epoch_changed(&tracker, 3));
+    ASSERT(bz_quest_wc3_epoch_changed(&tracker, 1));  /* C -> A again (a distinct 3rd map that
+                                                        * happens to reuse epoch 1's numeric
+                                                        * value is still a real transition). */
+}
+
+/* ------------------------------------------------------------------ */
+/* Map-reload cache reset pattern - the exact shutdown()+init() sequence */
+/* bz_quest_vk_wc3.c's reset_model_texture_caches() uses (PR #28), proven */
+/* here against the pure cache module with fake create/destroy so the   */
+/* "stale GPU asset across map reload" defect and its fix are provable  */
+/* without Vulkan/NDK - see this file's own header comment.             */
+/* ------------------------------------------------------------------ */
+
+/* Simulates a map's own content for a reused identity string (e.g. two
+ * different custom maps both importing "Textures\Custom.blp") - fake_create
+ * bakes `contentTag` into the returned resource so a test can prove which
+ * map's content a cache slot actually holds. */
+typedef struct {
+    FakeUserdata_t base;
+    int contentTag;
+} TaggedUserdata_t;
+
+typedef struct {
+    int id;
+    int contentTag;
+    bool destroyed;
+} TaggedResource_t;
+
+static TaggedResource_t s_taggedResources[32];
+
+static void *tagged_create(const bzQuestWc3CacheKey_t *key, void *userdata) {
+    (void)key;
+    TaggedUserdata_t *u = (TaggedUserdata_t *)userdata;
+    u->base.createCalls++;
+    TaggedResource_t *r = &s_taggedResources[u->base.nextId];
+    r->id = u->base.nextId;
+    r->contentTag = u->contentTag;
+    r->destroyed = false;
+    u->base.nextId++;
+    return r;
+}
+
+static void tagged_destroy(void *handle, void *userdata) {
+    TaggedUserdata_t *u = (TaggedUserdata_t *)userdata;
+    TaggedResource_t *r = (TaggedResource_t *)handle;
+    r->destroyed = true;
+    u->base.destroyCalls++;
+}
+
+static void test_map_reset_pattern_same_epoch_cache_hit_stays_resident(void) {
+    /* "Same epoch cache hit stays resident": repeated acquire() calls for
+     * the identical identity, with NO epoch transition in between, must
+     * never re-create - the established, unaffected-by-this-fix hit path. */
+    bzQuestWc3Cache_t cache;
+    TaggedUserdata_t u;
+    memset(&u, 0, sizeof(u));
+    bzQuestWc3EpochTracker_t epochTracker;
+    memset(&epochTracker, 0, sizeof(epochTracker));
+    bz_quest_wc3_cache_init(&cache, 4, tagged_create, tagged_destroy, &u);
+    bz_quest_wc3_epoch_changed(&epochTracker, 1); /* bootstrap */
+
+    bzQuestWc3CacheKey_t key = make_key("Textures\\Custom.blp");
+    void *first = NULL, *second = NULL, *third = NULL;
+    bz_quest_wc3_cache_acquire(&cache, &key, &first);
+    for (int frame = 0; frame < 10; frame++) {
+        ASSERT(!bz_quest_wc3_epoch_changed(&epochTracker, 1)); /* same map every frame */
+    }
+    bz_quest_wc3_cache_acquire(&cache, &key, &second);
+    bz_quest_wc3_cache_acquire(&cache, &key, &third);
+
+    ASSERT(first == second && second == third);
+    ASSERT_EQ_INT(u.base.createCalls, 1); /* never re-created */
+}
+
+static void test_map_reset_pattern_epoch_change_destroys_and_recreates_same_path_with_new_content(void) {
+    /* The core PR #28 regression this fix closes: map A and map B both
+     * import the identical path "Textures\Custom.blp" with DIFFERENT
+     * content. Without a map-epoch-gated reset, map B's capture would hit
+     * the stale cache entry and keep showing map A's GPU asset. */
+    bzQuestWc3Cache_t cache;
+    TaggedUserdata_t u;
+    memset(&u, 0, sizeof(u));
+    u.contentTag = 111; /* map A's content */
+    bzQuestWc3EpochTracker_t epochTracker;
+    memset(&epochTracker, 0, sizeof(epochTracker));
+    bz_quest_wc3_cache_init(&cache, 4, tagged_create, tagged_destroy, &u);
+    bz_quest_wc3_epoch_changed(&epochTracker, /*mapA*/ 1); /* bootstrap on map A */
+
+    bzQuestWc3CacheKey_t key = make_key("Textures\\Custom.blp");
+    void *onMapA = NULL;
+    bz_quest_wc3_cache_acquire(&cache, &key, &onMapA);
+    ASSERT_EQ_INT(((TaggedResource_t *)onMapA)->contentTag, 111);
+    ASSERT_EQ_INT(u.base.createCalls, 1);
+
+    /* Map B loads - a real epoch transition - reproducing
+     * reset_model_texture_caches()'s exact shutdown()+init() sequence. */
+    ASSERT(bz_quest_wc3_epoch_changed(&epochTracker, /*mapB*/ 2));
+    bz_quest_wc3_cache_shutdown(&cache);
+    ASSERT(((TaggedResource_t *)onMapA)->destroyed); /* map A's GPU asset is actually freed */
+    u.contentTag = 222; /* map B's own, different content at the SAME path */
+    bz_quest_wc3_cache_init(&cache, 4, tagged_create, tagged_destroy, &u);
+
+    void *onMapB = NULL;
+    ASSERT(bz_quest_wc3_cache_acquire(&cache, &key, &onMapB)); /* same identity string as map A */
+    ASSERT_EQ_INT(((TaggedResource_t *)onMapB)->contentTag, 222); /* map B's content, not map A's */
+    ASSERT_EQ_INT(u.base.createCalls, 2); /* a genuine fresh create, not a stale hit */
+    ASSERT_EQ_INT(cache.hits, 0);         /* never counted as a hit against the old entry */
+}
+
+static void test_map_reset_pattern_multiple_epoch_changes_each_reset_exactly_once(void) {
+    /* "Multiple changes": three maps in a row (A -> B -> C), each must
+     * evict/recreate exactly once - never accumulate, never skip. */
+    bzQuestWc3Cache_t cache;
+    TaggedUserdata_t u;
+    memset(&u, 0, sizeof(u));
+    u.contentTag = 1;
+    bzQuestWc3EpochTracker_t epochTracker;
+    memset(&epochTracker, 0, sizeof(epochTracker));
+    bz_quest_wc3_cache_init(&cache, 4, tagged_create, tagged_destroy, &u);
+    bz_quest_wc3_epoch_changed(&epochTracker, 1); /* bootstrap: map A */
+
+    bzQuestWc3CacheKey_t key = make_key("units\\human\\footman\\footman.mdx");
+    void *handle = NULL;
+    bz_quest_wc3_cache_acquire(&cache, &key, &handle);
+
+    uint64_t epochs[3] = {2, 3, 4}; /* map B, C, D */
+    for (int i = 0; i < 3; i++) {
+        ASSERT(bz_quest_wc3_epoch_changed(&epochTracker, epochs[i]));
+        bz_quest_wc3_cache_shutdown(&cache);
+        u.contentTag = 100 + i;
+        bz_quest_wc3_cache_init(&cache, 4, tagged_create, tagged_destroy, &u);
+        bz_quest_wc3_cache_acquire(&cache, &key, &handle);
+        ASSERT_EQ_INT(((TaggedResource_t *)handle)->contentTag, 100 + i);
+    }
+    ASSERT_EQ_INT(u.base.createCalls, 4); /* map A + 3 resets, never more */
+}
+
+static void test_map_reset_pattern_model_and_texture_caches_reset_symmetrically(void) {
+    /* "Texture+model symmetry": bz_quest_vk_wc3.c's
+     * reset_model_texture_caches() resets BOTH modelCache and textureCache
+     * from the SAME epoch transition, in the same call - modeled here as
+     * two independent bzQuestWc3Cache_t instances driven by one shared
+     * epoch tracker, exactly like bzQuestVkWc3_t's real topology. */
+    bzQuestWc3Cache_t modelCache, textureCache;
+    TaggedUserdata_t modelUserdata, textureUserdata;
+    memset(&modelUserdata, 0, sizeof(modelUserdata));
+    memset(&textureUserdata, 0, sizeof(textureUserdata));
+    modelUserdata.contentTag = 1;
+    textureUserdata.contentTag = 1;
+    bzQuestWc3EpochTracker_t epochTracker;
+    memset(&epochTracker, 0, sizeof(epochTracker));
+    bz_quest_wc3_cache_init(&modelCache, 4, tagged_create, tagged_destroy, &modelUserdata);
+    bz_quest_wc3_cache_init(&textureCache, 4, tagged_create, tagged_destroy, &textureUserdata);
+    bz_quest_wc3_epoch_changed(&epochTracker, 1); /* bootstrap */
+
+    bzQuestWc3CacheKey_t modelKey = make_key("units\\human\\footman\\footman.mdx");
+    bzQuestWc3CacheKey_t textureKey = make_key("units\\human\\footman\\footman.blp");
+    void *modelHandle = NULL, *textureHandle = NULL;
+    bz_quest_wc3_cache_acquire(&modelCache, &modelKey, &modelHandle);
+    bz_quest_wc3_cache_acquire(&textureCache, &textureKey, &textureHandle);
+
+    ASSERT(bz_quest_wc3_epoch_changed(&epochTracker, 2)); /* map reload */
+    bz_quest_wc3_cache_shutdown(&modelCache);
+    bz_quest_wc3_cache_shutdown(&textureCache);
+    ASSERT(((TaggedResource_t *)modelHandle)->destroyed);   /* both destroyed ... */
+    ASSERT(((TaggedResource_t *)textureHandle)->destroyed); /* ... not just one */
+    modelUserdata.contentTag = 2;
+    textureUserdata.contentTag = 2;
+    bz_quest_wc3_cache_init(&modelCache, 4, tagged_create, tagged_destroy, &modelUserdata);
+    bz_quest_wc3_cache_init(&textureCache, 4, tagged_create, tagged_destroy, &textureUserdata);
+
+    void *modelHandle2 = NULL, *textureHandle2 = NULL;
+    bz_quest_wc3_cache_acquire(&modelCache, &modelKey, &modelHandle2);
+    bz_quest_wc3_cache_acquire(&textureCache, &textureKey, &textureHandle2);
+    ASSERT_EQ_INT(((TaggedResource_t *)modelHandle2)->contentTag, 2);
+    ASSERT_EQ_INT(((TaggedResource_t *)textureHandle2)->contentTag, 2);
+}
+
 void run_bz_quest_wc3_cache_tests(void) {
     RUN_TEST(test_init_rejects_zero_capacity);
     RUN_TEST(test_init_rejects_missing_callbacks);
@@ -407,4 +652,12 @@ void run_bz_quest_wc3_cache_tests(void) {
     RUN_TEST(test_shutdown_destroys_every_entry);
     RUN_TEST(test_shutdown_of_empty_cache_calls_nothing);
     RUN_TEST(test_shutdown_of_zero_initialized_cache_is_safe);
+    RUN_TEST(test_epoch_changed_first_call_never_reports_change);
+    RUN_TEST(test_epoch_changed_same_epoch_repeated_never_reports_change);
+    RUN_TEST(test_epoch_changed_reports_true_exactly_once_per_transition);
+    RUN_TEST(test_epoch_changed_multiple_transitions_each_reported_once);
+    RUN_TEST(test_map_reset_pattern_same_epoch_cache_hit_stays_resident);
+    RUN_TEST(test_map_reset_pattern_epoch_change_destroys_and_recreates_same_path_with_new_content);
+    RUN_TEST(test_map_reset_pattern_multiple_epoch_changes_each_reset_exactly_once);
+    RUN_TEST(test_map_reset_pattern_model_and_texture_caches_reset_symmetrically);
 }

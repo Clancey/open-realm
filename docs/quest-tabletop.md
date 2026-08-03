@@ -1533,8 +1533,117 @@ Two `bzQuestWc3Cache_t` instances (from the shared, host-tested
   variants — safe on a partially-initialized `vk3` (every handle checked
   against `VK_NULL_HANDLE`, matching `bz_quest_vk_destroy()`'s own
   contract).
+- **Map-reload reset** (High-severity reviewer finding, PR #28): both
+  caches are ALSO transactionally shut down and re-initialized mid-session,
+  the moment the authoritative map identity changes — never only at final
+  app teardown. See "Map-reload GPU cache reset" immediately below for the
+  full identity-reuse defect this closes and the exact reset mechanism.
 
-### Bounded, thread-pinned uploads
+### Map-reload GPU cache reset (transactional, texture+model-symmetric)
+
+**High-severity reviewer finding, PR #28.** Both GPU caches above are keyed
+by asset identity string (path/variant) **alone**, with **process
+lifetime** by default: `bz_quest_wc3_cache_acquire()`'s hit path
+unconditionally returns a resident entry, with no notion of *which map*
+that entry was uploaded for. A Warcraft III map can import its own custom
+assets at arbitrary paths (e.g. `"Textures\Custom.blp"`), and two
+*different* maps can validly reuse the **identical** imported path with
+**different** content — without a reset, loading map B after map A would
+silently keep displaying map A's stale GPU model/texture under map B's
+identically-named asset, since the cache never knew map A ever went away.
+
+Reproduced (before any code change) with a bounded, disposable host probe
+(never part of the repo, deleted immediately after use) against the real,
+unmodified `bz_quest_wc3_cache.c` module: a fake `create()` callback baked a
+distinguishing "content tag" into each resource, modeling two maps
+importing the identical identity `"Textures\Custom.blp"` with different
+content (`111` then `222`). Without a reset between the two, the second
+`bz_quest_wc3_cache_acquire()` call for that identity returned the FIRST
+map's stale resource (`contentTag=111`, `createCalls` still `1`) — the
+exact stale-asset defect described above, reproduced deterministically.
+Applying the fix's exact reset sequence between the two acquire calls
+corrected this (`contentTag=222`, `createCalls=2`, `destroyCalls=1` — a
+genuine fresh upload, with the old resource actually freed, not leaked).
+
+**The fix**: a new shared `bzQuestWc3EpochTracker_t` type and
+`bz_quest_wc3_epoch_changed(tracker, epoch)` helper (`bz_quest_wc3_cache.h`/
+`.c`, host-tested, Vulkan-free) detects a REAL map-identity transition —
+never a mere snapshot-generation bump within the same map, and never on
+its own first-ever call (bootstrap: the caller's resource was already
+freshly created for that baseline, there is nothing to reset yet).
+`bzQuestVkWc3_t` carries one instance,
+`modelTextureCacheEpoch`, checked at the very top of
+`bz_quest_vk_wc3_capture_and_upload()` — strictly BEFORE
+`bz_quest_wc3_capture_frame()` is ever called, so a brand-new map's very
+first captured frame re-uploads everything against freshly-emptied caches,
+never against a cache that might still hold the previous map's residents.
+On a real transition, `reset_model_texture_caches()` runs: `vkDeviceWaitIdle`
+(no GPU resource may be destroyed while a submitted command buffer might
+still reference it), `bz_quest_wc3_cache_shutdown()` for BOTH `modelCache`
+and `textureCache` (never just one — each entry's destroy callback already
+correctly frees its texture's `VkDescriptorSet` back to
+`vk3->descriptorPool`, restoring full descriptor headroom for the new map,
+not merely assuming it — see `texture_cache_destroy()`), clearing this
+module's own diagnostic dedup set (`s_vkWc3LoggedKeys`, so a
+`"no-active-sequence"`/`"palette-budget-exceeded"` warning for an identity
+the new map happens to reuse can log again rather than staying suppressed
+by an unrelated earlier map's already-logged entry), then re-initializes
+both caches empty with the SAME capacity/create/destroy arguments
+`bz_quest_vk_wc3_create()` originally used. This exactly mirrors
+`bz_quest_vk_wc3_terrain.c`'s pre-existing `reset_generation_caches()`
+pattern (chunk+texture cache shutdown+reinit on a terrain-identity change) —
+no new reset idiom was invented. `reset_model_texture_caches()` returns
+false only if `vkDeviceWaitIdle` itself fails — a rare, effectively
+unrecoverable condition (not expected to be transient), logged and left
+as-is by the caller rather than retried, matching how
+`bz_quest_vk_wc3_terrain.c`'s own `terrain_ready_cb()` already treats an
+equivalent failure.
+
+The **exact same** `bz_quest_wc3_epoch_changed()` helper now also drives
+the pre-existing particle-pool reset (`bzQuestVkWc3_t::particlePoolEpoch`,
+`build_frame_dynamic_material()`) — a DRY refactor of what was previously a
+hand-duplicated `particlePoolMapEpoch`/`havePoolMapEpoch` pair, per the
+reviewer's "reuse ... DRY helpers" guidance. The two trackers remain
+**separate instances** (never shared) since they gate resets at two
+different points in the frame (model/texture cache reset runs first, at
+the very top of capture; particle-pool reset runs later, inside
+`build_frame_dynamic_material()`) and reset different resources — sharing
+one tracker between them would make the second check silently never fire
+(it would already see its own epoch as "unchanged" once the first check
+advanced it).
+
+Structurally guarded by
+`platform/android/quest/scripts/test-wc3-map-epoch-cache-reset-layout.sh`
+(wired into `make test`/`make quest` as
+`test-quest-wc3-map-epoch-cache-reset-layout`): checks both epoch-tracker
+fields exist (and the old standalone particle fields do not), checks
+`reset_model_texture_caches()`'s internal order (wait-idle before either
+shutdown, both shutdowns before either re-init), and checks the epoch
+check/reset call in `bz_quest_vk_wc3_capture_and_upload()` runs strictly
+before `bz_quest_wc3_capture_frame()`. Proven to catch real regressions:
+removing the `textureCache` shutdown call (an asymmetric, model-only reset)
+failed the guard; reordering `vkDeviceWaitIdle` after the shutdown calls
+failed the guard; reintroducing the old standalone
+`particlePoolMapEpoch`/`havePoolMapEpoch` fields alongside the new shared
+tracker failed the guard; and moving the epoch check/reset to after
+`bz_quest_wc3_capture_frame()` failed the guard on both the check-order and
+reset-call-order assertions — each was reverted and re-confirmed clean
+immediately after capturing the failure.
+
+Host-tested in `test_bz_quest_wc3_cache.c` (Vulkan-free, against the real
+production cache module) covering: the epoch tracker's first/zero-epoch
+call never reports a change, repeating the same epoch never reports a
+change (no unnecessary flush), a real transition is reported exactly once
+and multiple sequential transitions are each reported exactly once, a
+same-epoch cache hit stays resident across many frames with no
+re-creation, an epoch change destroys and recreates the identical identity
+path with the NEW map's content (the exact stale-asset regression above,
+now a permanent committed test), multiple consecutive map changes each
+reset exactly once, and model+texture cache symmetry (both instances reset
+together from one shared epoch transition, proven with two independent
+cache instances mirroring `bzQuestVkWc3_t`'s real topology).
+
+
 
 All Vulkan calls in this slice happen on the Quest XR/render thread only —
 `bz_quest_wc3_capture.c` never touches Vulkan, and `bz_quest_vk_wc3.c` never
@@ -5407,6 +5516,109 @@ and per-mode factor table):
   (5) additive spell effects (e.g. a glow) are expected to still let some
   passthrough through even at full brightness - this is the documented,
   inherent additive-over-real-world limitation, not a regression.
+
+### What *was* verified this session (map-reload GPU cache reset fix, PR #28)
+
+Cumulative rubber-duck + independent code review flagged a second,
+**High**-severity cross-layer defect at PR #28 tip `218ce0d` (see
+"Map-reload GPU cache reset" above for the full mechanism):
+`bz_quest_vk_wc3.c`'s `modelCache`/`textureCache` were keyed by asset
+identity (path/variant) alone, with process lifetime by default - only
+ever shut down at final `bz_quest_vk_wc3_destroy()` teardown, never on a
+mid-session map reload - so a different map reusing an imported path
+(e.g. `"Textures\Custom.blp"`) would silently keep showing the previous
+map's stale GPU asset.
+
+- **Reproduced (before any code change)** with a bounded, disposable host
+  probe (never part of the repo, deleted immediately after use) against
+  the real, unmodified `bz_quest_wc3_cache.c` module: a fake `create()`
+  callback baked a distinguishing content tag into each resource, modeling
+  two maps importing the identical path with different content
+  (`111` then `222`, with no reset applied between them - the exact
+  pre-fix production code path). Confirmed the second
+  `bz_quest_wc3_cache_acquire()` call for that identity returned the
+  FIRST map's stale resource (`contentTag=111`, `createCalls` still `1`,
+  a genuine stale hit, not a fresh upload) - reproducing the defect
+  deterministically. Applying the fix's exact reset sequence between the
+  two acquire calls corrected this (`contentTag=222`, `createCalls=2`,
+  `destroyCalls=1`).
+- **Fixed** by adding a new shared `bzQuestWc3EpochTracker_t`/
+  `bz_quest_wc3_epoch_changed()` helper (`bz_quest_wc3_cache.h`/`.c`,
+  host-tested, Vulkan-free) that detects a real map-identity transition,
+  checked at the safe top of `bz_quest_vk_wc3_capture_and_upload()` -
+  strictly before `bz_quest_wc3_capture_frame()` ever offers a new map's
+  models/textures - triggering a new `reset_model_texture_caches()`
+  (`vkDeviceWaitIdle`, shutdown of BOTH caches, then re-init of BOTH,
+  mirroring `bz_quest_vk_wc3_terrain.c`'s pre-existing
+  `reset_generation_caches()` pattern exactly). Per the reviewer's "reuse
+  ... DRY helpers" guidance, the pre-existing particle-pool epoch check
+  (previously a hand-duplicated `particlePoolMapEpoch`/`havePoolMapEpoch`
+  pair) was refactored onto the SAME shared helper
+  (`bzQuestVkWc3_t::particlePoolEpoch`), kept as a separate tracker
+  instance since it gates a reset at a different point in the frame.
+- **Added 8 new committed tests** in `test_bz_quest_wc3_cache.c` (against
+  the real, unmodified production cache module, Vulkan-free) covering:
+  first/zero-epoch call never reports a change, repeating the same epoch
+  never reports a change, a transition is reported exactly once, multiple
+  sequential transitions are each reported exactly once, a same-epoch
+  cache hit stays resident across many frames, an epoch change destroys
+  and recreates the identical identity path with the new map's content
+  (the reproduced regression above, now a permanent test), multiple
+  consecutive map changes each reset exactly once, and model+texture
+  symmetry (both cache instances reset together from one shared
+  transition).
+- **Added a new structural guard**,
+  `platform/android/quest/scripts/test-wc3-map-epoch-cache-reset-layout.sh`
+  (wired into `make test`/`make quest` as
+  `test-quest-wc3-map-epoch-cache-reset-layout`), checking both epoch-
+  tracker fields exist (and the old standalone particle-pool fields do
+  not), `reset_model_texture_caches()`'s internal order (wait-idle before
+  either shutdown, both shutdowns before either re-init), and that the
+  epoch check/reset call runs strictly before
+  `bz_quest_wc3_capture_frame()`. **Proven to catch real regressions**:
+  removing the `textureCache` shutdown call (an asymmetric, model-only
+  reset) failed the guard; reordering `vkDeviceWaitIdle` after the
+  shutdown calls failed the guard; reintroducing the old standalone
+  `particlePoolMapEpoch`/`havePoolMapEpoch` fields alongside the new
+  shared tracker failed the guard; and moving the epoch check/reset to
+  after `bz_quest_wc3_capture_frame()` failed the guard on both the
+  check-order and reset-call-order assertions - each was reverted and
+  re-confirmed clean immediately after capturing the failure.
+- Documented map-reload cache reset ownership in this doc's new "Map-
+  reload GPU cache reset" section above (the trigger point, the exact
+  reset sequence and its rationale, and the two-separate-trackers
+  design), and updated the "Vulkan GPU caches" section's own "Shutdown"
+  bullet to cross-reference it.
+- `make -f platform/android/quest/build.mk test-quest-host-tests` -
+  **5440/5440** (up from 5388; +52 new assertions across the 8 new
+  tests). Every Quest structural guard passes, including the new
+  `test-quest-wc3-map-epoch-cache-reset-layout`. `make test-bz-tabletop-
+  assets` - **1189/1189** (unaffected; this fix never touches the bridge
+  ABI). `make test-quest-bridge` - **95/95** (unaffected). The full
+  repo-root `make test` passes end-to-end (`EXIT_CODE=0`). **`make quest`
+  with `JAVA_HOME=temurin-17.jdk`** (real arm64-v8a Gradle/CMake
+  `assembleDebug`) - **`BUILD SUCCESSFUL`**, with
+  `buildCMakeDebug[arm64-v8a]` re-running (not cached - confirmed via a
+  fresh `.so` mtime matching the build's own wall-clock time) to compile
+  every changed `.c` file through the real Android NDK toolchain, plus
+  `verify-native-lib.sh` confirming `lib/arm64-v8a/libbz_quest_native.so`.
+  `git diff --check` against `clancey-add-quest-hand-tracking` reports
+  zero whitespace errors. All scratch/repro directories used for host-side
+  verification were deleted before commit.
+- **Not verified this session (hardware/retail-data-only)**: real
+  end-to-end confirmation that reloading a map on a physical Quest device
+  (no device in this environment) actually shows the new map's models/
+  textures rather than the old map's - this requires two real, distinct
+  staged maps with at least one reused imported asset path, which this
+  environment cannot provide (no map is ever loaded at all in this
+  environment - see "Current limitations"). The acceptance procedure
+  should additionally confirm, when two real maps are available: (1)
+  loading map B after map A shows map A's units/terrain textures
+  correctly replaced by map B's own, even for identically-named custom
+  imports; (2) no visible hitch/frame-drop beyond the expected one-time
+  `vkDeviceWaitIdle` stall at the moment of reload; (3) repeatedly
+  reloading the SAME map does not re-upload already-resident assets
+  (no unnecessary flush).
 
 ## Related documents
 

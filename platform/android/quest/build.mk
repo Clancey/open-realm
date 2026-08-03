@@ -86,6 +86,22 @@ test-quest-wc3-particles-layout:
 test-quest-wc3-premultiplied-blend-layout:
 	@$(BZ_QUEST_DIR)/scripts/test-wc3-premultiplied-blend-layout.sh
 
+# Structural (no-Gradle/no-NDK) check of the PR #28 stale model/texture GPU
+# cache fix: bzQuestVkWc3_t's shared bzQuestWc3EpochTracker_t map-reload
+# detector (modelTextureCacheEpoch/particlePoolEpoch, the DRY refactor of
+# the pre-existing standalone particle-pool epoch fields), the transactional
+# reset_model_texture_caches() shutdown+reinit order (device-idle wait,
+# then BOTH caches destroyed, then BOTH re-initialized - never just one),
+# and that the reset runs strictly before bz_quest_wc3_capture_frame() -
+# see platform/android/quest/scripts/test-wc3-map-epoch-cache-reset-layout.sh
+# and docs/quest-tabletop.md's "Map-reload GPU cache reset" section for the
+# exact identity-reuse defect this guards against. Host-testable coverage of
+# the underlying reset pattern/epoch tracker itself lives in
+# test_bz_quest_wc3_cache.c (test-quest-host-tests).
+.PHONY: test-quest-wc3-map-epoch-cache-reset-layout
+test-quest-wc3-map-epoch-cache-reset-layout:
+	@$(BZ_QUEST_DIR)/scripts/test-wc3-map-epoch-cache-reset-layout.sh
+
 # Structural (no-NDK/no-device) check of layer 8's Meta Quest hand-tracking
 # capability negotiation, tracker create/destroy lifecycle, frame-critical
 # RT-safety of the pure gesture builder, renderer wiring, and manifest
@@ -181,7 +197,7 @@ $(eval $(call test_schema,test-quest-bridge,test-assets $(SHARED_LIB) $(SHEET_LI
 test-quest-stage-wc3-data:
 	@$(BZ_QUEST_DIR)/scripts/test-stage-wc3-data.sh
 
-test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-wc3-particles-layout test-quest-wc3-premultiplied-blend-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-host-tests test-quest-bridge test-quest-stage-wc3-data
+test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-wc3-particles-layout test-quest-wc3-premultiplied-blend-layout test-quest-wc3-map-epoch-cache-reset-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-host-tests test-quest-bridge test-quest-stage-wc3-data
 
 # Assembles the unsigned arm64-v8a debug APK via the project's own Gradle
 # wrapper. Requires an installed Android SDK/NDK (see docs/quest-tabletop.md)
@@ -247,4 +263,4 @@ quest-log:
 # hardware: source-list sync plus a full Gradle/CMake build and native
 # library verification.
 .PHONY: quest
-quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-wc3-particles-layout test-quest-wc3-premultiplied-blend-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-stage-wc3-data quest-verify-native-lib
+quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-wc3-particles-layout test-quest-wc3-premultiplied-blend-layout test-quest-wc3-map-epoch-cache-reset-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-stage-wc3-data quest-verify-native-lib

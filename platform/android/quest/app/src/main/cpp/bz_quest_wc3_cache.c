@@ -96,3 +96,10 @@ void bz_quest_wc3_cache_shutdown(bzQuestWc3Cache_t *cache) {
     }
     cache->occupiedCount = 0;
 }
+
+bool bz_quest_wc3_epoch_changed(bzQuestWc3EpochTracker_t *tracker, uint64_t epoch) {
+    bool changed = tracker->have && epoch != tracker->epoch;
+    tracker->epoch = epoch;
+    tracker->have = true;
+    return changed;
+}

@@ -188,6 +188,21 @@ typedef struct bzQuestVkWc3_s {
 
     bzQuestWc3Cache_t modelCache;    /* handle = bzQuestVkWc3Model_t* */
     bzQuestWc3Cache_t textureCache;  /* handle = bzQuestVkWc3Texture_t* */
+    /* Map-reload cache reset (High-severity reviewer finding, PR #28):
+     * modelCache/textureCache are keyed by asset identity (path/variant)
+     * alone, with process lifetime by default - a DIFFERENT map can validly
+     * reuse the exact same imported path with DIFFERENT content (e.g. two
+     * custom maps that both import "Textures\Custom.blp"), so without this,
+     * a stale cache hit would silently keep showing a PREVIOUS map's GPU
+     * asset under a new map's identical path. `modelTextureCacheEpoch`
+     * detects a real mapEpoch transition (bz_quest_wc3_epoch_changed(),
+     * bz_quest_wc3_cache.h) at the safe top of
+     * bz_quest_vk_wc3_capture_and_upload() - before this frame's model/
+     * texture offers are even made - and triggers
+     * reset_model_texture_caches() (bz_quest_vk_wc3.c), mirroring
+     * bz_quest_vk_wc3_terrain.c's reset_generation_caches() transactional
+     * shutdown+reinit pattern exactly. */
+    bzQuestWc3EpochTracker_t modelTextureCacheEpoch;
 
     bzQuestVkWc3PipelineVariant_t pipelineVariants[BZ_QUEST_VK_WC3_MAX_PIPELINE_VARIANTS];
     uint32_t pipelineVariantCount;
@@ -212,14 +227,14 @@ typedef struct bzQuestVkWc3_s {
      * `haveLastClockMsec` let build_frame_dynamic_material() compute one shared
      * previousClockMsec/currentClockMsec delta per FRAME (never per render item - matches
      * desktop's own single tr.viewDef.time/deltaTime, see bz_quest_wc3_particles.h's header
-     * comment) across calls. `poolMapEpoch`/`havePoolMapEpoch` detect a real map reload (never
-     * a mere snapshot-generation bump) to reset the pool - see
+     * comment) across calls. `particlePoolEpoch` detects a real map reload (never a mere
+     * snapshot-generation bump, via the same bz_quest_wc3_epoch_changed() this struct's
+     * modelTextureCacheEpoch above uses) to reset the pool - see
      * bz_quest_wc3_particles_pool_reset()'s "no stale effects across resets" contract. */
     bzQuestWc3ParticlePool_t particlePool;
     uint32_t lastParticleClockMsec;
     bool haveLastParticleClockMsec;
-    uint64_t particlePoolMapEpoch;
-    bool havePoolMapEpoch;
+    bzQuestWc3EpochTracker_t particlePoolEpoch;
 } bzQuestVkWc3_t;
 
 /*
@@ -240,8 +255,12 @@ bool bz_quest_vk_wc3_create(const bzQuestVk_t *vk, bzQuestVkWc3_t *out);
  * once per eye) on the Quest XR/render thread, before either eye's
  * bz_quest_vk_wc3_render_target() call. `mapEpoch` (BZ_TT identity-of-the-
  * currently-loaded-map, see bz_quest_wc3_capture.h's bz_quest_map_epoch())
- * drives this frame's particle-pool reset check (see
- * bzQuestVkWc3_t::particlePoolMapEpoch's doc comment) - callers already
+ * FIRST drives a possible transactional model/texture GPU cache reset (see
+ * bzQuestVkWc3_t::modelTextureCacheEpoch's doc comment - PR #28 - this must
+ * happen before bz_quest_wc3_capture_frame() below so a brand-new map's
+ * very first frame re-uploads everything against freshly-emptied caches),
+ * then drives this frame's particle-pool reset check (see
+ * bzQuestVkWc3_t::particlePoolEpoch's doc comment) - callers already
  * compute this once per frame for layer 6's interaction state machine
  * (bz_quest_renderer.c's renderer->interaction.mapEpoch), so no extra ABI/
  * snapshot round trip is introduced here.

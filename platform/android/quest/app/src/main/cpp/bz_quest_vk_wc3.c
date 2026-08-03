@@ -664,10 +664,33 @@ static void texture_ready_cb(const char *identity, uint32_t width, uint32_t heig
  */
 static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3RenderList_t *list, uint64_t mapEpoch);
 
+/*
+ * Forward-declared here for the same reason as build_frame_dynamic_material()
+ * above (defined later in this file, next to the file-local diagnostic
+ * dedup set it also clears). Transactionally destroys and re-creates BOTH
+ * modelCache and textureCache (mirroring bz_quest_vk_wc3_terrain.c's
+ * reset_generation_caches()) - see bzQuestVkWc3_t::modelTextureCacheEpoch's
+ * doc comment (bz_quest_vk_wc3.h) for why this must run. Returns false only
+ * if vkDeviceWaitIdle fails (a rare, effectively-unrecoverable condition -
+ * see bz_quest_wc3_epoch_changed()'s doc comment, bz_quest_wc3_cache.h).
+ */
+static bool reset_model_texture_caches(bzQuestVkWc3_t *vk3);
+
 void bz_quest_vk_wc3_capture_and_upload(bzQuestVkWc3_t *vk3, bzQuestWc3RenderList_t *outRenderList,
                                        uint64_t mapEpoch) {
     vk3->newModelUploadsThisFrame = 0;
     vk3->newTextureUploadsThisFrame = 0;
+    /* Map-reload GPU cache reset (High-severity reviewer finding, PR #28) - MUST run at this
+     * safe top-of-capture point, before bz_quest_wc3_capture_frame() below ever offers a new
+     * map's models/textures, so the very first frame after a reload re-uploads everything
+     * against freshly-emptied caches rather than potentially hitting a same-path/different-
+     * content stale entry from the PREVIOUS map - see bzQuestVkWc3_t::modelTextureCacheEpoch's
+     * doc comment (bz_quest_vk_wc3.h) for the full identity-reuse rationale. */
+    if (bz_quest_wc3_epoch_changed(&vk3->modelTextureCacheEpoch, mapEpoch)) {
+        if (!reset_model_texture_caches(vk3))
+            BZ_QUEST_LOGE("bz_quest_vk_wc3: map-epoch model/texture cache reset failed - "
+                          "stale GPU assets from the previous map may remain resident");
+    }
     bzQuestWc3CaptureCallbacks_t callbacks;
     callbacks.onModelReady = model_ready_cb;
     callbacks.modelUserdata = vk3;
@@ -1295,6 +1318,56 @@ static bool vk_wc3_log_once(const char *identity, const char *detail) {
         if (vk_wc3_log_once((identity), (detail))) fprintf(stderr, __VA_ARGS__);                     \
     } while (0)
 
+/*
+ * Map-reload GPU cache reset (High-severity reviewer finding, PR #28) - see
+ * bzQuestVkWc3_t::modelTextureCacheEpoch's doc comment (bz_quest_vk_wc3.h)
+ * for the identity-reuse rationale this exists to close, and this file's
+ * only call site (bz_quest_vk_wc3_capture_and_upload() above) for exactly
+ * when it runs. Mirrors bz_quest_vk_wc3_terrain.c's reset_generation_
+ * caches() transactionally: waits for the device to go idle (no GPU
+ * resource may be destroyed while a submitted command buffer might still
+ * reference it - see this project's Vulkan lifetime discipline), destroys
+ * every resident model/texture (bz_quest_wc3_cache_shutdown() calls each
+ * entry's destroy() callback exactly once, correctly freeing every
+ * texture's descriptor set back to vk3->descriptorPool - see
+ * texture_cache_destroy() above - so descriptor headroom for the new map's
+ * uploads is fully restored, not merely assumed), re-initializes both
+ * caches empty with the SAME create/destroy/capacity arguments
+ * bz_quest_vk_wc3_create() originally used (so a subsequent capacity/
+ * callback change only needs to change one place, not two), and clears this
+ * file's own diagnostic dedup set (s_vkWc3LoggedKeys) - a "no-active-
+ * sequence"/"palette-budget-exceeded" warning for an identity string the
+ * new map happens to reuse must be able to log again, not stay silently
+ * suppressed by an unrelated earlier map's already-logged entry (same
+ * rationale as bz_quest_vk_wc3_terrain.c's reset_deferred_log()).
+ *
+ * Returns false only if vkDeviceWaitIdle fails, BEFORE any destructive
+ * action - the caches are left fully intact and still resident with the
+ * PREVIOUS map's content in that case (a real device-lost condition is not
+ * expected to be transient, so this is logged and left as-is by the caller
+ * rather than retried - see bz_quest_wc3_epoch_changed()'s doc comment).
+ */
+static bool reset_model_texture_caches(bzQuestVkWc3_t *vk3) {
+    if (vkDeviceWaitIdle(vk3->vk->device) != VK_SUCCESS) {
+        BZ_QUEST_LOGE("bz_quest_vk_wc3: vkDeviceWaitIdle before map-epoch cache reset failed");
+        return false;
+    }
+    bz_quest_wc3_cache_shutdown(&vk3->modelCache);
+    bz_quest_wc3_cache_shutdown(&vk3->textureCache);
+    s_vkWc3LoggedKeyCount = 0;
+    if (!bz_quest_wc3_cache_init(&vk3->modelCache, BZ_QUEST_VK_WC3_MODEL_CACHE_CAPACITY,
+                                model_cache_create, model_cache_destroy, vk3)) {
+        BZ_QUEST_LOGE("bz_quest_vk_wc3: model cache re-init after map-epoch reset failed");
+        return false;
+    }
+    if (!bz_quest_wc3_cache_init(&vk3->textureCache, BZ_QUEST_VK_WC3_TEXTURE_CACHE_CAPACITY,
+                                texture_cache_create, texture_cache_destroy, vk3)) {
+        BZ_QUEST_LOGE("bz_quest_vk_wc3: texture cache re-init after map-epoch reset failed");
+        return false;
+    }
+    return true;
+}
+
 /* Per-(render item, geoset) results of this frame's dynamic-material build,
  * consumed by draw_layer() via record_opaque()/record_blended() below.
  * paletteByteOffset is always a valid offset into vk3->paletteBuffer (slot 0
@@ -1516,16 +1589,12 @@ static void build_frame_dynamic_material(bzQuestVkWc3_t *vk3, const bzQuestWc3Re
 
     /* Particle pool reset: only on a REAL map-identity change (never a mere snapshot-generation
      * bump) - "no stale effects across resets", see bz_quest_wc3_particles_pool_reset()'s own
-     * doc comment. The first-ever call (havePoolMapEpoch false) does NOT reset - the pool was
-     * already freshly reset at bz_quest_vk_wc3_create() time - it only records the baseline
-     * epoch to compare future frames against. */
-    if (!vk3->havePoolMapEpoch) {
-        vk3->particlePoolMapEpoch = mapEpoch;
-        vk3->havePoolMapEpoch = true;
-    } else if (mapEpoch != vk3->particlePoolMapEpoch) {
+     * doc comment. bz_quest_wc3_epoch_changed() (bz_quest_wc3_cache.h) never reports a change on
+     * its first-ever call for a given tracker - the pool was already freshly reset at
+     * bz_quest_vk_wc3_create() time, so that call only records the baseline epoch to compare
+     * future frames against. */
+    if (bz_quest_wc3_epoch_changed(&vk3->particlePoolEpoch, mapEpoch))
         bz_quest_wc3_particles_pool_reset(&vk3->particlePool, (uint64_t)renderClockMsec);
-        vk3->particlePoolMapEpoch = mapEpoch;
-    }
     /* One shared previousClockMsec/currentClockMsec window for every emitter processed this
      * frame - matches desktop's own single tr.viewDef.time/deltaTime (see
      * bz_quest_wc3_particles.h's header comment). The first-ever call uses a zero-width window
