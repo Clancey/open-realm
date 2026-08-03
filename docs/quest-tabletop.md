@@ -6477,15 +6477,18 @@ map's stale GPU asset.
   merged state.
 - `make -f platform/android/quest/build.mk test-quest-acceptance-runner`
   (equivalently `make test-quest-acceptance-runner` from the repo root) -
-  **31/31** test cases pass (up from 26; +2 cases for the two
+  **32/32** test cases pass (up from 26; +2 cases for the two
   later-incorporated PR #28 base fixes' evidence, then +3 more fixing
   three must-fix false-fail defects a final rubber-duck review found -
   mode-aware markers, PID/tag-scoped forbidden-error scanning, and two
   real (not stitched-together) lifecycle fixtures replacing the one
   impossible combined fixture - see "Mode-aware markers"/"PID/tag-scoped
-  forbidden-error scan" above), run **3 consecutive times** with identical
-  results (stability requirement) producing 3 distinct timestamped
-  artifact directories.
+  forbidden-error scan" above - then +1 more from an independent code
+  review fixing an orphaned-sleep-child cleanup gap, proven by an exact,
+  non-broad-kill PID reap alongside an untouched decoy `sleep` process -
+  see "POSIX signal-handling correctness" above), run **3 consecutive
+  times** with identical results (stability requirement) producing 3
+  distinct timestamped artifact directories.
 - `make test-quest-host-tests` - **5440/5440** (unaffected by this layer's
   own changes - this layer touches no file that binary compiles; the
   count itself reflects the two later-incorporated PR #28 base fixes' own
@@ -6514,7 +6517,7 @@ map's stale GPU asset.
   confirmed via a full log file grep for `assertions passed`/`OK`/`tests
   passed` markers across every suite, not a truncated scrollback),
   including every Quest structural guard above, the new
-  `test-acceptance-runner.sh: 31/31 tests passed` line, and every
+  `test-acceptance-runner.sh: 32/32 tests passed` line, and every
   pre-existing test suite in the rest of the repository unchanged.
   `git diff --check` reports zero whitespace errors. No test was disabled,
   skipped, or weakened anywhere in this session.
