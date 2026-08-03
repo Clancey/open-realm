@@ -4901,7 +4901,7 @@ against a real device:
 ### Tests and build wiring
 
 - `make test-quest-acceptance-runner`
-  (`scripts/test-acceptance-runner.sh`) - 26 test cases against a fake
+  (`scripts/test-acceptance-runner.sh`) - 28 test cases against a fake
   device: missing `--serial`, no device, unknown/offline `--serial`,
   `--serial` routing across two devices, a missing custom `--apk` path,
   native-lib verification failure, `adb install -r` failure, missing
@@ -4909,8 +4909,10 @@ against a real device:
   evidence, TFT-over-ROC staging + evidence, the no-`--data` clean-failure
   PASS case, the staged-but-still-failed FAIL case, a missing required
   marker, a timed-out/hung session (no clean shutdown observed), a
-  forbidden fatal error under a different tag/process, OVR Metrics
-  unavailable (not fatal), OVR Metrics available (CSV captured), spaces in
+  forbidden fatal error under a different tag/process, a PR #28 map-epoch
+  cache-reset error under its own dedicated named check (and its
+  absence-is-informational counterpart), OVR Metrics unavailable (not
+  fatal), OVR Metrics available (CSV captured), spaces in
   `--data`/`--artifacts` paths, full artifact preservation, cleanup on a
   failed run, cleanup on a real `SIGTERM` mid-session, and 3 stable
   consecutive runs producing distinct artifact directories. Runs as part of
@@ -4968,11 +4970,11 @@ against a real device:
   real Quest 3/3S hardware with a real map loaded - no device was
   available to profile against; the target and the CSV column names to
   read it from are documented, not measured.
-- Whether the guided manual checklist's 10 scenarios actually behave as
+- Whether the guided manual checklist's 12 scenarios actually behave as
   each prior layer's own procedure describes - this script only prompts
   and records a human's own y/n answer; it cannot itself verify hand/
   controller behavior.
-- Whether all 10 guided checkpoints, run back to back on a real headset,
+- Whether all 12 guided checkpoints, run back to back on a real headset,
   reveal any interaction the isolated per-layer procedures did not
   anticipate (e.g. a controller/hand handoff happening mid-guided-prompt).
 
@@ -6308,12 +6310,16 @@ map's stale GPU asset.
   merged state.
 - `make -f platform/android/quest/build.mk test-quest-acceptance-runner`
   (equivalently `make test-quest-acceptance-runner` from the repo root) -
-  **26/26** test cases pass, run **3 consecutive times** with identical
+  **28/28** test cases pass (up from 26; +2 new cases added in this same
+  layer-10 body of work to cover the two later-incorporated PR #28 base
+  fixes' evidence - see below), run **3 consecutive times** with identical
   results (stability requirement) producing 3 distinct timestamped
   artifact directories.
-- `make test-quest-host-tests` - **5366/5366** (unchanged from the layer 9
-  follow-up baseline - this layer touches no file that binary compiles).
-  `make test-quest-source-sync`, `test-quest-wc3-descriptor-pool-headroom`,
+- `make test-quest-host-tests` - **5440/5440** (unaffected by this layer's
+  own changes - this layer touches no file that binary compiles; the
+  count itself reflects the two later-incorporated PR #28 base fixes' own
+  +22/+52 new assertions - see their sections above - not any layer-10
+  change). `test-quest-source-sync`, `test-quest-wc3-descriptor-pool-headroom`,
   `test-quest-wc3-bone-palette-layout`, `test-quest-wc3-fog-selection-layout`,
   `test-quest-wc3-hud-layout`, `test-quest-wc3-pointer-layout`,
   `test-quest-wc3-particles-layout`, `test-quest-hand-tracking-layout` -
@@ -6337,7 +6343,7 @@ map's stale GPU asset.
   confirmed via a full log file grep for `assertions passed`/`OK`/`tests
   passed` markers across every suite, not a truncated scrollback),
   including every Quest structural guard above, the new
-  `test-acceptance-runner.sh: 26/26 tests passed` line, and every
+  `test-acceptance-runner.sh: 28/28 tests passed` line, and every
   pre-existing test suite in the rest of the repository unchanged.
   `git diff --check` reports zero whitespace errors. No test was disabled,
   skipped, or weakened anywhere in this session.
