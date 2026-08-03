@@ -1677,6 +1677,26 @@ one tracker between them would make the second check silently never fire
 (it would already see its own epoch as "unchanged" once the first check
 advanced it).
 
+**Map-name collision limitation (documented, not fixed - a narrow edge
+case, not a bug):** `mapEpoch` is `bz_quest_map_epoch()`
+(`bz_quest_wc3_capture.c`), an FNV-1a hash of `BZ_TTSnapshot_MapName()`'s
+string alone (ultimately `CS_WORLD`, the map's own name, not its file
+content or a monotonic load counter). Two genuinely distinct maps that
+happen to share the exact same map name would hash to the same epoch, so
+`bz_quest_wc3_epoch_changed()` would NOT detect a transition between them
+and the model/texture/particle-pool caches would NOT flush - the second
+map's identically-named-but-different-content imported assets would
+incorrectly keep showing the first map's stale GPU resource, exactly the
+defect this fix otherwise corrects. This requires two distinct real map
+files sharing one literal map name (not merely one reused asset path
+within otherwise-differently-named maps, the case this fix does correctly
+handle - see the reproduction above), so it is a narrow, hardware+specific-
+map-data-only edge case, not exercisable or observable in this environment
+and not a merge blocker. A future monotonic map-load counter, or an
+identity that also incorporates the map's file path, would eliminate this
+narrow collision class; not implemented here to keep this acceptance layer
+from altering the renderer fix it is documenting.
+
 Structurally guarded by
 `platform/android/quest/scripts/test-wc3-map-epoch-cache-reset-layout.sh`
 (wired into `make test`/`make quest` as
@@ -4807,7 +4827,11 @@ own "Exact on-device acceptance procedure" already documents in detail:
     fix's *success* path (showing the correct, non-stale content) has no
     log line at all and needs this guided visual check. This environment
     never loads any map at all - see "Current limitations" - so this was
-    not exercised even indirectly this session.
+    not exercised even indirectly this session. Pick the two test maps
+    with genuinely different names: see the "Map-name collision
+    limitation" caveat above the structural-guard paragraph in "Map-reload
+    GPU cache reset" - two distinct maps sharing one literal map name
+    would not exercise this check at all (a false pass, not a fix defect).
 
 Requires a real terminal (`[ -t 0 ]`): interactive mode with non-tty stdin
 fails loudly with an actionable message instead of ever fabricating a "y"
