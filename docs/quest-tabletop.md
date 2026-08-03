@@ -1,6 +1,6 @@
-# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E/6/7/8/9
+# Meta Quest (Android/NDK + OpenXR) tabletop shell — Layers 5A/5B/5C/5D/5E/6/7/8/9/10
 
-This document tracks layers 5A/5B/5C/5D/5E/6/7/8/9 of a stacked Meta Quest port:
+This document tracks layers 5A/5B/5C/5D/5E/6/7/8/9/10 of a stacked Meta Quest port:
 
 - Layer 1: [docs/visionos-tabletop.md](visionos-tabletop.md)'s extraction of
   `platform/tabletop/` — the portable pthreads lifecycle host and headless
@@ -111,7 +111,7 @@ This document tracks layers 5A/5B/5C/5D/5E/6/7/8/9 of a stacked Meta Quest port:
   below for the exact extension matrix, capability-negotiation contract,
   gesture/arbitration state machine, and the honest Quest-vs-visionOS
   differences.
-- **Layer 9 (this layer, `clancey-render-quest-effects`)**: adds Warcraft III
+- **Layer 9 (`clancey-render-quest-effects`)**: adds Warcraft III
   **particle-emitter (PRE2) rendering** - the only MDX "effect" class this
   codebase's authoritative renderer actually parses+simulates+draws end to
   end (traced and audited; `PREM`/`RIBB` have no parser anywhere in this
@@ -128,19 +128,38 @@ This document tracks layers 5A/5B/5C/5D/5E/6/7/8/9 of a stacked Meta Quest port:
   below for the full scope audit, ABI diff, a traced authoritative quirk this
   layer deliberately reproduces rather than "fixes", and the coordinate/
   blend/depth/pool/reset contracts.
+- **Layer 10 (this layer, `clancey-harden-quest-acceptance`)**: adds no new
+  runtime feature - it is the final acceptance/validation/docs layer for
+  this stacked port. A reproducible, safety-hardened physical Quest 3/3S
+  acceptance runner (`scripts/acceptance-runner.sh`) that reuses layer 7's
+  `stage-wc3-data.sh` (extended with `resolve-device`/`check-runtime`
+  subcommands so device/package validation lives in exactly one place)
+  for device resolution, staging, launch, and log tailing; adds its own
+  build/verify/install, bounded logcat capture, automated evidence
+  classification against the exact log lines every prior layer's own
+  "Exact on-device acceptance procedure" documents, best-effort OVR
+  Metrics Tool performance capture, and guided manual checkpoints for the
+  XR actions no host can synthesize. A device-free fake-adb/fake-verifier
+  test harness (`scripts/test-acceptance-runner.sh`) exercises the real
+  runner's own logic end to end with no hardware. See
+  "[Layer 10: Physical-device acceptance automation](#layer-10-physical-device-acceptance-automation)"
+  below for the full design, evidence-marker citation table, OVR Metrics
+  Tool research, ROC/TFT matrix, and hardware checklist.
 
 **These layers now render fog of war, per-entity selection markers, and a
 status/command-card HUD, (layer 6) read Touch controllers to select
 units, activate command-card buttons, issue smart/target orders, cancel, and
 pan/rotate/zoom the board, (layer 7) can stage a developer's own local
 Warcraft III data onto the device and play its non-spatial audio through
-AAudio, and (layer 8) can read Quest hand tracking as a second, arbitrated
+AAudio, (layer 8) can read Quest hand tracking as a second, arbitrated
 input source for the exact same select/smart/cancel/board-pan commands when
-Touch controllers are unsupported/inactive — all posted through the
+Touch controllers are unsupported/inactive, and (layer 9) render Warcraft
+III particle-emitter (PRE2) effects — all posted through the
 authoritative typed tabletop transport, or (audio) dequeued from its
-existing bounded audio queue. They still do not render particles/effects,
-do not render a hand mesh, and do not implement multiplayer, Store asset
-delivery, the Meta Audio SDK, or Platform services.**
+existing bounded audio queue. Layer 10 adds no new renderable/gameplay
+feature; it hardens acceptance/validation/docs for everything above. These
+layers still do not render a hand mesh, and do not implement multiplayer,
+Store asset delivery, the Meta Audio SDK, or Platform services.**
 See
 [Current limitations](#current-limitations) and
 `bz_quest_host.c`'s compile-time seams (`BZ_QUEST_ENABLE_*`, each guarded by
@@ -160,7 +179,9 @@ extension enumeration + system-property query), never at compile time, so
 `bz_quest_xr_hands_create()`/`_sync()` are always built and simply no-op into
 "Touch-only" on a runtime/device/account without the capability - see
 "[Layer 8](#layer-8-meta-quest-hand-tracking-bz_quest_xr_handsc-bz_quest_hand_inputc-bz_quest_input_statec)"'s
-"Capability negotiation" below.
+"Capability negotiation" below. **Layer 10 adds no compile-time seam either**
+— it is purely external scripts/tests/docs, touching zero lines under
+`app/src/main/cpp/`.
 
 
 ## Architecture boundary
@@ -396,6 +417,32 @@ make quest-clean-wc3-data
 # sideloaded device.
 make quest-run
 make quest-log
+
+# Resolves (and validates: no/multiple-without-serial/unknown/offline
+# rejected) the target device serial, and validates package/debuggable/
+# run-as - both new subcommands scripts/acceptance-runner.sh (layer 10)
+# calls instead of duplicating this logic a second time.
+platform/android/quest/scripts/stage-wc3-data.sh resolve-device --serial DEV1
+platform/android/quest/scripts/stage-wc3-data.sh check-runtime --serial DEV1
+
+# --- Layer 10: physical-device acceptance automation -----------------------
+
+# Device-free (no NDK/Gradle/Quest hardware required) fake-adb/fake-verify
+# harness for the acceptance runner below. Runs as part of `make test` and
+# `make quest`.
+make test-quest-acceptance-runner
+
+# Automated + guided physical Quest 3/3S acceptance run: builds/verifies the
+# debug APK, installs it, validates package/debuggable/run-as, optionally
+# stages+verifies a developer's own local ROC/TFT data, launches the real
+# NativeActivity for a bounded session, captures logcat + (if the Meta
+# Horizon Store app is installed) OVR Metrics Tool performance data, and
+# analyzes captured evidence against the exact log lines documented per
+# layer above. Requires a real, adb-attached Quest 3/3S - see
+# "Layer 10: Physical-device acceptance automation" below for the full
+# design, evidence table, and hardware checklist.
+JAVA_HOME=/path/to/temurin-17 make quest-acceptance \
+    BZ_QUEST_ACCEPTANCE_ARGS="--serial DEV1 --data /path/to/your/wc3/data"
 ```
 
 ### Exact on-device acceptance procedure (requires a connected Quest 3/3S)
@@ -526,14 +573,32 @@ host-test binary table:
   subdirectory.
 - `make test-quest-audio-rt-callback-safety`
   (`scripts/test-quest-audio-rt-callback-safety.sh`) — greps the real
-  `bz_quest_audio_data_callback()`/`bz_quest_audio_mixer_render()` function
-  bodies (not the whole file, which legitimately allocates/logs elsewhere
-  on the control thread) for any `malloc`/`calloc`/`realloc`/`free`/
-  `pthread_mutex_`/log/`fopen`/`fread`/bridge (`BZ_TT_`) call, and confirms
-  `bz_quest_audio_data_callback` is registered exactly once as the AAudio
-  data callback — a future edit that reintroduces a forbidden call into
-  the real-time path fails loudly here instead of only as an on-device
-  glitch/dropout.
+  `bz_quest_audio_data_callback()`/`bz_quest_audio_mixer_render()`/
+  `clamp_i16()` function bodies (not the whole file, which legitimately
+  allocates/logs elsewhere on the control thread) for any
+  `malloc`/`calloc`/`realloc`/`free`/`pthread_mutex_`/log/`fopen`/`fread`/
+  bridge (`BZ_TT_`) call, and confirms `bz_quest_audio_data_callback` is
+  registered exactly once as the AAudio data callback — a future edit that
+  reintroduces a forbidden call into the real-time path fails loudly here
+  instead of only as an on-device glitch/dropout. Extraction is anchored to
+  a line that actually STARTS the function definition (column 0, a letter/
+  underscore) rather than a bare substring match, and `clamp_i16()` (called
+  from `bz_quest_audio_mixer_render()`'s own hot inner loop, not just the
+  outer entry point) is scanned independently — see "What *was* verified
+  this session (layer 10)" below for the exact proven false-pass gap (both
+  an unanchored-extraction decoy and the unscanned `clamp_i16()` helper)
+  this fixed, mirroring `test-quest-hand-tracking-layout.sh`'s own earlier,
+  identical fix.
+- `make test-quest-acceptance-runner`
+  (`scripts/test-acceptance-runner.sh`, layer 10) — a fake-adb/fake-verify
+  harness for `scripts/acceptance-runner.sh` exercising the REAL production
+  runner's own device resolution (delegated to `stage-wc3-data.sh`), APK
+  build/verify seam, install, package/debuggable/run-as validation, ROC/TFT
+  staging+evidence classification, launch, bounded logcat capture/evidence
+  analysis, OVR Metrics Tool automation, and signal/failure cleanup - no
+  physical device or NDK/Gradle required. See
+  "[Layer 10: Physical-device acceptance automation](#layer-10-physical-device-acceptance-automation)"
+  below for the full test list and design.
 
 No `+com_frame_limit`-bounded full engine run was additionally attempted on
 this host beyond what `test_bz_quest_bridge.c` already exercises: this
@@ -4402,13 +4467,454 @@ hardware and retail data are available:
    already cost).
 ```
 
-**No physical Meta Quest device and no retail Warcraft III data were
-available in this development environment** - every item in this procedure
-is written from the traced desktop reference implementation
-(`renderer/r_particles.c`/`r_mdx_geoset.c`), the bridge ABI's own decode
-tests, and this layer's pure-logic host test evidence, not from having run
-it on hardware or against retail assets. Do not report any of it as confirmed
-until checked on real hardware with real ROC/TFT data.
+## Layer 10: Physical-device acceptance automation
+
+Layer 10 (`clancey-harden-quest-acceptance`) adds no new renderable or
+gameplay feature - it is the final acceptance/validation/docs layer for this
+stacked Meta Quest port, turning every prior layer's own "Exact on-device
+acceptance procedure" (manual, prose, human-run) into a reproducible,
+safety-hardened script plus a device-free test harness that exercises that
+script's own logic with no hardware.
+
+### Module map and ownership
+
+```text
+platform/android/quest/scripts/
+  acceptance-runner.sh       # the automated+guided physical-device runner
+  test-acceptance-runner.sh  # fake-adb/fake-verify harness for the above
+  stage-wc3-data.sh          # UNCHANGED contract, extended additively:
+                             #   resolve-device / check-runtime subcommands
+  verify-native-lib.sh       # extended: manifest + min/max-SDK checks
+```
+
+`acceptance-runner.sh` owns only what `stage-wc3-data.sh` does not: APK
+build/verify/install, native-lib/manifest verification, bounded logcat
+capture, OVR Metrics Tool automation, guided manual checkpoints, and
+evidence analysis. It never re-implements device resolution or
+package/debuggable/run-as validation - both are safety-critical, already
+tested in `stage-wc3-data.sh`, and now exposed as two small additive
+subcommands so there is exactly one implementation of each:
+
+- `stage-wc3-data.sh resolve-device [--serial SERIAL]` - runs the exact
+  same `require_device()` every other subcommand already used (no device /
+  multiple-without-`--serial` / unknown `--serial` / offline `--serial` all
+  rejected identically), and prints the resolved serial.
+- `stage-wc3-data.sh check-runtime [--package PKG] [--serial SERIAL]` -
+  runs the exact same `require_package_installed()`/
+  `require_debuggable_run_as()`/`resolve_pkg_root()` `cmd_stage()`/
+  `cmd_verify()`/`cmd_clean()` already used, and prints
+  `serial=...`/`pkg_root=...`.
+
+`acceptance-runner.sh` requires `--serial` explicitly (stricter than
+`stage-wc3-data.sh`'s own single-device auto-select convenience) since a
+physical acceptance run is a deliberate, reproducible validation step that
+must record exactly which device it targeted, never silently trust
+"whichever device happens to be alone right now".
+
+### Automated flow (`acceptance-runner.sh`)
+
+1. `stage-wc3-data.sh resolve-device --serial <SERIAL>` - device resolution
+   (delegated, not duplicated).
+2. Verify/build the debug APK: if `--apk` was not overridden away from the
+   default `quest-assemble-debug` output path, auto-builds via
+   `make quest-assemble-debug` when missing (the documented existing
+   target); a missing *custom* `--apk` path fails immediately with an
+   actionable error instead of attempting a build that provably cannot
+   produce that path (`quest-assemble-debug` always builds to the one
+   fixed default location).
+3. `verify-native-lib.sh` (never bypassed - overridable only via the
+   `BZ_QUEST_VERIFY_NATIVE_LIB` env var, exactly mirroring
+   `stage-wc3-data.sh`'s own `BZ_QUEST_ADB` fake-injection seam, so the
+   device-free test harness fakes the *tool*, never the *control flow*).
+4. `adb -s <SERIAL> install -r -- <apk>`.
+5. `stage-wc3-data.sh check-runtime --package <PKG> --serial <SERIAL>` -
+   package/debuggable/run-as validation (delegated).
+6. If `--data <DIR>` was given: `stage-wc3-data.sh stage`/`verify` (staging
+   + the authoritative ROC/TFT evidence report - see below).
+7. Resolve a timestamped artifact directory
+   (`build/quest-acceptance-artifacts/acceptance_<UTC-timestamp>_<SERIAL>/`
+   by default - already covered by the repo's top-level `build/` gitignore
+   rule, so no committed-artifact risk).
+8. Best-effort native-dependency/manifest report (`aapt2 dump badging`, if
+   available).
+9. Detect the OVR Metrics Tool service (`com.oculus.ovrmonitormetricsservice`
+   - see "OVR Metrics Tool automation" below); if present, enable CSV
+   recording for this run.
+10. Clear + start bounded background logcat capture (`<LOG_TAG>:V` AND
+    `*:W` - the app's own tag at full verbosity, plus warn-and-above from
+    *any* other tag/process, so a fatal error surfacing under the OpenXR
+    loader/runtime-broker/ART crash reporter's own tag is never missed).
+11. `stage-wc3-data.sh run` - launch (delegated).
+12. Interactive: the guided manual checklist (below); non-interactive:
+    sleep bounded by `--duration` (backgrounded + `wait`ed for, never a bare
+    foreground `sleep` - see "POSIX signal-handling correctness" below for
+    why this distinction is load-bearing, not stylistic).
+13. Disable OVR Metrics CSV recording; attempt to pull the newest report.
+14. Force-stop + stop background logcat capture.
+15. Evidence analysis (below) against the captured, bounded logcat.
+16. Write `metadata.json`/`commands.log`/`dependencies_report.txt`/
+    `data_verify.log`/`guided_checklist.md`/`analysis_report.md`, print a
+    pass/fail summary, exit 0/1 accordingly.
+
+A `cleanup()` trap runs on normal exit, an explicit `die()`, AND a caught
+`INT`/`TERM` signal (force-stop the app, kill+wait the background logcat
+capture, disable OVR Metrics CSV if this run enabled it) - see "POSIX
+signal-handling correctness" below for the two real, non-obvious shell bugs
+this trap design had to avoid.
+
+### POSIX signal-handling correctness (load-bearing, not stylistic)
+
+Three genuine POSIX shell footguns were found and fixed while building this
+script and its test harness - each is exactly the kind of thing that would
+silently make Ctrl+C/`kill` during a real acceptance run either hang, or
+report a false clean exit without ever force-stopping the app:
+
+1. **A bare foreground `sleep N` defers a pending trapped signal until `N`
+   seconds elapse on their own.** Per the bash manual's "SIGNALS" section:
+   a trap for a signal received while bash waits for a *foreground external
+   command* to complete is not run until that command finishes; `wait`,
+   however, *is* specifically documented to return immediately (with an
+   exit status greater than 128) the instant a trapped signal arrives, with
+   the trap executed immediately after. Fixed by backgrounding the bounded
+   sleep and `wait`-ing for it (`sleep "$duration" & wait "$sleep_pid"`)
+   instead of a bare `sleep "$duration"` - proven by timing a signaled run
+   before (blocked until a bounded watchdog's `kill -9`, well past the
+   signal) and after (trap fires and the process exits in ~2s) this fix.
+2. **`"$?"` inside a signal-triggered trap is reliable for exactly one
+   statement.** Any command that runs first - even the guard-check
+   `if [ "$cleanup_ran" -eq 1 ]` or a plain assignment - overwrites it
+   before it can be captured. Fixed by capturing `prev_status=$?` as the
+   function's literal first statement, before anything else, then using
+   that saved value (never a second live `$?` read) for the rest of the
+   handler. `INT`/`TERM` pass their own conventional 128+signum code
+   explicitly instead of relying on `$?` at all, since it does not reliably
+   reflect the interrupting signal either.
+3. **Calling `exit` from inside an `INT`/`TERM`-triggered trap invocation
+   also re-triggers the plain `EXIT` trap** (POSIX: `exit` always runs a
+   pending `EXIT` trap). A naive re-entrant second invocation re-deriving
+   `$?` would see only this function's *own* preceding `kill`/`printf`
+   calls, not the original signal - fixed with a `cleanup_ran`/
+   `cleanup_exit_code` guard that reuses the first captured code on any
+   re-entrant call instead of recomputing anything.
+
+All three were reproduced against the exact unmodified functions before
+being fixed (never guessed), and `scripts/test-acceptance-runner.sh`'s own
+`test_cleanup_on_signal` proves the fix holds (a real `kill`, not a
+simulated one, sent mid-session).
+
+### Evidence markers (exact source citations, never invented)
+
+Every marker `acceptance-runner.sh` checks is the literal text of a real
+`BZ_QUEST_LOGI`/`BZ_QUEST_LOGE` call site, traced by `grep`, never guessed:
+
+| Marker (regex) | Required? | Source |
+|---|---|---|
+| `xrInitializeLoaderKHR succeeded` | required | `bz_quest_xr.c` |
+| `xrCreateInstance succeeded` | required | `bz_quest_xr.c` |
+| `xrGetSystem succeeded` | required | `bz_quest_xr.c` |
+| `Vulkan API version bound` | required | `bz_quest_xr.c` |
+| `xrCreateSession succeeded` | required | `bz_quest_xr.c` |
+| `selected swapchain color format` | required | `bz_quest_xr.c` |
+| two `swapchain[N]: WxH` lines (stereo) | required | `bz_quest_xr.c` |
+| `passthrough object + reconstruction layer created` | required | `bz_quest_passthrough.c` |
+| `passthrough started` | required | `bz_quest_passthrough.c` |
+| `bz_quest_renderer_init succeeded` | required | `bz_quest_host.c` |
+| `APP_CMD_START` / `APP_CMD_RESUME` | required | `bz_quest_host.c` |
+| `xrBeginSession succeeded` | required | `bz_quest_xr.c` |
+| `bz_quest_audio_start succeeded` | required | `bz_quest_audio.c` |
+| `tabletop frame: status=... generation=...` (>=1 line) | required | `bz_quest_host.c` |
+| `bz_quest_host: destroy requested` | required | `bz_quest_host.c` |
+| `bz_quest_host: exiting android_main` | required | `bz_quest_host.c` |
+| `bz_quest_bridge_start succeeded` | required **only if `--data` staged** | `bz_quest_host.c` |
+| `bz_quest_bridge_start failed: ...` | required **only if no `--data`** | `bz_quest_host.c` |
+| `hand tracking enabled (...)` OR `XR_EXT_hand_tracking not supported...` | informational (optional capability) | `bz_quest_xr_hands.c` |
+| `resolved data dir ..., edition=roc\|tft` | informational, best-effort only (see below) | `bz_quest_bridge.c` |
+| `bz_quest_vk_wc3_particles:` error lines | informational (absence checked, never a positive marker) | `bz_quest_vk_wc3_particles.c` |
+| any `E`/`F`-priority logcat line (any tag), `FATAL EXCEPTION`, `backtrace:`, `SIGSEGV`, `SIGABRT`, `VUID-`, `validation layer` | **forbidden if present** (excluding the one documented `bz_quest_bridge_start failed` E-line above) | logcat structural + keyword scan |
+
+Two design points that are easy to get wrong (both were, in earlier
+drafts, before being corrected against real evidence):
+
+- **`bz_quest_bridge_start`'s two outcomes are mutually exclusive by
+  design, not "success required."** `bz_quest_bridge_start failed: ...` is
+  itself logged at `BZ_QUEST_LOGE` (Error priority) - a hard "any E-line is
+  forbidden" scan would therefore always self-contradict on a `--data`-less
+  run, where that exact line is the *correct, documented* outcome (see
+  "Hardware-only acceptance gates" A below). The forbidden-error scan
+  explicitly excludes this one known/already-separately-validated line.
+- **"Advancing snapshots" is proven by ONE stable log line, never by
+  comparing multiple generation values.** `bz_quest_frame_should_log()`
+  deliberately throttles this line to fire only on a
+  status/lifecycleState/lifecycleError *change* (see "Diagnostics:
+  throttled log, never per-frame" above), never on a bare generation
+  advance - by design, a healthy steady-state session produces exactly
+  ONE such line. Requiring multiple increasing generation values (an
+  earlier draft's mistake) would make every normal, healthy run fail. If a
+  guided suspend/resume checkpoint happens to trigger additional lines,
+  they are cross-checked as bonus corroboration, never required.
+- **The bridge's `edition=roc|tft` line is `fprintf(stderr, ...)`
+  (`bz_quest_bridge.c`), not `BZ_QUEST_LOGI`/`__android_log_print`.** Raw
+  native `stdio` is widely documented to NOT be redirected to logcat by
+  default on Android (unlike `<android/log.h>`, the API `BZ_QUEST_LOGI`/
+  `BZ_QUEST_LOGE` wrap, which is guaranteed to reach it) - this app installs
+  no stdout/stderr-to-logcat redirect. Whether this specific line is
+  actually visible in `adb logcat` on real Quest hardware was **not**
+  verified in this environment (no device available) - it is treated as
+  best-effort corroboration only, never a required marker. Authoritative
+  ROC/TFT evidence instead comes from `stage-wc3-data.sh verify`'s own
+  adb/run-as-based device file-presence report (see the matrix below),
+  which does not depend on this question at all.
+- **PRE2 particle rendering has no positive success log anywhere** (only
+  `BZ_QUEST_LOGE` failure paths in `bz_quest_vk_wc3_particles.c`), and this
+  environment never loads a map (`bz_quest_bridge_start()` always passes a
+  `NULL` map name - see "Current limitations"), so zero entities/particles
+  can exist to render regardless of hardware. PRE2 acceptance therefore
+  remains a hardware+real-map+human-visual-confirmation-only gate; this
+  script only checks for the *absence* of particle-renderer errors as weak
+  negative corroboration.
+
+### ROC/TFT staging matrix (authoritative evidence source)
+
+| `--data` given | Archives staged | `data_verify.log` shows | `data_layout` | Bridge marker required |
+|---|---|---|---|---|
+| no | none | n/a | `none` | `bz_quest_bridge_start failed: ...` |
+| yes, ROC-only dir | `War3.mpq` | `War3.mpq present (sha256 ...)` only | `roc` | `bz_quest_bridge_start succeeded` |
+| yes, TFT-over-ROC dir | `War3.mpq` + `War3x.mpq` + `War3xLocal.mpq` | all three `... present (sha256 ...)` lines | `tft` | `bz_quest_bridge_start succeeded` |
+
+`data_verify.log` is the captured stdout of `stage-wc3-data.sh verify`
+(adb/run-as-based, not logcat-based) - the same command
+`make quest-verify-wc3-data` runs standalone. `data_layout` is classified
+by grepping it for `War3x.mpq present`/`War3xLocal.mpq present`.
+
+### OVR Metrics Tool automation (researched, not invented)
+
+Fetched directly from Meta's own current documentation
+(<https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/>,
+`last_updated: "2026-06-21"` per the page's own front-matter, fetched
+2026-08-02) rather than guessed:
+
+- **OVR Metrics Tool is a separate app** that must be installed from the
+  Meta Horizon Store (<https://www.meta.com/experiences/ovr-metrics-tool/2372625889463779/>)
+  onto the headset *before* launching the app under test - installing it
+  while the target app is running force-closes that app (Meta's own
+  documented caveat). This is why `acceptance-runner.sh` treats it as an
+  **explicit prerequisite**, never something to silently skip or fake:
+  absent, it logs a clear "not installed" note, captures no metrics, and
+  does **not** fail the overall acceptance run (performance capture is a
+  separate concern from correctness acceptance).
+- **The automatable component is `com.oculus.ovrmonitormetricsservice`'s
+  `SettingsBroadcastReceiver`** - NOT `com.oculus.ovrmetricstool` (that is
+  the user-facing launcher app's own package name; ADB automation targets
+  the separate metrics *service* package). Exact commands this script uses:
+  ```sh
+  # Query current configuration as a JSON blob (printed to logcat) - "useful
+  # for automated tooling" per Meta's own docs; used best-effort only here.
+  adb shell am broadcast -n com.oculus.ovrmonitormetricsservice/.SettingsBroadcastReceiver \
+      -a com.oculus.ovrmonitormetricsservice.LOG_STATE
+
+  # Enable/disable CSV report recording for the duration of one run.
+  adb shell am broadcast -n com.oculus.ovrmonitormetricsservice/.SettingsBroadcastReceiver \
+      -a com.oculus.ovrmonitormetricsservice.ENABLE_CSV
+  adb shell am broadcast -n com.oculus.ovrmonitormetricsservice/.SettingsBroadcastReceiver \
+      -a com.oculus.ovrmonitormetricsservice.DISABLE_CSV
+  ```
+- **CSV reports land under
+  `/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics/`**
+  (Meta's own documented path) - `acceptance-runner.sh` lists that
+  directory (newest file) and `adb pull`s it into the run's artifact
+  directory as `ovr_metrics.csv`.
+- A **separate native SDK toolkit** exists
+  (`ovrMetricsTool_Initialize`/`_BeginSession`/`_EndSession`/
+  `_SubmitMetrics`, requiring linking a library and calling it around
+  `xrCreateInstance`/`xrBeginSession`/`xrEndSession`) for apps that want to
+  submit custom in-app metrics. This is a **runtime feature change** and
+  explicitly out of scope for this docs/validation-only layer - not
+  integrated here.
+- `ovrgpuprofiler` (a separate on-device shell tool Meta's docs mention for
+  extra GPU statistics) was not invoked or researched further - out of
+  scope for this layer's automation; see the linked
+  `ts-ovrgpuprofiler`/`ts-ovrstats` pages if deeper GPU profiling is ever
+  needed.
+
+### 72Hz performance target and interpreting captured metrics
+
+Neither `XR_FB_display_refresh_rate` nor fixed foveation
+(`XR_FB_foveation`) is used anywhere in this renderer (see "Vulkan render
+pass/pipeline/targets" above) - the runtime's own default/lowest supported
+refresh rate applies, which is **72Hz** on Quest 3/3S (a conservative,
+always-supported baseline distinct from the 80/90/120Hz modes an app can
+opt into via that extension). The practical target this layer's evidence
+review should hold every acceptance run to, until a future layer explicitly
+negotiates a higher rate: a sustained **72 FPS, i.e. a <=13.9ms per-eye
+frame budget**, with `average_frame_rate` (an OVR Metrics Tool CSV column -
+see the `<stat>` list linked above) not dropping meaningfully below 72
+during a session, and `stale_frame_count`/`screen_tear_count` staying near
+zero. None of this was measured against real hardware in this environment
+- the CSV column names and their meaning are documented and cited, not the
+actual numbers a real Quest 3/3S would report.
+
+### Guided manual checkpoints (unsynthesizable XR actions)
+
+No host can synthesize real controller/hand input, real focus loss, or
+real haptic feedback - `acceptance-runner.sh`'s interactive mode (the
+default; pass `--non-interactive` for unattended/CI-style runs) prompts a
+human wearing the headset through exactly the behaviors each prior layer's
+own "Exact on-device acceptance procedure" already documents in detail:
+
+1. Controller select/smart/target/cancel.
+2. Controller board control (pan/rotate/zoom/recenter).
+3. Controller HUD (reticle tint, command-card button press).
+4. Hand select/smart/target/cancel (index pinch).
+5. Hand board pan (if `XR_FB_hand_tracking_aim` is active) - and confirming
+   rotate/zoom/height do NOT respond to any hand gesture.
+6. Controller/hand source switch (both directions, no phantom command).
+7. Tracking loss/reacquisition.
+8. Focus/suspend/resume (Oculus button / headset removal).
+9. Recenter.
+10. Haptics and visual feedback (accepted vs refused action).
+
+Requires a real terminal (`[ -t 0 ]`): interactive mode with non-tty stdin
+fails loudly with an actionable message instead of ever fabricating a "y"
+answer, which would silently turn an unattended run into a fraudulent
+all-PASS checklist. Answers are written to `guided_checklist.md`; any
+`[FAIL]` line fails the overall run.
+
+### Artifact directory contents (deterministic, gitignored by default)
+
+`build/quest-acceptance-artifacts/acceptance_<UTC-timestamp>_<SERIAL>/`
+(the repo's top-level `build/` gitignore rule already covers this - never
+committed):
+
+| File | Contents |
+|---|---|
+| `metadata.json` | serial, package, apk path, data layout, interactive flag, duration, OVR Metrics availability/CSV path, overall pass/fail |
+| `commands.log` | every significant command this run executed, with UTC timestamps |
+| `logcat.log` | the full bounded, captured `<LOG_TAG>:V *:W` logcat window |
+| `dependencies_report.txt` | native-lib verification result + best-effort `aapt2 dump badging` output |
+| `data_verify.log` | `stage-wc3-data.sh verify`'s own output (only if `--data` was given) - the authoritative ROC/TFT evidence |
+| `guided_checklist.md` | one `[PASS]`/`[FAIL]` line per guided scenario, or a one-line note if `--non-interactive` |
+| `ovr_metrics.csv` | the pulled OVR Metrics Tool CSV report (only if the tool was detected) |
+| `analysis_report.md` | every evidence marker's OK/MISSING/INFO/FAIL classification plus the overall PASS/FAIL |
+
+No secrets, retail Warcraft III data, or host-private paths are ever
+written into a *committed* artifact - all of the above stays under the
+gitignored `build/` tree.
+
+### Exact hardware checklist
+
+Before running `make quest-acceptance BZ_QUEST_ACCEPTANCE_ARGS="--serial <SERIAL> [--data <DIR>]"`
+against a real device:
+
+- [ ] A Quest 3 or Quest 3S, USB (or Wi-Fi) debugging enabled and the
+      debugging prompt accepted for this host's adb key.
+- [ ] `adb devices` shows exactly the one intended serial (or you know it
+      and will pass `--serial` explicitly - required by this script).
+- [ ] `JAVA_HOME` points at a JDK 17 install, `ANDROID_HOME`/
+      `local.properties` at an SDK with NDK 27.2.12479018 (or update the
+      pin) and build-tools providing `aapt2`.
+- [ ] If staging data: your own local, user-owned Warcraft III ROC
+      (`War3.mpq`) or TFT-over-ROC (`War3.mpq`+`War3x.mpq`+
+      `War3xLocal.mpq`) directory - never the repo's own tree, never
+      committed anywhere.
+- [ ] If performance capture matters this run: OVR Metrics Tool already
+      installed from the Meta Horizon Store on the headset, installed
+      *before* the target app is running.
+- [ ] Headset worn and ready for the guided checklist (or pass
+      `--non-interactive` for an unattended, automated-evidence-only run).
+
+### Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| `--serial is required` | This runner never auto-selects a device (see "Module map and ownership" above) - pass `--serial` explicitly, e.g. from `adb devices`. |
+| `no attached device matches --serial '...'` / `... is offline` | Reconnect/replug the headset, accept the debugging prompt, or re-check `adb devices`. |
+| `APK not found at custom --apk path ...  cannot be auto-built here` | A custom `--apk` path can only be auto-built if it equals the documented default (`app/build/outputs/apk/debug/app-debug.apk`) - build it yourself first, or omit `--apk`. |
+| `native-lib/manifest verification failed` | Run `make quest-verify-native-lib` standalone for the full, unfiltered error (forbidden dependency, missing packaged loader, or a manifest/SDK regression - see `verify-native-lib.sh`). |
+| `package/debuggable/run-as validation failed` | Confirm `make quest-install-debug` succeeded and the installed build is the `assembleDebug` (not a release) variant - `stage-wc3-data.sh check-runtime` reports the exact reason. |
+| `failed to stage Warcraft III data` / `failed to verify staged Warcraft III data` | Re-run `make quest-stage-wc3-data BZ_QUEST_WC3_DATA=...`/`make quest-verify-wc3-data` standalone for the unfiltered `stage-wc3-data.sh` error (missing `War3.mpq`, incomplete TFT layout, insufficient device space, etc. - see "Layer 7" above). |
+| Overall `FAIL` with a `[MISSING]` required marker | Read `analysis_report.md`/`logcat.log` in the run's artifact directory for the exact absent line, then cross-check against "Evidence markers" above - a genuinely absent required marker means investigate the real device/app, not this script. |
+| Overall `FAIL` with `[FAIL] forbidden fatal/validation-layer error(s)` | Read the flagged line(s) in `logcat.log` directly - this is a real crash/validation-layer signal from the device, not a false positive by design (the one known-benign `bz_quest_bridge_start failed` E-line is explicitly excluded - see "Evidence markers" above). |
+| `hand tracking: capability negotiation line not observed` | Renderer init likely failed before reaching hand-tracking negotiation - check the required markers immediately above it in `analysis_report.md` first. |
+| OVR Metrics never captured despite the tool being installed | Confirm it was installed *before* launching the target app (installing it mid-run force-closes the app per Meta's own docs) and that `/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/files/CapturedMetrics/` is reachable via `adb shell ls` on this device/OS build. |
+| Interactive mode dies with "stdin is not a terminal" | Expected, deliberate behavior (see "Guided manual checkpoints" above) - pass `--non-interactive` for unattended/CI-style runs. |
+
+### Tests and build wiring
+
+- `make test-quest-acceptance-runner`
+  (`scripts/test-acceptance-runner.sh`) - 26 test cases against a fake
+  device: missing `--serial`, no device, unknown/offline `--serial`,
+  `--serial` routing across two devices, a missing custom `--apk` path,
+  native-lib verification failure, `adb install -r` failure, missing
+  package, non-debuggable package, launch failure, ROC-only staging +
+  evidence, TFT-over-ROC staging + evidence, the no-`--data` clean-failure
+  PASS case, the staged-but-still-failed FAIL case, a missing required
+  marker, a timed-out/hung session (no clean shutdown observed), a
+  forbidden fatal error under a different tag/process, OVR Metrics
+  unavailable (not fatal), OVR Metrics available (CSV captured), spaces in
+  `--data`/`--artifacts` paths, full artifact preservation, cleanup on a
+  failed run, cleanup on a real `SIGTERM` mid-session, and 3 stable
+  consecutive runs producing distinct artifact directories. Runs as part of
+  `make test` and `make quest` (device-free).
+- `scripts/stage-wc3-data.sh`'s `resolve-device`/`check-runtime`
+  subcommands are covered by 6 new cases in
+  `scripts/test-stage-wc3-data.sh` (26 total, up from 20).
+- `scripts/verify-native-lib.sh`'s new manifest/SDK/packaged-loader checks
+  were proven against the real `assembleDebug` output (not a fake): the
+  packaged-loader check was proven to fail when `libopenxr_loader.so` is
+  removed from a copy of the real APK, then reverted; the
+  `oculus.software.handtracking` `required=false` check was proven to fail
+  when the source manifest was temporarily changed to `required="true"`
+  and rebuilt, then reverted and rebuilt again to confirm a clean pass.
+- `scripts/test-quest-audio-rt-callback-safety.sh`'s anchored-extraction
+  and `clamp_i16` coverage fixes were proven against the real,
+  unmodified-then-reverted `bz_quest_audio.c`/`bz_quest_audio_mixer.c` -
+  see "What *was* verified this session (layer 10)" below for both
+  injection/revert proofs.
+
+### Supported vs. unsupported (this layer)
+
+| Supported | Not supported / out of scope |
+|---|---|
+| Device resolution, staging, launch, log tailing (delegated to `stage-wc3-data.sh`, never duplicated) | A repo-wide PR-stack registry (none existed before this layer; not created - see the PR-stack audit reported separately) |
+| Bounded, evidence-classified logcat capture with honest required-vs-informational markers | Any runtime/renderer/gameplay feature change (this layer touches zero lines under `app/src/main/cpp/`) |
+| Best-effort OVR Metrics Tool CSV capture, explicit prerequisite detection | The OVR Metrics native SDK toolkit (custom in-app metric submission) - would require linking new code, out of scope |
+| Guided manual checklist for unsynthesizable XR actions, tty-gated | Automating controller/hand input, focus loss, or haptics themselves - impossible without real hardware and a human |
+| A device-free mock test harness proving the real runner's own logic | Any hardware-only claim being reported as confirmed (see "Hardware-only acceptance gates" below) |
+
+### Acceptance gates
+
+**No physical Meta Quest device was available in this development
+environment.** Everything below requires real hardware and was **not**
+verified this session - do not report any of it as confirmed until checked
+against a real device:
+
+- Whether `acceptance-runner.sh` actually installs, launches, and captures
+  evidence correctly against a **real** `adb`, a **real** installed debug
+  APK, and a **real** Quest 3/3S OS build - only the fake-adb/fake-verify
+  harness (`test-acceptance-runner.sh`) was exercised this session; it
+  proves the script's own logic (quoting, delegation, evidence
+  classification, cleanup) but not real `adb`/Android behavior on-device.
+- Whether the `bz_quest_bridge_start`'s `edition=roc|tft` `fprintf(stderr)`
+  line is actually visible via `adb logcat` on a real Quest 3/3S OS build -
+  see "Evidence markers" above for why this is treated as best-effort-only
+  and never required.
+- Whether OVR Metrics Tool's exact broadcast actions/CSV path/JSON
+  `LOG_STATE` format documented above still match the *currently shipping*
+  Meta Horizon Store build the day you run this - Meta's own docs page is
+  versioned/updatable (`last_updated: "2026-06-21"` at the time this was
+  written); re-fetch and diff before trusting it for a release-quality
+  workflow.
+- Whether the 72Hz/13.9ms-per-eye performance target is actually met on
+  real Quest 3/3S hardware with a real map loaded - no device was
+  available to profile against; the target and the CSV column names to
+  read it from are documented, not measured.
+- Whether the guided manual checklist's 10 scenarios actually behave as
+  each prior layer's own procedure describes - this script only prompts
+  and records a human's own y/n answer; it cannot itself verify hand/
+  controller behavior.
+- Whether all 10 guided checkpoints, run back to back on a real headset,
+  reveal any interaction the isolated per-layer procedures did not
+  anticipate (e.g. a controller/hand handoff happening mid-guided-prompt).
 
 ## Manifest requirements
 
@@ -4487,11 +4993,16 @@ above for why runtime OpenXR negotiation replaces a compile-time gate here:
   environment — see "Hardware/data-only acceptance procedure" below for
   what was, and was not, exercised for audio this session.
 - Terrain (layer 5B), model animation (layer 5C), fog of war, per-entity
-  selection markers (layer 5D), and the status/command-card HUD (layer 5E)
-  are now all present; particles/effects and any renderable player
-  target-point/entity overlay are still out of scope — see the layer
-  sections above for the exact, deliberate boundaries and the evidence for
-  the "target mode has no location" no-op.
+  selection markers (layer 5D), the status/command-card HUD (layer 5E), and
+  Warcraft III particle-emitter (PRE2) rendering (layer 9) are now all
+  present; any renderable player target-point/entity overlay is still out
+  of scope — see the layer sections above for the exact, deliberate
+  boundaries and the evidence for the "target mode has no location" no-op.
+  `PREM`/`RIBB` MDX effect chunks have no parser anywhere in this codebase
+  and `EVTS` is parsed but consumed by nothing — see "Layer 9"'s
+  "Authoritative scope audit" above for the full trace; this is a deliberate
+  scope boundary (PRE2 is the only "effect" class the authoritative desktop
+  renderer itself actually parses+simulates+draws), not an oversight.
 - No lighting model at all (fully unlit shader) — see "Shader/pipeline"
   above for why this was a deliberate scope decision, not a bug.
 - `replaceable_id 0` (direct/non-team), `1` (team color), and `2` (team
@@ -4516,16 +5027,25 @@ above for why runtime OpenXR negotiation replaces a compile-time gate here:
   of the additive blend equation against a real-world background with no
   "black" to add onto, not a bug this project's alpha-coverage fix (PR #28)
   changes or could change without abandoning the additive look entirely.
-- The tabletop asset ABI **was** widened once, in layer 5C: `bzTTAsset_t`
-  went from v2 (layers 5A/5B's static geometry/materials + terrain) to v3
-  (node hierarchy/keyframe tracks/sequences/global sequences/geoset alpha),
-  after concrete evidence showed v2 exposed no animation data whatsoever —
-  see "ABI decision: extended in place (v2 → v3), not tunneled" above. No
-  further widening has occurred since (layer 7 made no ABI change at all —
-  `platform/bridge/bz_tabletop_audio.h` was consumed exactly as-is); camera-
-  facing billboarding and texture-coordinate/material-ID animation (TXAN/
-  KMTF) remain outside the ABI's exposed surface — see "Layer 5C"'s
+- The tabletop asset ABI was widened twice: in layer 5C, `bzTTAsset_t` went
+  from v2 (layers 5A/5B's static geometry/materials + terrain) to v3 (node
+  hierarchy/keyframe tracks/sequences/global sequences/geoset alpha), after
+  concrete evidence showed v2 exposed no animation data whatsoever — see
+  "ABI decision: extended in place (v2 → v3), not tunneled" above. In layer
+  9, it was extended again to v4 to expose PRE2 particle-emitter data
+  (`bzTTParticleEmitterInfo_t`/`bzTTEmitterChannel_t`) — see "Layer 9"'s
+  "Bridge asset ABI (v3 -> v4)" above. Layer 7 made no ABI change at all
+  (`platform/bridge/bz_tabletop_audio.h` was consumed exactly as-is); layer
+  10 makes no ABI change either (a docs/validation/scripts-only layer).
+  Camera-facing billboarding and texture-coordinate/material-ID animation
+  (TXAN/KMTF) remain outside the ABI's exposed surface — see "Layer 5C"'s
   "Supported vs. unsupported animated behavior" table above.
+- Layer 10 adds a physical-device acceptance runner, a device-free test
+  harness for it, and consolidated documentation — no new runtime/renderer/
+  gameplay feature, and no compile-time seam of its own (it touches zero
+  lines under `app/src/main/cpp/`). See
+  "[Layer 10: Physical-device acceptance automation](#layer-10-physical-device-acceptance-automation)"
+  above for its own full scope and hardware-only gaps.
 
 ### Hardware-only acceptance gates
 
@@ -5620,6 +6140,152 @@ map's stale GPU asset.
   reloading the SAME map does not re-upload already-resident assets
   (no unnecessary flush).
 
+### What *was* verified this session (layer 10)
+
+- Built `scripts/acceptance-runner.sh` and `scripts/test-acceptance-runner.sh`
+  from a prior session's partial/untracked draft: inspected the partial
+  `platform/android/quest/build.mk` diff and both untracked scripts first
+  (per this task's explicit instruction), kept the overall design (delegate
+  to `stage-wc3-data.sh`, bounded logcat capture, OVR Metrics automation,
+  guided checklist, evidence classification), and fixed every concrete
+  defect found by reading the real production source and by direct
+  experimentation rather than guessing:
+  - A `BZ_QUEST_TESTING` env-var bypass around native-lib verification (a
+    silent fallback forbidden by this repo's own conventions) - replaced
+    with the same `BZ_QUEST_ADB`-style fake-injection seam
+    (`BZ_QUEST_VERIFY_NATIVE_LIB`) `stage-wc3-data.sh` already established,
+    so the test harness fakes the *tool*, never the *control flow*.
+  - A `/dev/con` (a Windows-only device name, never valid on this project's
+    Unix targets) read in the guided-checklist prompt, with a
+    `response="y"` fallback on any read failure - a real, dangerous latent
+    bug that would have silently auto-PASSed every guided checkpoint the
+    instant stdin wasn't a real terminal. Replaced with an explicit
+    `[ -t 0 ]` gate that fails loudly instead.
+  - Invented OVR Metrics Tool package name/broadcast actions/CSV path
+    (`com.oculus.ovrmetricstool`, `START_LOGGING`/`STOP_LOGGING`,
+    `/sdcard/OVRMetricsTool/`) - none of which match Meta's actual current
+    documentation (see "OVR Metrics Tool automation" above for the
+    corrected, cited package/actions/path).
+  - An "advancing snapshots" check comparing multiple `tabletop frame:`
+    generation values against each other - provably impossible to satisfy
+    under this codebase's own deliberate log-throttling contract (see
+    "Diagnostics: throttled log, never per-frame"), which would have failed
+    every healthy run. Corrected to require exactly one such line plus the
+    session staying alive/responsive for its full bounded duration.
+  - A hand-tracking marker treated as unconditionally required - contradicts
+    layer 8's own documented "optional, never a startup failure" capability
+    contract; corrected to informational/never-failing.
+  - A hard-coded `bz_quest_bridge_start succeeded` requirement regardless of
+    whether `--data` was given - would always fail the documented,
+    correct, no-data clean-failure outcome (see "Hardware-only acceptance
+    gates" A). Corrected to be conditional on `data_staged`.
+  - A mock-fixture `tabletop frame: ... entities=5 selected=1` format that
+    does not match the real `entities=%u(+%u overflow) selected=%u` format
+    in `bz_quest_host.c` - corrected in the test fixture.
+  - Two genuine POSIX shell signal-handling bugs (bare foreground `sleep`
+    deferring trap execution; `$?` capture ordering inside a re-entrant
+    trap) - see "POSIX signal-handling correctness" above for the full
+    root-cause trace (each reproduced against the exact unmodified function
+    via a disposable, `sh -c`/async-background-job experiment before being
+    fixed, then proven fixed by an actual `kill`-delivered signal in
+    `test_cleanup_on_signal`, never guessed).
+  - Refactored duplicated device-resolution/package-validation logic in the
+    draft into two small, additive `stage-wc3-data.sh` subcommands
+    (`resolve-device`/`check-runtime`), each backed by the exact same
+    already-tested internal functions, adding 6 new
+    `test-stage-wc3-data.sh` cases (26 total, up from 20) and discovering +
+    fixing a latent bug in `require_device()` itself (it never actually
+    populated `$serial` in the auto-selected single-device case, only
+    computed a local `state`) while wiring `resolve-device`'s own auto-
+    select case.
+- Proved (never assumed) two false-pass gaps in
+  `test-quest-audio-rt-callback-safety.sh`, mirroring the exact category
+  `test-quest-hand-tracking-layout.sh`'s own earlier reviewer-flagged fix
+  addressed for a sibling file - each reproduced against the real,
+  unmodified-then-reverted source, fixed, re-proved caught, then reverted
+  again with `git diff --stat` confirming zero residual diff:
+  1. Unanchored `extract_fn()` (`$0 ~ fn"\\("`, a bare substring match): a
+     decoy comment mentioning `bz_quest_audio_data_callback(` inserted
+     ABOVE the real function, plus a genuine `malloc(1)` injected into the
+     real function's own body, was **not caught** by the unfixed test
+     (false PASS) - the buggy extractor grabbed the decoy's own body
+     instead. Fixed by anchoring to a real declaration line (column 0,
+     letter/underscore), matching `test-wc3-particles-layout.sh`'s/
+     `test-quest-hand-tracking-layout.sh`'s own established convention.
+     Re-proved: the fixed test correctly reports
+     `bz_quest_audio_data_callback calls forbidden 'malloc('`.
+  2. `clamp_i16()` (called from `bz_quest_audio_mixer_render()`'s own hot
+     inner loop, not just the outer entry point) was never scanned at all -
+     a `BZ_QUEST_LOGE()` injected into its body was **not caught** by the
+     unfixed test (false PASS). Fixed by scanning it alongside
+     `bz_quest_audio_mixer_render()` (`wav_sample()` correctly excluded -
+     its own header comment already documents it as control-thread-only).
+     Re-proved: the fixed test correctly reports
+     `clamp_i16 calls forbidden 'BZ_QUEST_LOGE'`.
+- Extended `scripts/verify-native-lib.sh` (never duplicated a second check
+  script) with a packaged-loader-file check, and manifest checks (OpenXR
+  loader AAR permission/`<queries>` merge, headtracking required,
+  hand-tracking optional, `com.oculus.supportedDevices`, `debuggable`,
+  min/target SDK) via `aapt2` (resolved with the same fallback shape as
+  `ANDROID_NDK_HOME`), backed by a real `aapt2 dump xmltree`/`dump badging`
+  run against the actual `assembleDebug` output (not guessed) to confirm
+  the exact attribute text to match, including the Khronos OpenXR loader
+  AAR's own automatic manifest merge (`org.khronos.openxr.permission.
+  OPENXR`/`OPENXR_SYSTEM`, an `org.khronos.openxr.runtime_broker` `<queries>`
+  provider) - a fact this session discovered from the real build output,
+  not from documentation, and recorded here for future reference. Proved
+  two of the new checks against real regressions: removing
+  `lib/arm64-v8a/libopenxr_loader.so` from a copy of the real APK, and
+  temporarily flipping the source manifest's `oculus.software.handtracking`
+  to `required="true"` (rebuilt, confirmed the check failed, reverted the
+  manifest, rebuilt again to confirm a clean pass).
+- Fixed genuinely stale/contradictory prose in "Current limitations"
+  found while consolidating this document: it still claimed
+  "particles/effects... are still out of scope" and "No further widening
+  has occurred since [layer 5C]" even though layer 9 (already on this
+  branch's history) implements PRE2 particle rendering and widened the
+  asset ABI to v4 - both corrected to reflect layer 9's actual, already-
+  merged state.
+- `make -f platform/android/quest/build.mk test-quest-acceptance-runner`
+  (equivalently `make test-quest-acceptance-runner` from the repo root) -
+  **26/26** test cases pass, run **3 consecutive times** with identical
+  results (stability requirement) producing 3 distinct timestamped
+  artifact directories.
+- `make test-quest-host-tests` - **5366/5366** (unchanged from the layer 9
+  follow-up baseline - this layer touches no file that binary compiles).
+  `make test-quest-source-sync`, `test-quest-wc3-descriptor-pool-headroom`,
+  `test-quest-wc3-bone-palette-layout`, `test-quest-wc3-fog-selection-layout`,
+  `test-quest-wc3-hud-layout`, `test-quest-wc3-pointer-layout`,
+  `test-quest-wc3-particles-layout`, `test-quest-hand-tracking-layout` -
+  all **OK**. `test-quest-audio-rt-callback-safety` - **OK** (fixed, per
+  above). `make test-quest-bridge` - **95/95** (unchanged). `make
+  test-quest-stage-wc3-data` - **26/26** (up from 20, +6 new
+  `resolve-device`/`check-runtime` cases).
+- **The real arm64 Gradle/CMake `assembleDebug` build succeeded** (Temurin
+  JDK 17, NDK 27.2.12479018, this host's local Android SDK), and
+  `make quest-verify-native-lib` (the full `quest-assemble-debug` +
+  extended `verify-native-lib.sh` chain) passed against the real APK,
+  including every new manifest/SDK/packaged-loader check. The full
+  `make quest` aggregate target (device-free) passed end to end.
+- `make run-sc2 ARGS="+com_frame_limit 100"` fails with `Failed to add
+  data directory: data/StarCraft2` - confirmed via `ls data/` that no
+  `data/` directory exists anywhere in this sandbox at all; a genuine,
+  pre-existing environment/data-only limitation unchanged from layer 9's
+  own session notes, not a regression, and zero StarCraft II files were
+  touched this session.
+- The full repo-root `make test` passes end-to-end (`EXIT_CODE=0`,
+  confirmed via a full log file grep for `assertions passed`/`OK`/`tests
+  passed` markers across every suite, not a truncated scrollback),
+  including every Quest structural guard above, the new
+  `test-acceptance-runner.sh: 26/26 tests passed` line, and every
+  pre-existing test suite in the rest of the repository unchanged.
+  `git diff --check` reports zero whitespace errors. No test was disabled,
+  skipped, or weakened anywhere in this session.
+- **Not verified this session (hardware/retail-data-only)**: no physical
+  Meta Quest device and no retail Warcraft III data were available in this
+  environment - see this layer's own "Acceptance gates" subsection above
+  for the exact, itemized hardware-only gaps this leaves.
+
 ## Related documents
 
 - [visionos-tabletop.md](visionos-tabletop.md) — the shared
@@ -5750,3 +6416,25 @@ map's stale GPU asset.
   independent of which API subsequently reads the hand data, and the
   pinch-bit-over-strength guidance reflects the same underlying Quest
   system-level pinch detector both APIs expose).
+- Meta's OVR Metrics Tool documentation (layer 10 - the automatable
+  `com.oculus.ovrmonitormetricsservice`/`SettingsBroadcastReceiver`
+  package/component name, `ENABLE_CSV`/`DISABLE_CSV`/`LOG_STATE` broadcast
+  actions, the `/sdcard/Android/data/com.oculus.ovrmonitormetricsservice/
+  files/CapturedMetrics/` CSV report path, the separate native SDK toolkit
+  this layer deliberately does NOT integrate, and the "install before
+  launching the target app" caveat):
+  <https://developers.meta.com/horizon/documentation/native/android/ts-ovrmetricstool/>
+  (fetched 2026-08-02, page front-matter `last_updated: "2026-06-21"` - the
+  page itself is versioned/updatable; re-fetch and diff before trusting it
+  for a release-quality workflow, per that page's own linked
+  `ts-ovrstats`/`ts-ovrgpuprofiler`/`ts-logcat` companion pages for anything
+  this layer did not need to go deeper on).
+- Meta's Logcat guidance (layer 10 - confirms `VrApi`/`XrPerformanceManager`
+  as real, existing broker/perf logcat tags this layer's forbidden-error
+  scan's `*:W` catch-all is designed to also observe, independent of this
+  app's own tag):
+  <https://developers.meta.com/horizon/documentation/native/android/ts-logcat/>
+- The bash manual's "SIGNALS" section (layer 10 - the documented
+  foreground-command-vs-`wait` trap-timing distinction
+  `acceptance-runner.sh`'s `sleep "$duration" & wait "$sleep_pid"` fix
+  above depends on): <https://www.gnu.org/software/bash/manual/bash.html#Signals>

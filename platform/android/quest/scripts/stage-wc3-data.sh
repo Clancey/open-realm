@@ -77,6 +77,8 @@ Usage:
   $tool_name clean --yes [--package PKG] [--serial SERIAL]
   $tool_name run [--package PKG] [--serial SERIAL]
   $tool_name log [--package PKG] [--serial SERIAL]
+  $tool_name resolve-device [--serial SERIAL]
+  $tool_name check-runtime [--package PKG] [--serial SERIAL]
 
 Stages a local Warcraft III ROC (War3.mpq) or TFT-over-ROC (War3.mpq +
 War3x.mpq + War3xLocal.mpq) install into the debuggable Quest app's private
@@ -89,6 +91,14 @@ into the built APK - see docs/quest-tabletop.md.
   --package PKG   Application ID to target (default: $DEFAULT_PACKAGE).
   --serial SERIAL adb device/emulator serial (default: the sole attached
                   device; required if more than one is attached).
+
+resolve-device prints the resolved target device serial (applying the same
+no-device/multiple-without-serial/unknown/offline rejection rules as every
+other subcommand above); check-runtime additionally validates the package is
+installed and debuggable (run-as capable) and prints its resolved data root.
+Both exist so scripts/acceptance-runner.sh can reuse this script's own
+device/package validation instead of duplicating it - see
+docs/quest-tabletop.md's acceptance-automation section.
 EOF
 }
 
@@ -158,6 +168,12 @@ require_device() {
             die "more than one adb device attached - pass --serial (attached: $(printf '%s' "$device_list" | awk '{print $1}' | tr '\n' ' '))"
         fi
         state=$(printf '%s\n' "$device_list" | awk '{print $2}')
+        # Records the auto-selected sole device back into $serial (was only
+        # used locally for the state check above until now) so callers -
+        # notably cmd_resolve_device() below - can rely on $serial always
+        # being populated with the exact device every subsequent adb_() call
+        # in this run targets, whether auto-selected or --serial-provided.
+        serial=$(printf '%s\n' "$device_list" | awk '{print $1}')
     fi
     case "$state" in
         device) ;;
@@ -457,6 +473,37 @@ cmd_log() {
     adb_ logcat -s "$LOG_TAG:V"
 }
 
+# Resolves and prints the single target device serial (auto-selected if
+# exactly one device is attached, otherwise requiring --serial), applying
+# the EXACT same no-device/multiple-without-serial/unknown/offline/
+# unauthorized rejection rules require_device() already enforces for
+# stage/verify/clean/run/log above. Exists so a caller like
+# scripts/acceptance-runner.sh can resolve+validate the target device
+# through this ONE already-tested implementation instead of duplicating
+# require_device()'s safety-critical logic a second time - see
+# docs/quest-tabletop.md's acceptance-automation section.
+cmd_resolve_device() {
+    require_device
+    printf '%s\n' "$serial"
+}
+
+# Validates that the target device is attached, the package is installed
+# and debuggable (run-as capable), and prints the resolved app-private data
+# root - the exact same three checks cmd_stage()/cmd_verify()/cmd_clean()
+# already run before touching any file, exposed standalone so a caller like
+# scripts/acceptance-runner.sh can validate "package/debuggable/run-as"
+# through this ONE already-tested implementation before installing/staging/
+# launching, instead of re-implementing pm path/run-as parsing a second
+# time - see docs/quest-tabletop.md's acceptance-automation section.
+cmd_check_runtime() {
+    require_device
+    require_package_installed
+    require_debuggable_run_as
+    resolve_pkg_root
+    printf 'serial=%s\n' "$serial"
+    printf 'pkg_root=%s\n' "$pkg_root"
+}
+
 # --- argument parsing --------------------------------------------------------
 
 [ $# -ge 1 ] || { usage; exit 2; }
@@ -492,5 +539,7 @@ case "$command" in
     clean) cmd_clean "$clean_confirm" ;;
     run) cmd_run ;;
     log) cmd_log ;;
+    resolve-device) cmd_resolve_device ;;
+    check-runtime) cmd_check_runtime ;;
     *) usage; exit 2 ;;
 esac

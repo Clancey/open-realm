@@ -33,13 +33,18 @@ fi
 
 # Extracts one function's body (from its "name(" line up to the line whose
 # sole content is the closing brace) via awk - good enough for this
-# project's one-brace-per-line C style, and exactly what the two functions
-# below look like.
+# project's one-brace-per-line C style. Anchored to a line that actually
+# STARTS the function definition (column 0, a letter/underscore - this
+# codebase's convention for every top-level declaration) rather than a bare
+# substring match, which would otherwise latch onto a header-comment prose
+# mention of the function name and silently extract the wrong (unrelated)
+# span - see docs/quest-tabletop.md's acceptance-automation section for the
+# exact false-pass this was proven to cause and the injection/revert proof.
 extract_fn() {
     file=$1
     name=$2
     awk -v fn="$name" '
-        $0 ~ fn"\\(" { found=1 }
+        $0 ~ "^[A-Za-z_][A-Za-z0-9_ *]*" fn "\\(" { found=1 }
         found { print }
         found && /^}/ { exit }
     ' "$file"
@@ -71,13 +76,24 @@ else
     check_forbidden "bz_quest_audio_data_callback" "$data_cb_body"
 fi
 
-render_body=$(extract_fn "$MIXER_C" "bz_quest_audio_mixer_render")
-if [ -z "$render_body" ]; then
-    echo "test-quest-audio-rt-callback-safety: could not find bz_quest_audio_mixer_render in $MIXER_C (renamed/removed?)" >&2
-    FAIL=1
-else
-    check_forbidden "bz_quest_audio_mixer_render" "$render_body"
-fi
+# bz_quest_audio_mixer_render() AND clamp_i16() - the one static per-sample
+# helper it calls every frame in its hot inner loop (wav_sample() is NOT
+# scanned here: its own header comment documents it as control-thread-only,
+# called only from bz_quest_audio_mixer_convert(), never from the RT render
+# path - see bz_quest_audio_mixer.c). Scanning only bz_quest_audio_mixer_render
+# itself would miss a forbidden call hidden inside clamp_i16 entirely -
+# exactly the gap test-quest-hand-tracking-layout.sh's own "(6) Frame-critical
+# RT-safety" check already guards against for its two per-tier helpers; this
+# script previously scanned bz_quest_audio_mixer_render() alone.
+for render_fn in bz_quest_audio_mixer_render clamp_i16; do
+    render_body=$(extract_fn "$MIXER_C" "$render_fn")
+    if [ -z "$render_body" ]; then
+        echo "test-quest-audio-rt-callback-safety: could not find $render_fn in $MIXER_C (renamed/removed?)" >&2
+        FAIL=1
+    else
+        check_forbidden "$render_fn" "$render_body"
+    fi
+done
 
 # The data callback must be the ONLY function this file registers with
 # AAudio as the data callback (i.e. AAudioStreamBuilder_setDataCallback is

@@ -638,6 +638,59 @@ test_offline_serial_rejected() {
 }
 
 # =============================================================================
+# test_resolve_device_prints_serial
+# =============================================================================
+# scripts/acceptance-runner.sh's device-free test harness relies on this
+# subcommand instead of duplicating require_device()'s own logic - prove it
+# actually prints the resolved serial in both the auto-selected (single
+# device) and explicit --serial cases.
+test_resolve_device_prints_serial() {
+    write_state 1 "$PKG" 1 10000000
+    out=$("$STAGE_TOOL" resolve-device 2>"$scratch/err") || fail "resolve-device should succeed with one attached device: $(cat "$scratch/err")"
+    [ "$out" = "FAKESERIAL" ] || fail "resolve-device should print the sole attached device's serial, got '$out'"
+    pass "resolve-device auto-selects and prints the sole attached device's serial"
+
+    write_devices_state "DEV1:device DEV2:device" "$PKG" 1 10000000
+    out=$("$STAGE_TOOL" resolve-device --serial DEV2 2>"$scratch/err") || fail "resolve-device --serial DEV2 should succeed: $(cat "$scratch/err")"
+    [ "$out" = "DEV2" ] || fail "resolve-device --serial DEV2 should print 'DEV2', got '$out'"
+    pass "resolve-device prints the explicitly-requested --serial device"
+
+    if "$STAGE_TOOL" resolve-device >"$scratch/out" 2>"$scratch/err"; then
+        fail "resolve-device with >1 attached device and no --serial should fail"
+    fi
+    grep -q -- "--serial" "$scratch/err" || fail "multi-device resolve-device error should mention --serial: $(cat "$scratch/err")"
+    pass "resolve-device rejects multiple attached devices without --serial"
+}
+
+# =============================================================================
+# test_check_runtime_validates_and_prints
+# =============================================================================
+# Exercises check-runtime's package-installed/debuggable/run-as validation
+# (the exact checks scripts/acceptance-runner.sh needs before install/stage/
+# launch) standalone, both success and its two failure modes.
+test_check_runtime_validates_and_prints() {
+    write_state 1 "$PKG" 1 10000000
+    out=$("$STAGE_TOOL" check-runtime --package "$PKG" 2>"$scratch/err") || fail "check-runtime should succeed for an installed, debuggable package: $(cat "$scratch/err")"
+    printf '%s\n' "$out" | grep -q "^serial=FAKESERIAL$" || fail "check-runtime should print the resolved serial, got: $out"
+    printf '%s\n' "$out" | grep -q "^pkg_root=" || fail "check-runtime should print the resolved pkg_root, got: $out"
+    pass "check-runtime validates an installed, debuggable package and prints serial+pkg_root"
+
+    write_state 1 "org.example.other" 1 10000000
+    if "$STAGE_TOOL" check-runtime --package "$PKG" >"$scratch/out" 2>"$scratch/err"; then
+        fail "check-runtime should fail for an uninstalled package"
+    fi
+    grep -q "is not installed" "$scratch/err" || fail "missing actionable wrong-package error: $(cat "$scratch/err")"
+    pass "check-runtime detects a package that is not installed"
+
+    write_state 1 "$PKG" 0 10000000
+    if "$STAGE_TOOL" check-runtime --package "$PKG" >"$scratch/out" 2>"$scratch/err"; then
+        fail "check-runtime should fail for a non-debuggable package"
+    fi
+    grep -q "debuggable" "$scratch/err" || fail "missing actionable non-debuggable error: $(cat "$scratch/err")"
+    pass "check-runtime detects a non-debuggable package (run-as unavailable)"
+}
+
+# =============================================================================
 # test_safe_cleanup
 # =============================================================================
 test_safe_cleanup() {
@@ -679,6 +732,8 @@ test_multiple_devices_without_serial_rejected
 test_serial_routes_to_correct_device
 test_unknown_serial_rejected
 test_offline_serial_rejected
+test_resolve_device_prints_serial
+test_check_runtime_validates_and_prints
 test_safe_cleanup
 
 printf '%s: %d/%d tests passed\n' "$tool_name" "$tests_run" "$tests_run"

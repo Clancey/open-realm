@@ -197,7 +197,14 @@ $(eval $(call test_schema,test-quest-bridge,test-assets $(SHARED_LIB) $(SHEET_LI
 test-quest-stage-wc3-data:
 	@$(BZ_QUEST_DIR)/scripts/test-stage-wc3-data.sh
 
-test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-wc3-particles-layout test-quest-wc3-premultiplied-blend-layout test-quest-wc3-map-epoch-cache-reset-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-host-tests test-quest-bridge test-quest-stage-wc3-data
+# Fake-adb mock test harness (no hardware required) for the automated
+# physical-device acceptance runner script - see
+# platform/android/quest/scripts/test-acceptance-runner.sh.
+.PHONY: test-quest-acceptance-runner
+test-quest-acceptance-runner:
+	@$(BZ_QUEST_DIR)/scripts/test-acceptance-runner.sh
+
+test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-wc3-particles-layout test-quest-wc3-premultiplied-blend-layout test-quest-wc3-map-epoch-cache-reset-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-host-tests test-quest-bridge test-quest-stage-wc3-data test-quest-acceptance-runner
 
 # Assembles the unsigned arm64-v8a debug APK via the project's own Gradle
 # wrapper. Requires an installed Android SDK/NDK (see docs/quest-tabletop.md)
@@ -206,9 +213,13 @@ test: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-
 quest-assemble-debug:
 	@cd $(BZ_QUEST_DIR) && ./gradlew assembleDebug
 
-# Verifies the assembled APK's native library: arm64-v8a only, no forbidden
-# (SDL2/desktop-GL/Apple-ObjC/VrApi) shared-library dependency or symbol, no
-# desktop main(), and the NativeActivity entry points are present. See
+# Verifies the assembled APK's native library and manifest: arm64-v8a only,
+# the Khronos OpenXR loader .so actually packaged (not just DT_NEEDED-
+# referenced) and its manifest merge (OPENXR permissions/runtime_broker
+# queries) intact, no forbidden (SDL2/desktop-GL/Apple-ObjC/VrApi) shared-
+# library dependency or symbol, no desktop main(), NativeActivity entry
+# points present, headtracking/optional-hand-tracking/supportedDevices/
+# debuggable/min-max-SDK manifest contract intact. See
 # platform/android/quest/scripts/verify-native-lib.sh.
 .PHONY: quest-verify-native-lib
 quest-verify-native-lib: quest-assemble-debug
@@ -259,8 +270,15 @@ quest-run:
 quest-log:
 	@$(BZ_QUEST_DIR)/scripts/stage-wc3-data.sh log
 
+# Runs the automated and guided physical-device acceptance runner.
+# Supports passing arguments via BZ_QUEST_ACCEPTANCE_ARGS, e.g.:
+#   make quest-acceptance BZ_QUEST_ACCEPTANCE_ARGS="--serial DEV1 --data /path/to/wc3"
+.PHONY: quest-acceptance
+quest-acceptance:
+	@$(BZ_QUEST_DIR)/scripts/acceptance-runner.sh $(BZ_QUEST_ACCEPTANCE_ARGS)
+
 # Convenience target bundling the checks that do not require physical Quest
 # hardware: source-list sync plus a full Gradle/CMake build and native
 # library verification.
 .PHONY: quest
-quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-wc3-particles-layout test-quest-wc3-premultiplied-blend-layout test-quest-wc3-map-epoch-cache-reset-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-stage-wc3-data quest-verify-native-lib
+quest: test-quest-source-sync test-quest-wc3-descriptor-pool-headroom test-quest-wc3-bone-palette-layout test-quest-wc3-fog-selection-layout test-quest-wc3-hud-layout test-quest-wc3-pointer-layout test-quest-wc3-particles-layout test-quest-wc3-premultiplied-blend-layout test-quest-wc3-map-epoch-cache-reset-layout test-quest-hand-tracking-layout test-quest-audio-rt-callback-safety test-quest-stage-wc3-data test-quest-acceptance-runner quest-verify-native-lib
