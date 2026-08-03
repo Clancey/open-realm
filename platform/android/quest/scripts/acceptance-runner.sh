@@ -174,6 +174,7 @@ esac
 # --- state used by the cleanup trap ------------------------------------------
 
 bg_logcat_pid=""
+sleep_pid=""
 app_launched=0
 ovr_metrics_csv_enabled=0
 cleanup_ran=0
@@ -212,6 +213,26 @@ cleanup() {
         cleanup_exit_code=$prev_status
     fi
     set +e
+    # The non-interactive branch's bounded `sleep "$duration" &` (below)
+    # is backgrounded specifically so a signal reaches this trap promptly
+    # instead of being deferred until the sleep elapses on its own (see
+    # "POSIX signal-handling correctness" above) - but that same
+    # backgrounding means a signal arriving while blocked in
+    # `wait "$sleep_pid"` interrupts THIS script without ever touching the
+    # child sleep process itself, which would otherwise be orphaned to
+    # keep running for up to the remainder of --duration after this
+    # script has already exited. Killed here by its EXACT tracked PID
+    # (never a broad/name-based `pkill sleep`, which could signal an
+    # unrelated sleep on the same host) and reaped via `wait`, mirroring
+    # bg_logcat_pid's own handling immediately below. A no-op (both the
+    # `if` and the `kill`/`wait` are safe) once the wait has already
+    # completed normally and cleared sleep_pid - see the non-interactive
+    # branch below.
+    if [ -n "$sleep_pid" ]; then
+        kill "$sleep_pid" >/dev/null 2>&1
+        wait "$sleep_pid" 2>/dev/null
+        sleep_pid=""
+    fi
     if [ -n "$bg_logcat_pid" ]; then
         kill "$bg_logcat_pid" >/dev/null 2>&1
         wait "$bg_logcat_pid" 2>/dev/null
@@ -487,10 +508,21 @@ else
     # deferred until that sleep finishes on its own (see the bash manual's
     # "SIGNALS" section), which would silently turn Ctrl+C/`kill` into a
     # multi-second-late no-op instead of the prompt cleanup this script's
-    # whole design promises.
+    # whole design promises. sleep_pid is deliberately the SAME global
+    # cleanup() reads (see "state used by the cleanup trap" above) - a
+    # signal arriving while blocked in the wait below must find sleep_pid
+    # already set so cleanup() can kill+reap that exact child instead of
+    # orphaning it to keep running for up to the rest of --duration after
+    # this script has already exited (see cleanup()'s own comment).
     sleep "$duration" &
     sleep_pid=$!
     wait "$sleep_pid" 2>/dev/null || true
+    # Wait returned normally (duration elapsed - the common case) rather
+    # than via a signal breaking into cleanup() above: clear sleep_pid so
+    # a LATER signal (e.g. during OVR Metrics teardown or force-stop
+    # below) never re-kills this already-reaped PID, which the OS could
+    # theoretically have since reused for an unrelated process.
+    sleep_pid=""
 fi
 
 # --- 14. OVR Metrics: disable CSV + attempt to pull the newest report -------

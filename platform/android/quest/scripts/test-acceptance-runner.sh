@@ -837,6 +837,67 @@ test_cleanup_on_signal() {
     pass "a SIGTERM mid-session still force-stops the app via the cleanup trap"
 }
 
+test_cleanup_on_signal_reaps_child_sleep_no_broad_kill() {
+    write_state "DEV1:device" "$PKG" 1 0
+    write_no_data_logcat
+    # A decoy sleep process, deliberately UNRELATED to the runner under
+    # test (a different process entirely, never a child of it) - proves
+    # cleanup() kills its own tracked sleep_pid by EXACT PID only, never a
+    # broad/name-based kill (e.g. `pkill sleep`) that would also take an
+    # unrelated sleep down.
+    sleep 100 &
+    decoy_pid=$!
+    "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --duration 30 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" --non-interactive \
+        >"$scratch/sig2_out" 2>"$scratch/sig2_err" &
+    runner_pid=$!
+    # Discover the runner's OWN backgrounded sleep child (a direct child
+    # of the runner's own /bin/sh process, per its "sleep \"\$duration\" &"
+    # - see acceptance-runner.sh) BEFORE signaling it, bounded to a few
+    # short attempts rather than a fixed guess, so we can confirm
+    # afterward that it (and only it) was reaped.
+    runner_sleep_pid=""
+    attempt=0
+    while [ "$attempt" -lt 10 ]; do
+        runner_sleep_pid=$(pgrep -P "$runner_pid" sleep 2>/dev/null | head -n1)
+        [ -n "$runner_sleep_pid" ] && break
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    if [ -z "$runner_sleep_pid" ]; then
+        kill "$runner_pid" 2>/dev/null || true
+        kill "$decoy_pid" 2>/dev/null || true
+        fail "could not discover the runner's own backgrounded sleep child within the bounded retry - test setup problem, not the fix under test"
+    fi
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    (sleep 15; kill -9 "$runner_pid" 2>/dev/null || true) &
+    watchdog_pid=$!
+    set +e
+    wait "$runner_pid" 2>/dev/null
+    signal_exit=$?
+    set -e
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    [ "$signal_exit" -ne 0 ] || fail "a SIGTERM-interrupted run should not report a clean zero exit"
+    # Give the OS a brief moment to actually reap the killed child before
+    # checking - kill() returning does not guarantee the process table
+    # entry is gone yet.
+    sleep 0.2
+    if kill -0 "$runner_sleep_pid" 2>/dev/null; then
+        kill "$runner_sleep_pid" 2>/dev/null || true
+        kill "$decoy_pid" 2>/dev/null || true
+        fail "the runner's own backgrounded sleep (pid $runner_sleep_pid) was orphaned instead of being killed+reaped by cleanup() - it would otherwise keep running for up to the rest of --duration after this script already exited"
+    fi
+    # The UNRELATED decoy sleep must be completely unaffected - proves no
+    # broad/name-based kill (pkill sleep or similar) was used anywhere in
+    # cleanup(); only the exact tracked sleep_pid is ever touched.
+    if ! kill -0 "$decoy_pid" 2>/dev/null; then
+        fail "an unrelated decoy sleep process was killed too - cleanup() must only ever kill its own exact tracked PID, never a broad/name-based kill"
+    fi
+    kill "$decoy_pid" 2>/dev/null || true
+    wait "$decoy_pid" 2>/dev/null || true
+    pass "a SIGTERM mid-sleep reaps the runner's own backgrounded sleep child by exact PID, leaving an unrelated sleep process untouched"
+}
+
 test_repeated_runs_are_stable() {
     write_state "DEV1:device" "$PKG" 1 1
     write_no_data_logcat
@@ -884,6 +945,7 @@ test_artifacts_root_with_spaces_is_preserved
 test_artifact_preservation
 test_cleanup_on_failure_still_force_stops
 test_cleanup_on_signal
+test_cleanup_on_signal_reaps_child_sleep_no_broad_kill
 test_repeated_runs_are_stable
 
 printf '%s: %d/%d tests passed\n' "$tool_name" "$tests_run" "$tests_run"

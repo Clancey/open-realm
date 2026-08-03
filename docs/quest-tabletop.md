@@ -4606,10 +4606,11 @@ this trap design had to avoid.
 
 ### POSIX signal-handling correctness (load-bearing, not stylistic)
 
-Three genuine POSIX shell footguns were found and fixed while building this
+Four genuine POSIX shell footguns were found and fixed while building this
 script and its test harness - each is exactly the kind of thing that would
-silently make Ctrl+C/`kill` during a real acceptance run either hang, or
-report a false clean exit without ever force-stopping the app:
+silently make Ctrl+C/`kill` during a real acceptance run either hang,
+report a false clean exit without ever force-stopping the app, or leak a
+child process past this script's own lifetime:
 
 1. **A bare foreground `sleep N` defers a pending trapped signal until `N`
    seconds elapse on their own.** Per the bash manual's "SIGNALS" section:
@@ -4638,11 +4639,31 @@ report a false clean exit without ever force-stopping the app:
    calls, not the original signal - fixed with a `cleanup_ran`/
    `cleanup_exit_code` guard that reuses the first captured code on any
    re-entrant call instead of recomputing anything.
+4. **Backgrounding `sleep` (fix 1 above) shields the SCRIPT from a
+   deferred trap, but does nothing on its own for the backgrounded
+   `sleep` CHILD itself.** A signal arriving while blocked in
+   `wait "$sleep_pid"` interrupts this script and runs `cleanup()`
+   promptly (fix 1's whole point) - but an earlier draft's `cleanup()`
+   only ever tracked/killed `bg_logcat_pid`, never `sleep_pid`, so the
+   backgrounded sleep child was silently orphaned to keep running (under
+   whatever process now reaps it - typically `init`/launchd, not this
+   script) for up to the rest of `--duration` after this script had
+   already exited. Fixed by adding `sleep_pid` to the same
+   cleanup-trap-visible state `bg_logcat_pid` already used, and killing +
+   reaping it by its EXACT tracked PID (never a broad/name-based `pkill
+   sleep`, which could signal an unrelated `sleep` process on the same
+   host) - mirroring `bg_logcat_pid`'s own handling exactly. Cleared to
+   `""` once the non-interactive branch's own `wait` returns normally, so
+   a later signal never re-kills an already-reaped PID the OS could have
+   since reused for an unrelated process.
 
-All three were reproduced against the exact unmodified functions before
+All four were reproduced against the exact unmodified functions before
 being fixed (never guessed), and `scripts/test-acceptance-runner.sh`'s own
-`test_cleanup_on_signal` proves the fix holds (a real `kill`, not a
-simulated one, sent mid-session).
+`test_cleanup_on_signal`/`test_cleanup_on_signal_reaps_child_sleep_no_
+broad_kill` prove the fixes hold (a real `kill`, not a simulated one, sent
+mid-session) - the latter additionally starts an unrelated decoy `sleep`
+process alongside the run under test and confirms it survives untouched,
+proving no broad/name-based kill is used anywhere in `cleanup()`.
 
 ### Evidence markers (exact source citations, never invented)
 
@@ -5010,7 +5031,7 @@ against a real device:
 ### Tests and build wiring
 
 - `make test-quest-acceptance-runner`
-  (`scripts/test-acceptance-runner.sh`) - 31 test cases against a fake
+  (`scripts/test-acceptance-runner.sh`) - 32 test cases against a fake
   device: missing `--serial`, no device, unknown/offline `--serial`,
   `--serial` routing across two devices, a missing custom `--apk` path,
   native-lib verification failure, `adb install -r` failure, missing
@@ -5027,7 +5048,10 @@ against a real device:
   via tag-only fallback when the PID could not be resolved, OVR Metrics
   unavailable (not fatal), OVR Metrics available (CSV captured), spaces in
   `--data`/`--artifacts` paths, full artifact preservation, cleanup on a
-  failed run, cleanup on a real `SIGTERM` mid-session, and 3 stable
+  failed run, cleanup on a real `SIGTERM` mid-session (both force-stopping
+  the app AND reaping its own backgrounded `sleep` child by exact PID
+  while an unrelated decoy `sleep` process survives untouched - see "POSIX
+  signal-handling correctness" above), and 3 stable
   consecutive runs producing distinct artifact directories. Uses two
   separate, real (not stitched-together) lifecycle fixtures -
   `write_no_data_logcat`/`write_staged_active_logcat` - matching exactly
@@ -6598,6 +6622,58 @@ passed against the real APK. `make run-sc2 +com_frame_limit 100` still
 fails only on the pre-existing missing `data/StarCraft2` gate (unchanged,
 not a regression). The full repo-root `make test` passes end-to-end
 (`EXIT_CODE=0`). `git diff --check` reports zero whitespace errors.
+
+### What *was* verified this session (orphaned sleep-child cleanup fix, independent code review)
+
+An independent code review of the layer-10 acceptance runner - separate
+from, and following, the final rubber-duck review above - re-confirmed
+the three defects already fixed above (teardown markers, no-data Gate A
+lifecycle, PID/tag-scoped scan) as sound, and found one additional **Low**
+cleanup issue in the same code area: the non-interactive branch's
+bounded `sleep "$duration" &`/`wait "$sleep_pid"` (item 1 in "POSIX
+signal-handling correctness" above) correctly lets a signal interrupt
+THIS script promptly, but `cleanup()` only ever tracked/killed
+`bg_logcat_pid` - never `sleep_pid` - so a targeted `SIGTERM`/`SIGINT`
+could orphan the backgrounded `sleep` child to keep running for up to the
+rest of `--duration` after this script had already exited.
+
+Fixed by adding `sleep_pid` to the same cleanup-trap-visible state
+`bg_logcat_pid` already used, killing + reaping it by its EXACT tracked
+PID (never a broad/name-based `pkill sleep`) - mirroring `bg_logcat_pid`'s
+own handling precisely - and clearing it to `""` once the non-interactive
+branch's own `wait` returns normally, so a later signal never re-kills an
+already-reaped PID. See "POSIX signal-handling correctness" above (now
+covering four fixes, not three) for the full writeup.
+
+Added `test_cleanup_on_signal_reaps_child_sleep_no_broad_kill`
+(`test-acceptance-runner.sh`, now **32** total, up from 31): starts an
+unrelated decoy `sleep` process alongside a real `--duration 30`
+non-interactive run, discovers the runner's own backgrounded `sleep`
+child via `pgrep -P <runner_pid> sleep` (a bounded, short retry - never a
+fixed guess), sends a real `SIGTERM` mid-sleep, and confirms both that the
+runner's own sleep child is gone (killed + reaped, not orphaned) and that
+the unrelated decoy survives completely untouched - proving no
+broad/name-based kill is used anywhere in `cleanup()`.
+
+**Proven against the exact regression, not merely written and trusted**:
+temporarily reverted `cleanup()`'s new `sleep_pid` handling back to its
+pre-fix shape (tracking only `bg_logcat_pid`, exactly as it was before
+this round), confirmed the new test failed with the precise, expected
+message ("the runner's own backgrounded sleep ... was orphaned instead of
+being killed+reaped by cleanup()"), then restored the fix and confirmed a
+clean pass again. `test-acceptance-runner.sh` **32/32**, run **3
+consecutive times** with identical results.
+
+`make -f platform/android/quest/build.mk test-quest-host-tests` -
+**5440/5440** (unaffected; no `.c`/`.h` file touched). Every Quest
+structural guard, `test-quest-bridge` (**95/95**), and
+`test-quest-stage-wc3-data` (**26/26**) - unaffected. The real arm64
+Gradle/CMake `assembleDebug` build - `BUILD SUCCESSFUL`, and `make
+quest-verify-native-lib` passed against the real APK. `make run-sc2
++com_frame_limit 100` still fails only on the pre-existing missing
+`data/StarCraft2` gate (unchanged, not a regression). The full repo-root
+`make test` passes end-to-end (`EXIT_CODE=0`). `git diff --check` reports
+zero whitespace errors.
 
 ## Related documents
 
