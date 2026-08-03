@@ -83,6 +83,16 @@ OVR_METRICS_CSV_DIR="/sdcard/Android/data/$OVR_METRICS_PKG/files/CapturedMetrics
 ADB=${BZ_QUEST_ADB:-adb}
 VERIFY_NATIVE_LIB_SH=${BZ_QUEST_VERIFY_NATIVE_LIB:-"$SCRIPT_DIR/verify-native-lib.sh"}
 
+# Bounded retry for resolving the launched app's own PID (see "PID/tag-scoped
+# forbidden-error scan" below) - the process may take a moment to appear
+# after `am start` returns, and in the no-data path it can also legitimately
+# self-exit within a second or two (see bz_quest_host.c's bridge-terminal
+# check), so this poll must give up cleanly rather than hang. Overridable
+# only for scripts/test-acceptance-runner.sh's fake device (near-instant
+# fake `pidof`), never in normal developer use - mirrors BZ_QUEST_ADB above.
+PID_POLL_ATTEMPTS=5
+PID_POLL_SLEEP=${BZ_QUEST_PID_POLL_SLEEP:-1}
+
 serial=""
 package="$DEFAULT_PACKAGE"
 apk_path="${BZ_QUEST_APK:-$DEFAULT_APK_PATH}"
@@ -352,10 +362,16 @@ log_command "logcat -c"
 # above, from ANY tag/process - loader/runtime broker, Vulkan validation,
 # ART crash reporter, etc.) so a fatal error surfacing under a different
 # process/tag is never missed - see "Also watch for OpenXR loader/runtime
-# broker errors under its own tags" in docs/quest-tabletop.md.
-adb_ logcat "$LOG_TAG:V" "*:W" > "$logcat_file" 2>&1 &
+# broker errors under its own tags" in docs/quest-tabletop.md. This raw,
+# unfiltered, full-device capture is ALWAYS preserved verbatim in
+# logcat.log for manual diagnosis; only the pass/fail CLASSIFICATION below
+# is scoped to this launch (see "PID/tag-scoped forbidden-error scan") -
+# the two are deliberately different concerns. `-v threadtime` is required
+# (not the device's unspecified default format) so every line carries a
+# parseable PID column to scope that classification against.
+adb_ logcat -v threadtime "$LOG_TAG:V" "*:W" > "$logcat_file" 2>&1 &
 bg_logcat_pid=$!
-log_command "logcat $LOG_TAG:V *:W > $logcat_file (background, pid $bg_logcat_pid)"
+log_command "logcat -v threadtime $LOG_TAG:V *:W > $logcat_file (background, pid $bg_logcat_pid)"
 
 # --- 11. OVR Metrics: query current state + enable CSV recording ------------
 
@@ -374,6 +390,35 @@ printf '%s: launching %s/%s on %s...\n' "$tool_name" "$package" "$DEFAULT_ACTIVI
 log_command "run --package $package --serial $serial"
 "$STAGE_SCRIPT" run --package "$package" --serial "$serial" || die "failed to launch $package/$DEFAULT_ACTIVITY"
 app_launched=1
+
+# --- 12b. resolve the launched app's own PID (best-effort, bounded) ---------
+#
+# Needed to scope the forbidden-error scan below to lines this launch is
+# actually responsible for (see "PID/tag-scoped forbidden-error scan" in
+# docs/quest-tabletop.md) rather than every unrelated Quest HAL/vendor
+# service also logging at warn-or-above under the system-wide `*:W` filter.
+# `pidof` can legitimately return nothing here: the process may not have
+# been scheduled yet (bounded retry below), or - in the documented no-data
+# path - it may have already self-exited within a second or two of launch
+# (bz_quest_host.c's bridge-terminal check breaks its own event loop and
+# tears down gracefully before this script's own --duration wait even
+# starts - see docs/quest-tabletop.md's corrected "Hardware-only acceptance
+# gates" A). Either way this is a soft, best-effort lookup: an empty
+# app_pid falls back to tag-only scoping below, it never fails the run.
+app_pid=""
+attempt=0
+while [ "$attempt" -lt "$PID_POLL_ATTEMPTS" ]; do
+    app_pid=$(adb_shell "pidof $(sh_quote "$package")" 2>/dev/null | tr -d '\r\n' | awk '{print $1}')
+    [ -n "$app_pid" ] && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$PID_POLL_ATTEMPTS" ] && sleep "$PID_POLL_SLEEP"
+done
+log_command "pidof $package -> ${app_pid:-<not found - app may have already self-exited>}"
+if [ -n "$app_pid" ]; then
+    printf '%s: launched app PID: %s\n' "$tool_name" "$app_pid"
+else
+    printf '%s: WARNING: could not resolve the launched app PID for %s (already exited, or not yet scheduled) - forbidden-error scan falls back to tag-only scoping\n' "$tool_name" "$package"
+fi
 
 # --- 13. guided checklist (interactive) or bounded automated wait -----------
 
@@ -536,12 +581,8 @@ require_marker 'passthrough object [+] reconstruction layer created' "XR_FB_pass
 require_marker 'passthrough started' "XR_FB_passthrough started"
 require_marker 'bz_quest_renderer_init succeeded' "Vulkan/OpenXR/scene renderer initialization (host+assets/renderer)"
 require_marker 'APP_CMD_START' "Android lifecycle: APP_CMD_START"
-require_marker 'APP_CMD_RESUME' "Android lifecycle: APP_CMD_RESUME"
-require_marker 'xrBeginSession succeeded' "OpenXR session begin (progressing toward FOCUSED)"
 require_marker 'bz_quest_audio_start succeeded' "AAudio stream startup"
 require_marker 'tabletop frame: status=[0-9]+ generation=[0-9]+' "Tabletop snapshot capture (advancing generation - see note below)"
-require_marker 'bz_quest_host: destroy requested' "Clean teardown requested"
-require_marker 'bz_quest_host: exiting android_main' "Clean host exit"
 
 # bz_quest_frame_should_log() deliberately throttles this line to fire only
 # on a status/lifecycleState/lifecycleError CHANGE, never on a bare
@@ -557,17 +598,59 @@ if [ "$frame_count" -gt 1 ]; then
     note_line OK "multiple tabletop-frame log lines observed ($frame_count) - a lifecycle/status change occurred (e.g. a guided suspend/resume checkpoint); this is bonus corroborating evidence, not required"
 fi
 
-# bz_quest_bridge_start() has exactly two valid, mutually-exclusive
-# outcomes depending on whether --data was staged - see docs/
-# quest-tabletop.md's "Hardware-only acceptance gates" (A) vs "Hardware/
-# data-only acceptance procedure" (C). Checking for "succeeded" unconditionally
-# would be WRONG (and always fail) on a --data-less hardware-only run, where
-# a clean, documented failure is the CORRECT outcome.
+# bz_quest_bridge_start() has exactly two valid, mutually-exclusive outcomes
+# depending on whether --data was staged - see docs/quest-tabletop.md's
+# corrected "Hardware-only acceptance gates" A vs "Hardware/data-only
+# acceptance procedure" C. Checking for "succeeded" unconditionally would be
+# WRONG (and always fail) on a --data-less hardware-only run, where a clean,
+# documented failure is the CORRECT outcome.
+#
+# Everything below is ALSO mode-aware, and for the SAME underlying reason,
+# proven directly against bz_quest_host.c's real control flow (not
+# assumed): its main loop checks bz_quest_bridge_is_terminal() every
+# iteration, immediately after processing whichever Android command
+# ALooper_pollOnce() just delivered. A --data-less bridge_start() failure
+# leaves bridge->lc NULL, which bz_quest_bridge_state() reports as
+# BZ_QUEST_BRIDGE_FAILED - a terminal state - so the loop breaks on the
+# SAME iteration that processed APP_CMD_START, strictly BEFORE a later
+# ALooper_pollOnce() call could ever deliver the separate, later
+# APP_CMD_RESUME event. Requiring APP_CMD_RESUME/xrBeginSession
+# unconditionally would therefore make the no-data path - a deliberate,
+# correct outcome this script must accept - always fail.
+#
+# Conversely, this script always ends a HEALTHY (--data staged) session by
+# calling `am force-stop` externally (step 15 below) once --duration
+# elapses or the guided checklist completes - an immediate process kill,
+# not a signal bz_quest_host.c's own event loop ever observes as
+# app->destroyRequested - so its graceful in-process teardown
+# ("bz_quest_host: destroy requested"/"exiting android_main") never runs
+# for a healthy run, and requiring those two lines unconditionally would
+# make every healthy run always fail instead. No existing production
+# mechanism triggers a graceful remote shutdown of this bare
+# (android:hasCode="false", zero custom Java/receivers/exported intents -
+# see AndroidManifest.xml) NativeActivity, so this script reclassifies
+# those two lines as informational rather than inventing one (see
+# docs/quest-tabletop.md's "PID/tag-scoped forbidden-error scan" section).
+#
+# The no-data path's OWN graceful exit is, in exchange, exactly as
+# deterministic as a healthy run's force-stop - proven by the same control
+# flow above - so its host-exit evidence (the bridge reaching a terminal
+# state, then the same shared teardown sequence) IS required there.
 if [ "$data_staged" -eq 1 ]; then
     require_marker 'bz_quest_bridge_start succeeded' "Tabletop bridge startup (data staged: expects success)"
+    require_marker 'APP_CMD_RESUME' "Android lifecycle: APP_CMD_RESUME"
+    require_marker 'xrBeginSession succeeded' "OpenXR session begin (progressing toward FOCUSED)"
+    note_marker 'bz_quest_host: destroy requested' "Clean in-process teardown requested (not expected on a healthy run - this script ends it via an external force-stop, not a graceful in-process exit - see note above)"
+    note_marker 'bz_quest_host: exiting android_main' "Clean host exit (not expected on a healthy run - see note above)"
 else
     require_marker 'bz_quest_bridge_start failed' "Tabletop bridge startup (no --data given: expects the documented clean failure, not a crash)"
+    require_marker 'tabletop bridge reached a terminal state' "Bridge-terminal detection (the same loop iteration that processed APP_CMD_START breaks here - see note above)"
+    require_marker 'bz_quest_host: destroy requested' "Clean in-process teardown requested (expected: the bridge-terminal break above triggers this deterministically, seconds into the run)"
+    require_marker 'bz_quest_host: exiting android_main' "Clean host exit (expected - see note above)"
+    note_marker 'APP_CMD_RESUME' "Android lifecycle: APP_CMD_RESUME (not expected here - the loop already broke before this could fire - see note above; bonus evidence only if somehow observed)"
+    note_marker 'xrBeginSession succeeded' "OpenXR session begin (not expected here - see note above; bonus evidence only if somehow observed)"
 fi
+
 
 # Hand tracking is an optional, runtime-negotiated capability (layer 8) -
 # bz_quest_xr_hands_create() always logs exactly one of these two lines,
@@ -638,30 +721,51 @@ else
     note_line INFO "map-epoch GPU cache reset: not independently observable via logcat (no success marker exists; no map is ever loaded in this layer) - no cache-reset errors observed either"
 fi
 
-# Forbidden fatal/validation errors: structural (any E/F-priority logcat
-# line, any tag/process - threadtime format's "<level> <tag>:" shape,
-# independent of preceding date/pid/tid field widths) PLUS a keyword net
-# for well-known crash signatures that might not always surface at E/F
-# priority under every OEM logging configuration. Excludes the ONE
-# documented, expected E-priority app line this script already validates
-# explicitly above via require_marker('bz_quest_bridge_start failed') on a
-# --data-less run (see "Hardware-only acceptance gates" A in
-# docs/quest-tabletop.md) - BZ_QUEST_LOGE is Error priority by definition,
-# so that single, correctly-classified-elsewhere line must not also trip
-# this generic forbidden-error net.
+# PID/tag-scoped forbidden-error scan: the full logcat.log above always
+# preserves EVERY *:W-or-above line from the whole device for manual
+# diagnosis (never filtered), but classifying pass/fail from that
+# unfiltered, system-wide firehose would false-fail on unrelated Quest
+# HAL/vendor-service warnings that have nothing to do with this launch.
+# Classification below is scoped instead to lines attributable to this
+# launch: the app's own resolved PID (see "12b" above), UNION one of the
+# tags independently verified as this launch's own (this app's own
+# LOG_TAG; the OpenXR/VrApi loader-broker tags, which run in a genuinely
+# separate process but are directly attributable to this launch's own XR
+# session per this doc's pre-existing "watch under its own tags" note -
+# see docs/quest-tabletop.md). If the PID could not be resolved (already
+# exited, or never scheduled - see "12b" above), this degrades gracefully
+# to tag-only scoping rather than failing the run outright - this is
+# expected in the no-data path (whose own evidence is already fully
+# covered by the mode-aware required markers above regardless).
+#
+# Excludes the ONE documented, expected E-priority app line this script
+# already validates explicitly above via require_marker('bz_quest_bridge_
+# start failed') on a --data-less run (see "Hardware-only acceptance
+# gates" A in docs/quest-tabletop.md) - BZ_QUEST_LOGE is Error priority by
+# definition, so that single, correctly-classified-elsewhere line must
+# not also trip this net.
 #
 # The premultiplied-alpha/coverage-alpha fix (PR #28) adds no logging
 # surface whatsoever (a pure GPU blend-state/shader-math correctness
 # change) and is guided-checklist-only (see "Coverage-alpha correctness"
 # above) - there is nothing for this scan, or any other automated check,
 # to observe for that fix.
-forbidden_structural=$(grep -E ' (E|F) [A-Za-z_][A-Za-z0-9_.]*:' "$logcat_file" | grep -v 'bz_quest_bridge_start failed' || true)
-forbidden_keywords=$(grep -Ei 'FATAL EXCEPTION|backtrace:|SIGSEGV|SIGABRT|VUID-|validation layer' "$logcat_file" || true)
+pid_lines=""
+if [ -n "$app_pid" ]; then
+    pid_lines=$(grep -E "^[0-9-]+ +[0-9:.]+ +${app_pid} +[0-9]+ " "$logcat_file" || true)
+fi
+tag_lines=$(grep -E " (${LOG_TAG}|OpenXR|VrApi): " "$logcat_file" || true)
+relevant_lines="$pid_lines
+$tag_lines"
+forbidden_structural=$(printf '%s\n' "$relevant_lines" | grep -E ' (E|F) [A-Za-z_][A-Za-z0-9_.]*:' | grep -v 'bz_quest_bridge_start failed' || true)
+forbidden_keywords=$(printf '%s\n' "$relevant_lines" | grep -Ei 'FATAL EXCEPTION|backtrace:|SIGSEGV|SIGABRT|VUID-|validation layer' || true)
 if [ -n "$forbidden_structural" ] || [ -n "$forbidden_keywords" ]; then
-    note_line FAIL "forbidden fatal/validation-layer error(s) present in logcat - see $logcat_file"
+    note_line FAIL "forbidden fatal/validation-layer error(s) attributable to this launch (PID ${app_pid:-<unresolved - tag-only scoping>}, tags $LOG_TAG/OpenXR/VrApi) - see $logcat_file"
     overall_pass=0
+elif [ -z "$app_pid" ]; then
+    note_line OK "no forbidden fatal/Vulkan/OpenXR validation errors attributable to this launch observed (PID unresolved - fell back to $LOG_TAG/OpenXR/VrApi tag-only scoping, see above)"
 else
-    note_line OK "no forbidden fatal/Vulkan/OpenXR validation errors observed"
+    note_line OK "no forbidden fatal/Vulkan/OpenXR validation errors attributable to this launch observed (scoped to PID $app_pid + $LOG_TAG/OpenXR/VrApi tags)"
 fi
 
 note_line "$([ "$ovr_metrics_available" -eq 1 ] && echo OK || echo INFO)" "$ovr_metrics_note"
@@ -682,6 +786,7 @@ cat > "$artifact_dir/metadata.json" <<EOF
   "device_serial": "$serial",
   "package_id": "$package",
   "apk_path": "$apk_path",
+  "app_pid": "$app_pid",
   "data_dir_given": $([ -n "$data_dir" ] && echo true || echo false),
   "data_layout": "$data_layout",
   "interactive": $([ "$interactive" -eq 1 ] && echo true || echo false),

@@ -58,14 +58,19 @@ MOCK_APK="$scratch/app-debug.apk"
 # --- fake device state -------------------------------------------------------
 
 # Arguments: devices installed_package debuggable has_ovr_metrics
-# install_fail launch_fail verify_fail
+# install_fail launch_fail verify_fail app_pid
 # devices is a space-separated "serial:state" list, e.g. "DEV1:device" or
 # "DEV1:device DEV2:offline" - mirrors test-stage-wc3-data.sh's own
 # write_devices_state() so --serial routing/rejection is genuinely
-# observable, not silently accepted.
+# observable, not silently accepted. app_pid defaults to a stable fake PID
+# (the app is "running" and resolvable) since that is the common case for
+# every existing scenario; pass "" explicitly to simulate the app already
+# having exited (or never having been scheduled) before this script's own
+# bounded pidof poll - see the fake pidof shim below and
+# acceptance-runner.sh's "12b" PID-resolution step.
 write_state() {
     devices=$1 installed_package=$2 debuggable=$3 has_ovr_metrics=$4
-    install_fail=${5:-0} launch_fail=${6:-0} verify_fail=${7:-0}
+    install_fail=${5:-0} launch_fail=${6:-0} verify_fail=${7:-0} app_pid=${8-9001}
     cat > "$STATE_FILE" <<EOF
 DEVICES="$devices"
 INSTALLED_PACKAGE=$installed_package
@@ -74,6 +79,7 @@ HAS_OVR_METRICS=$has_ovr_metrics
 INSTALL_FAIL=$install_fail
 LAUNCH_FAIL=$launch_fail
 VERIFY_FAIL=$verify_fail
+APP_PID=$app_pid
 EOF
     # scripts/verify-native-lib.sh's fake stand-in is invoked directly by
     # acceptance-runner.sh (a SIBLING of the fake adb process tree, never a
@@ -135,6 +141,22 @@ fi
 exit 1
 SHIM
 
+# Fake pidof - mirrors real pidof's contract: prints the PID and exits 0
+# if found, prints nothing and exits nonzero otherwise. APP_PID="" (see
+# write_state's own header comment) simulates the app having already
+# self-exited, or never having been scheduled, before
+# acceptance-runner.sh's own bounded poll gives up - proving that path
+# degrades gracefully instead of hanging/failing outright.
+cat > "$FAKE_BIN/pidof" <<'SHIM'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = "${INSTALLED_PACKAGE:-}" ] && [ -n "${APP_PID:-}" ]; then
+    echo "$APP_PID"
+    exit 0
+fi
+exit 1
+SHIM
+
 cat > "$FAKE_BIN/df" <<'SHIM'
 #!/bin/sh
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
@@ -151,7 +173,7 @@ cat > "$FAKE_BIN/cp" <<'SHIM'
 exec /bin/cp "$@"
 SHIM
 
-chmod +x "$FAKE_BIN"/run-as "$FAKE_BIN"/pm "$FAKE_BIN"/df "$FAKE_BIN"/sha256sum "$FAKE_BIN"/cp
+chmod +x "$FAKE_BIN"/run-as "$FAKE_BIN"/pm "$FAKE_BIN"/pidof "$FAKE_BIN"/df "$FAKE_BIN"/sha256sum "$FAKE_BIN"/cp
 
 # --- fake am (am start / am force-stop / am broadcast) -----------------------
 
@@ -196,7 +218,7 @@ cat > "$FAKE_BIN/adb" <<SHIM
 #!/bin/sh
 set -eu
 . "$STATE_FILE"
-export INSTALLED_PACKAGE DEBUGGABLE HAS_OVR_METRICS INSTALL_FAIL LAUNCH_FAIL VERIFY_FAIL
+export INSTALLED_PACKAGE DEBUGGABLE HAS_OVR_METRICS INSTALL_FAIL LAUNCH_FAIL VERIFY_FAIL APP_PID
 DEVICES=\${DEVICES:-}
 
 serial_arg=""
@@ -298,6 +320,12 @@ chmod +x "$FAKE_BIN/adb"
 export BZ_QUEST_ADB="$FAKE_BIN/adb"
 export BZ_QUEST_STAGE_REMOTE_TMP="$DEVICE_ROOT/remote_tmp"
 export BZ_QUEST_VERIFY_NATIVE_LIB="$FAKE_BIN/verify-native-lib.sh"
+# Bounded pidof-poll sleep (see acceptance-runner.sh's "12b" step) - the
+# real 1s-per-attempt default would add up to 5s to every test that
+# exercises a PID-resolution-exhausted (APP_PID="") scenario; the fake
+# device resolves instantly either way, so this only shortens the
+# deliberately-empty-PID test cases, never changes what they prove.
+export BZ_QUEST_PID_POLL_SLEEP=0
 mkdir -p "$BZ_QUEST_STAGE_REMOTE_TMP"
 
 # --- WC3 data fixtures (reused verbatim from test-stage-wc3-data.sh's own
@@ -322,42 +350,85 @@ make_tft_fixture() {
 
 MOCK_LOGCAT="$scratch/mock_logcat.log"
 
-write_full_logcat() {
-    # $1 = "succeeded" or "failed" (bridge start outcome)
-    bridge_line=""
-    if [ "$1" = "succeeded" ]; then
-        bridge_line="08-02 12:00:00.180 1000 1000 I OpenRealmQuest: bz_quest_bridge_start succeeded (data dir '/data/user/0/$PKG/files/Warcraft III')
-08-02 12:00:00.181 1000 1000 W OpenRealmQuest: bz_quest_bridge_start: resolved data dir '/data/user/0/$PKG/files/Warcraft III', edition=${2:-roc}"
-    else
-        bridge_line="08-02 12:00:00.180 1000 1000 E OpenRealmQuest: bz_quest_bridge_start failed: Failed to add data directory: /data/user/0/$PKG/files/Warcraft III - see docs/quest-tabletop.md's data-path contract; continuing to pump the Android event loop with no engine running."
-    fi
+write_no_data_logcat() {
+    # The REAL no-data early-exit lifecycle (bz_quest_host.c, traced not
+    # invented): bz_quest_ensure_bridge_start()'s failure leaves bridge->lc
+    # NULL, so bz_quest_bridge_state() reports BZ_QUEST_BRIDGE_FAILED - a
+    # terminal state - which android_main()'s loop checks immediately after
+    # processing whichever command ALooper_pollOnce() just delivered. Since
+    # this all happens on the SAME iteration that processed APP_CMD_START,
+    # the loop breaks into the shared graceful teardown path BEFORE a later
+    # ALooper_pollOnce() call could ever deliver the separate APP_CMD_RESUME
+    # event - so this fixture, unlike the old single "failed" branch of the
+    # removed write_full_logcat(), correctly has NO APP_CMD_RESUME/
+    # XrEventDataSessionStateChanged/xrBeginSession lines at all, and DOES
+    # have the graceful "destroy requested"/"exiting android_main" lines
+    # (see acceptance-runner.sh's mode-aware markers and
+    # docs/quest-tabletop.md's corrected "Hardware-only acceptance gates" A).
     cat > "$MOCK_LOGCAT" <<EOF
-08-02 12:00:00.001 1000 1000 I OpenRealmQuest: bz_quest_host: starting (layer 4: tabletop lifecycle/snapshot bridge)
-08-02 12:00:00.010 1000 1000 I OpenRealmQuest: APP_CMD_START
-08-02 12:00:00.020 1000 1000 I OpenRealmQuest: xrInitializeLoaderKHR succeeded
-08-02 12:00:00.030 1000 1000 I OpenRealmQuest: xrCreateInstance succeeded: runtime=Mock version=1.0.0
-08-02 12:00:00.040 1000 1000 I OpenRealmQuest: xrGetSystem succeeded: systemName=Mock vendorId=0 passthroughCapabilities=0x1 handTrackingSupported=1 handTrackingAimSupported=0
-08-02 12:00:00.050 1000 1000 I OpenRealmQuest: Vulkan API version bound: min=1.0 max=1.3
-08-02 12:00:00.060 1000 1000 I OpenRealmQuest: xrCreateSession succeeded
-08-02 12:00:00.070 1000 1000 I OpenRealmQuest: selected swapchain color format: 43
-08-02 12:00:00.080 1000 1000 I OpenRealmQuest: swapchain[0]: 1832x1920, 3 images
-08-02 12:00:00.090 1000 1000 I OpenRealmQuest: swapchain[1]: 1832x1920, 3 images
-08-02 12:00:00.100 1000 1000 I OpenRealmQuest: passthrough object + reconstruction layer created
-08-02 12:00:00.110 1000 1000 I OpenRealmQuest: passthrough started
-08-02 12:00:00.120 1000 1000 I OpenRealmQuest: bz_quest_renderer_init succeeded
-$bridge_line
-08-02 12:00:00.190 1000 1000 I OpenRealmQuest: APP_CMD_RESUME
-08-02 12:00:00.200 1000 1000 I OpenRealmQuest: XrEventDataSessionStateChanged: state=3
-08-02 12:00:00.210 1000 1000 I OpenRealmQuest: xrBeginSession succeeded
-08-02 12:00:00.220 1000 1000 I OpenRealmQuest: XrEventDataSessionStateChanged: state=4
-08-02 12:00:00.230 1000 1000 I OpenRealmQuest: bz_quest_audio_start succeeded (nativeSampleRate=48000)
-08-02 12:00:00.240 1000 1000 I OpenRealmQuest: hand tracking enabled (XR_EXT_hand_tracking only)
-08-02 12:00:00.300 1000 1000 I OpenRealmQuest: tabletop frame: status=1 generation=3 lifecycleState=2 lifecycleError=- mapLoaded=0 entities=0(+0 overflow) selected=0
-08-02 12:00:15.000 1000 1000 I OpenRealmQuest: bz_quest_host: destroy requested, tearing down audio, bridge, and renderer
-08-02 12:00:15.100 1000 1000 I OpenRealmQuest: bz_quest_audio_stop complete
-08-02 12:00:15.200 1000 1000 I OpenRealmQuest: bz_quest_host: exiting android_main
+08-02 12:00:00.001 9001 9001 I OpenRealmQuest: bz_quest_host: starting (layer 4: tabletop lifecycle/snapshot bridge)
+08-02 12:00:00.010 9001 9001 I OpenRealmQuest: APP_CMD_START
+08-02 12:00:00.020 9001 9001 I OpenRealmQuest: xrInitializeLoaderKHR succeeded
+08-02 12:00:00.030 9001 9001 I OpenRealmQuest: xrCreateInstance succeeded: runtime=Mock version=1.0.0
+08-02 12:00:00.040 9001 9001 I OpenRealmQuest: xrGetSystem succeeded: systemName=Mock vendorId=0 passthroughCapabilities=0x1 handTrackingSupported=1 handTrackingAimSupported=0
+08-02 12:00:00.050 9001 9001 I OpenRealmQuest: Vulkan API version bound: min=1.0 max=1.3
+08-02 12:00:00.060 9001 9001 I OpenRealmQuest: xrCreateSession succeeded
+08-02 12:00:00.070 9001 9001 I OpenRealmQuest: selected swapchain color format: 43
+08-02 12:00:00.080 9001 9001 I OpenRealmQuest: swapchain[0]: 1832x1920, 3 images
+08-02 12:00:00.090 9001 9001 I OpenRealmQuest: swapchain[1]: 1832x1920, 3 images
+08-02 12:00:00.100 9001 9001 I OpenRealmQuest: passthrough object + reconstruction layer created
+08-02 12:00:00.110 9001 9001 I OpenRealmQuest: passthrough started
+08-02 12:00:00.115 9001 9001 I OpenRealmQuest: hand tracking enabled (XR_EXT_hand_tracking only)
+08-02 12:00:00.120 9001 9001 I OpenRealmQuest: bz_quest_renderer_init succeeded
+08-02 12:00:00.130 9001 9001 E OpenRealmQuest: bz_quest_bridge_start failed: Failed to add data directory: /data/user/0/$PKG/files/Warcraft III - see docs/quest-tabletop.md's data-path contract; continuing to pump the Android event loop with no engine running.
+08-02 12:00:00.140 9001 9001 I OpenRealmQuest: bz_quest_audio_start succeeded (nativeSampleRate=48000)
+08-02 12:00:00.150 9001 9001 I OpenRealmQuest: tabletop frame: status=1 generation=1 lifecycleState=0 lifecycleError=- mapLoaded=0 entities=0(+0 overflow) selected=0
+08-02 12:00:00.160 9001 9001 I OpenRealmQuest: tabletop bridge reached a terminal state (2) - requesting host exit
+08-02 12:00:00.170 9001 9001 I OpenRealmQuest: bz_quest_host: destroy requested, tearing down audio, bridge, and renderer
+08-02 12:00:00.180 9001 9001 I OpenRealmQuest: bz_quest_audio_stop complete
+08-02 12:00:00.190 9001 9001 I OpenRealmQuest: bz_quest_host: exiting android_main
 EOF
 }
+
+write_staged_active_logcat() {
+    # $1 = roc|tft (edition, best-effort fprintf(stderr) line only)
+    #
+    # The REAL healthy staged-data lifecycle, ended the way
+    # acceptance-runner.sh itself ALWAYS ends a healthy session: an
+    # external `am force-stop` (step 15) once --duration elapses, which
+    # kills the process outright - bz_quest_host.c's own event loop never
+    # observes app->destroyRequested, so its graceful in-process teardown
+    # ("destroy requested"/"exiting android_main") never runs. This
+    # fixture therefore deliberately has NO teardown lines at all - unlike
+    # the old combined write_full_logcat()'s "succeeded" branch, which
+    # impossibly stitched them onto a run this script itself never lets
+    # reach that path (see acceptance-runner.sh's mode-aware markers).
+    cat > "$MOCK_LOGCAT" <<EOF
+08-02 12:00:00.001 9001 9001 I OpenRealmQuest: bz_quest_host: starting (layer 4: tabletop lifecycle/snapshot bridge)
+08-02 12:00:00.010 9001 9001 I OpenRealmQuest: APP_CMD_START
+08-02 12:00:00.020 9001 9001 I OpenRealmQuest: xrInitializeLoaderKHR succeeded
+08-02 12:00:00.030 9001 9001 I OpenRealmQuest: xrCreateInstance succeeded: runtime=Mock version=1.0.0
+08-02 12:00:00.040 9001 9001 I OpenRealmQuest: xrGetSystem succeeded: systemName=Mock vendorId=0 passthroughCapabilities=0x1 handTrackingSupported=1 handTrackingAimSupported=0
+08-02 12:00:00.050 9001 9001 I OpenRealmQuest: Vulkan API version bound: min=1.0 max=1.3
+08-02 12:00:00.060 9001 9001 I OpenRealmQuest: xrCreateSession succeeded
+08-02 12:00:00.070 9001 9001 I OpenRealmQuest: selected swapchain color format: 43
+08-02 12:00:00.080 9001 9001 I OpenRealmQuest: swapchain[0]: 1832x1920, 3 images
+08-02 12:00:00.090 9001 9001 I OpenRealmQuest: swapchain[1]: 1832x1920, 3 images
+08-02 12:00:00.100 9001 9001 I OpenRealmQuest: passthrough object + reconstruction layer created
+08-02 12:00:00.110 9001 9001 I OpenRealmQuest: passthrough started
+08-02 12:00:00.115 9001 9001 I OpenRealmQuest: hand tracking enabled (XR_EXT_hand_tracking only)
+08-02 12:00:00.120 9001 9001 I OpenRealmQuest: bz_quest_renderer_init succeeded
+08-02 12:00:00.130 9001 9001 I OpenRealmQuest: bz_quest_bridge_start succeeded (data dir '/data/user/0/$PKG/files/Warcraft III')
+08-02 12:00:00.135 9001 9001 W OpenRealmQuest: bz_quest_bridge_start: resolved data dir '/data/user/0/$PKG/files/Warcraft III', edition=${1:-roc}
+08-02 12:00:00.140 9001 9001 I OpenRealmQuest: bz_quest_audio_start succeeded (nativeSampleRate=48000)
+08-02 12:00:00.190 9001 9001 I OpenRealmQuest: APP_CMD_RESUME
+08-02 12:00:00.200 9001 9001 I OpenRealmQuest: XrEventDataSessionStateChanged: state=3
+08-02 12:00:00.210 9001 9001 I OpenRealmQuest: xrBeginSession succeeded
+08-02 12:00:00.220 9001 9001 I OpenRealmQuest: XrEventDataSessionStateChanged: state=4
+08-02 12:00:00.300 9001 9001 I OpenRealmQuest: tabletop frame: status=1 generation=3 lifecycleState=2 lifecycleError=- mapLoaded=0 entities=0(+0 overflow) selected=0
+EOF
+}
+
 
 # --- test cases ---------------------------------------------------------------
 
@@ -403,7 +474,7 @@ test_offline_serial_rejected() {
 
 test_serial_routes_to_correct_device() {
     write_state "DEV1:device DEV2:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     if ! "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
         >"$scratch/out" 2>"$scratch/err"; then
         fail "run against a valid --serial DEV1 should succeed: $(cat "$scratch/err")"
@@ -466,7 +537,7 @@ test_non_debuggable_rejected() {
 
 test_launch_failure() {
     write_state "DEV1:device" "$PKG" 1 0 0 1
-    write_full_logcat failed
+    write_no_data_logcat
     if "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
         >"$scratch/out" 2>"$scratch/err"; then
         fail "runner should fail when the app launch (am start) fails"
@@ -477,7 +548,7 @@ test_launch_failure() {
 
 test_roc_only_staging_and_evidence() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat succeeded roc
+    write_staged_active_logcat roc
     src="$scratch/roc-src"
     make_roc_fixture "$src"
     out=$("$RUNNER_TOOL" --serial DEV1 --package "$PKG" --data "$src" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" 2>"$scratch/err") ||
@@ -491,7 +562,7 @@ test_roc_only_staging_and_evidence() {
 
 test_tft_staging_and_evidence() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat succeeded tft
+    write_staged_active_logcat tft
     src="$scratch/tft-src"
     make_tft_fixture "$src"
     out=$("$RUNNER_TOOL" --serial DEV1 --package "$PKG" --data "$src" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" 2>"$scratch/err") ||
@@ -505,7 +576,7 @@ test_tft_staging_and_evidence() {
 
 test_no_data_expects_clean_bridge_failure() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
         >"$scratch/out" 2>"$scratch/err" || fail "hardware-only (no --data) run expecting the documented clean bridge failure should still PASS overall: $(cat "$scratch/err")"
     grep -q "PASS - acceptance evidence complete" "$scratch/out" || fail "expected overall PASS (clean documented failure is the correct outcome with no data staged): $(cat "$scratch/out")"
@@ -514,7 +585,7 @@ test_no_data_expects_clean_bridge_failure() {
 
 test_bridge_succeeded_required_when_data_staged() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     src="$scratch/roc-src-mismatch"
     make_roc_fixture "$src"
     if "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --data "$src" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
@@ -528,7 +599,7 @@ test_bridge_succeeded_required_when_data_staged() {
 
 test_missing_required_marker_fails() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     # Remove the AAudio startup marker only - simulates a genuine regression
     # (or a hang/timeout that never reaches this point) without touching
     # anything else in the fixture.
@@ -543,37 +614,61 @@ test_missing_required_marker_fails() {
 
 test_timeout_incomplete_shutdown_fails() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     # Truncate the fixture right after the first tabletop-frame line -
-    # simulating a bounded session that timed out/hung before ever reaching
-    # the clean-shutdown log lines (a real timeout: the session duration
-    # elapsed, force-stop had to intervene, and shutdown evidence never
-    # appeared in time).
+    # simulating a bounded no-data session that timed out/hung before ever
+    # reaching its own expected graceful self-exit (bridge-terminal
+    # detection, then the shared teardown sequence - see
+    # acceptance-runner.sh's mode-aware markers for why these are REQUIRED
+    # in the no-data path specifically, unlike a healthy --data run).
     awk '/tabletop frame:/{print; exit} {print}' "$MOCK_LOGCAT" > "$MOCK_LOGCAT.tmp" && mv "$MOCK_LOGCAT.tmp" "$MOCK_LOGCAT"
     if "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
         >"$scratch/out" 2>"$scratch/err"; then
         fail "runner should fail when the bounded session times out before clean shutdown is observed"
     fi
-    grep -q "Clean teardown requested" "$scratch/out" || fail "expected the missing clean-teardown marker to be named: $(cat "$scratch/out")"
+    grep -q "Bridge-terminal detection" "$scratch/out" || fail "expected the missing bridge-terminal marker to be named: $(cat "$scratch/out")"
+    grep -q "Clean in-process teardown requested" "$scratch/out" || fail "expected the missing clean-teardown marker to be named: $(cat "$scratch/out")"
     grep -q "Clean host exit" "$scratch/out" || fail "expected the missing host-exit marker to be named: $(cat "$scratch/out")"
-    pass "a timed-out/hung session (no clean shutdown observed) fails the run loudly"
+    pass "a timed-out/hung no-data session (no graceful self-exit observed) fails the run loudly"
 }
 
 test_forbidden_validation_error_fails() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
-    printf '08-02 12:00:05.500 1000 2000 E AndroidRuntime: FATAL EXCEPTION: main\n' >> "$MOCK_LOGCAT"
+    write_no_data_logcat
+    # Same PID as the launched app (9001, see write_state's fake pidof) but
+    # a DIFFERENT tag (AndroidRuntime, not OpenRealmQuest) - a realistic
+    # Java-side uncaught exception in this app's own process reports under
+    # exactly this tag while still sharing its crashing process's PID.
+    # Proves the PID-scoped net (not just the tag net) independently
+    # catches an app-attributable error - see "PID/tag-scoped
+    # forbidden-error scan" in docs/quest-tabletop.md.
+    printf '08-02 12:00:05.500 9001 2000 E AndroidRuntime: FATAL EXCEPTION: main\n' >> "$MOCK_LOGCAT"
     if "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
         >"$scratch/out" 2>"$scratch/err"; then
-        fail "runner should fail when a forbidden fatal error appears under ANY tag"
+        fail "runner should fail when a forbidden fatal error appears under the launched app's own PID, even under a different tag"
     fi
     grep -q "forbidden fatal/validation-layer error" "$scratch/out" || fail "expected forbidden-error detection to be reported: $(cat "$scratch/out")"
-    pass "a forbidden fatal error under a different tag/process (AndroidRuntime) fails the run loudly"
+    pass "a forbidden fatal error under a different tag (AndroidRuntime) but the SAME app PID fails the run loudly"
+}
+
+test_unrelated_vendor_noise_does_not_fail() {
+    write_state "DEV1:device" "$PKG" 1 0
+    write_no_data_logcat
+    # A DIFFERENT PID (555, some unrelated vendor/HAL service) AND a tag
+    # outside the verified set (not OpenRealmQuest/OpenXR/VrApi) - this is
+    # exactly the kind of system-wide *:W noise the OLD unscoped scan used
+    # to false-fail on. Must NOT be attributed to this launch.
+    printf '08-02 12:00:03.000 555 555 E hal_camera_vendor: sensor recalibration warning (unrelated to this launch)\n' >> "$MOCK_LOGCAT"
+    printf '08-02 12:00:03.500 777 777 F some_other_vendor_svc: internal watchdog reset\n' >> "$MOCK_LOGCAT"
+    out=$("$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" 2>"$scratch/err") ||
+        fail "runner should still PASS despite unrelated vendor/HAL E/F noise under a different PID and tag: $(cat "$scratch/err")"
+    printf '%s\n' "$out" | grep -q "PASS - acceptance evidence complete" || fail "expected overall PASS: $out"
+    pass "unrelated vendor/HAL E/F noise under a different PID and tag does not fail the run"
 }
 
 test_map_epoch_cache_reset_error_fails() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     printf '08-02 12:00:05.500 1000 1000 E OpenRealmQuest: bz_quest_vk_wc3: map-epoch model/texture cache reset failed - vkDeviceWaitIdle timed out\n' \
         >> "$MOCK_LOGCAT"
     if "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
@@ -586,7 +681,7 @@ test_map_epoch_cache_reset_error_fails() {
 
 test_map_epoch_cache_reset_absence_is_informational() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     out=$("$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" 2>"$scratch/err") ||
         fail "runner should still PASS when no map-epoch cache-reset error is present: $(cat "$scratch/err")"
     printf '%s\n' "$out" | grep -q "map-epoch GPU cache reset: not independently observable" || fail "expected the informational not-observable note: $out"
@@ -594,9 +689,45 @@ test_map_epoch_cache_reset_absence_is_informational() {
     pass "absence of any map-epoch cache-reset log line is reported as informational, never required"
 }
 
+test_pid_unresolved_falls_back_to_tag_scoping() {
+    # app_pid="" (8th write_state arg) simulates the fake pidof NEVER
+    # finding the app - the documented "already exited, or never
+    # scheduled" case (see acceptance-runner.sh's "12b" step and
+    # BZ_QUEST_PID_POLL_SLEEP=0 above, which keeps this bounded-retry-then-
+    # give-up path near-instant here rather than the real 5x1s bound).
+    # Must NOT hang, and must still PASS a genuinely clean run.
+    write_state "DEV1:device" "$PKG" 1 0 0 0 0 ""
+    write_no_data_logcat
+    started=$(date +%s)
+    out=$("$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" 2>"$scratch/err") ||
+        fail "runner should still PASS when the app PID could not be resolved: $(cat "$scratch/err")"
+    elapsed=$(($(date +%s) - started))
+    [ "$elapsed" -lt 10 ] || fail "PID-resolution poll took ${elapsed}s - should be bounded/near-instant against a fake device, never hang"
+    printf '%s\n' "$out" | grep -qi "could not resolve the launched app PID" || fail "expected an explicit PID-unresolved warning: $out"
+    printf '%s\n' "$out" | grep -q "PID unresolved - fell back to.*tag-only scoping" || fail "expected the tag-only-scoping fallback to be reported: $out"
+    printf '%s\n' "$out" | grep -q "PASS - acceptance evidence complete" || fail "expected overall PASS: $out"
+    pass "an unresolvable app PID degrades gracefully to tag-only scoping, stays bounded, and still PASSes a clean run"
+}
+
+test_pid_unresolved_tag_based_error_still_fails() {
+    # Same PID-unresolved fallback as above, but this time inject a real
+    # app-tagged (OpenRealmQuest) error - proves the tag-only fallback is
+    # NOT a silent bypass; an app-attributable error is still caught by
+    # tag alone when PID scoping is unavailable.
+    write_state "DEV1:device" "$PKG" 1 0 0 0 0 ""
+    write_no_data_logcat
+    printf '08-02 12:00:05.500 4242 4242 E OpenRealmQuest: vkCreateGraphicsPipelines catastrophic failure\n' >> "$MOCK_LOGCAT"
+    if "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
+        >"$scratch/out" 2>"$scratch/err"; then
+        fail "runner should fail on an app-tagged error even when the PID could not be resolved"
+    fi
+    grep -q "forbidden fatal/validation-layer error" "$scratch/out" || fail "expected forbidden-error detection via tag-only fallback: $(cat "$scratch/out")"
+    pass "an app-tagged error still fails the run via tag-only fallback when the PID could not be resolved"
+}
+
 test_metrics_unavailable_is_not_fatal() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     out=$("$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" 2>"$scratch/err") ||
         fail "runner should still PASS when OVR Metrics Tool is not installed: $(cat "$scratch/err")"
     printf '%s\n' "$out" | grep -q "PASS - acceptance evidence complete" || fail "expected overall PASS despite metrics being unavailable: $out"
@@ -609,7 +740,7 @@ test_metrics_unavailable_is_not_fatal() {
 
 test_metrics_available_captures_csv() {
     write_state "DEV1:device" "$PKG" 1 1
-    write_full_logcat failed
+    write_no_data_logcat
     "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
         >"$scratch/out" 2>"$scratch/err" || fail "runner should pass with OVR Metrics Tool available: $(cat "$scratch/err")"
     run_dir=$(find "$ARTIFACTS_ROOT" -mindepth 1 -maxdepth 1 -type d | head -n1)
@@ -620,7 +751,7 @@ test_metrics_available_captures_csv() {
 
 test_spaces_in_data_dir_are_preserved() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat succeeded roc
+    write_staged_active_logcat roc
     src="$scratch/roc src with spaces"
     make_roc_fixture "$src"
     "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --data "$src" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
@@ -631,7 +762,7 @@ test_spaces_in_data_dir_are_preserved() {
 
 test_artifacts_root_with_spaces_is_preserved() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     spaced_root="$scratch/artifact root with spaces"
     "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$spaced_root" --apk "$MOCK_APK" \
         >"$scratch/out" 2>"$scratch/err" || fail "an --artifacts root containing spaces should work: $(cat "$scratch/err")"
@@ -643,7 +774,7 @@ test_artifacts_root_with_spaces_is_preserved() {
 
 test_artifact_preservation() {
     write_state "DEV1:device" "$PKG" 1 1
-    write_full_logcat failed
+    write_no_data_logcat
     "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
         >"$scratch/out" 2>"$scratch/err" || fail "baseline run for artifact-preservation test failed: $(cat "$scratch/err")"
     run_dir=$(find "$ARTIFACTS_ROOT" -mindepth 1 -maxdepth 1 -type d | head -n1)
@@ -657,7 +788,7 @@ test_artifact_preservation() {
 
 test_cleanup_on_failure_still_force_stops() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     grep -v 'bz_quest_audio_start succeeded' "$MOCK_LOGCAT" > "$MOCK_LOGCAT.tmp" && mv "$MOCK_LOGCAT.tmp" "$MOCK_LOGCAT"
     if "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
         >"$scratch/out" 2>"$scratch/err"; then
@@ -675,7 +806,7 @@ test_cleanup_on_failure_still_force_stops() {
 
 test_cleanup_on_signal() {
     write_state "DEV1:device" "$PKG" 1 0
-    write_full_logcat failed
+    write_no_data_logcat
     "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --duration 30 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" --non-interactive \
         >"$scratch/sig_out" 2>"$scratch/sig_err" &
     runner_pid=$!
@@ -708,7 +839,7 @@ test_cleanup_on_signal() {
 
 test_repeated_runs_are_stable() {
     write_state "DEV1:device" "$PKG" 1 1
-    write_full_logcat failed
+    write_no_data_logcat
     i=1
     while [ "$i" -le 3 ]; do
         "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
@@ -741,8 +872,11 @@ test_bridge_succeeded_required_when_data_staged
 test_missing_required_marker_fails
 test_timeout_incomplete_shutdown_fails
 test_forbidden_validation_error_fails
+test_unrelated_vendor_noise_does_not_fail
 test_map_epoch_cache_reset_error_fails
 test_map_epoch_cache_reset_absence_is_informational
+test_pid_unresolved_falls_back_to_tag_scoping
+test_pid_unresolved_tag_based_error_still_fails
 test_metrics_unavailable_is_not_fatal
 test_metrics_available_captures_csv
 test_spaces_in_data_dir_are_preserved

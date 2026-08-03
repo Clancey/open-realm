@@ -485,35 +485,57 @@ literal text, from the exact `BZ_QUEST_LOGI`/`BZ_QUEST_LOGE` call sites in
     `bz_quest_bridge_start failed: <reason> - see docs/quest-tabletop.md's
     data-path contract; continuing to pump the Android event loop with no
     engine running` — a data/archive resolution failure here is a real,
-    documented Quest-only failure mode, not a crash: OpenXR/Vulkan/
-    passthrough keep running with the checkerboard test scene and the app
-    stays fully responsive to Android teardown (see "Hardware/data-only
-    acceptance procedure" below).
-11. `APP_CMD_RESUME`
+    documented Quest-only failure mode, not a crash. **These two outcomes
+    diverge sharply from here on - proven directly against
+    `bz_quest_host.c`'s control flow, not assumed:**
+    - **Succeeded:** continues to steps 11-14 below.
+    - **Failed:** `bridge->lc` stays `NULL`, so `bz_quest_bridge_state()`
+      reports the terminal `BZ_QUEST_BRIDGE_FAILED` state, which
+      `android_main()`'s loop detects on the SAME iteration that processed
+      `APP_CMD_START` - strictly BEFORE a later `ALooper_pollOnce()` call
+      could ever deliver the separate `APP_CMD_RESUME` event. **None of
+      steps 11-14 below occur.** Instead: `tabletop bridge reached a
+      terminal state (...) - requesting host exit`, then
+      `bz_quest_host: destroy requested, tearing down audio, bridge, and
+      renderer`, then `bz_quest_host: exiting android_main` - the app
+      self-exits gracefully within a second or two, with no external
+      `force-stop`/Oculus-button press needed - see the corrected
+      "Hardware-only acceptance gates" A below for the full sequence and
+      exactly what this validates (install/launch/error-teardown, NOT a
+      visible passthrough/checkerboard scene or any FOCUSED session).
+11. `APP_CMD_RESUME` (**succeeded branch only** - see step 10 above).
 12. Repeated `XrEventDataSessionStateChanged: state=...` lines progressing
     `READY` -> `xrBeginSession succeeded` -> (eventually) `SYNCHRONIZED` ->
-    `VISIBLE` -> `FOCUSED`.
-13. If step 10 succeeded, exactly one `tabletop frame: status=... generation=0
-    lifecycleState=...` line shortly after (the first-ever captured frame,
+    `VISIBLE` -> `FOCUSED` (**succeeded branch only**).
+13. Exactly one `tabletop frame: status=... generation=... ` line shortly
+    after step 9 (the first-ever captured frame,
     `bz_quest_frame_should_log()`'s "status changed from nothing captured
-    yet" case — see "Diagnostics: throttled log, never per-frame" below),
-    then **no further** `tabletop frame: ...` lines unless `status`/
-    `lifecycleState`/`lifecycleError` actually changes (there is no map
-    loaded in this layer, so `generation` still advances once per client
-    frame — see "Snapshot ownership and diagnostics" below — but a bare
-    `generation` advance is never, by itself, a log trigger, so this line
-    does not repeat merely because the engine is running).
+    yet" case — see "Diagnostics: throttled log, never per-frame" below) -
+    this one fires **regardless of step 10's outcome**, since
+    `bz_quest_snapshot_capture()` runs at the top of every loop iteration,
+    strictly before the bridge-terminal check above - then **no further**
+    `tabletop frame: ...` lines unless `status`/`lifecycleState`/
+    `lifecycleError` actually changes (there is no map loaded in this
+    layer, so `generation` still advances once per client frame — see
+    "Snapshot ownership and diagnostics" below — but a bare `generation`
+    advance is never, by itself, a log trigger, so this line does not
+    repeat merely because the engine is running).
 14. No further `BZ_QUEST_LOGE` lines once `FOCUSED` is reached and frames are
     flowing (a healthy frame loop produces **no** per-frame log output at
-    all — see "No busy loop / no per-frame logging" below).
+    all — see "No busy loop / no per-frame logging" below; **succeeded
+    branch only**).
 
 Visual acceptance (must be confirmed by a human wearing the headset — no
-automated check exists for this): the passthrough camera feed is visible as
-the background, and a checkerboard tabletop with four colored cubes appears
-roughly at waist height ~1m in front of the headset's `LOCAL` origin, with
-correct stereo separation (looking left/right shows appropriate parallax)
-and correct occlusion (cubes closer to the eye occlude the table behind
-them, verifying the depth buffer is wired correctly).
+automated check exists for this; **succeeded/staged-data branch only** -
+the failed/no-data branch above never reaches a FOCUSED session, so there
+is nothing to visually confirm there beyond the guided checklist's
+"Coverage-alpha correctness" item): the passthrough camera feed is visible
+as the background, and a checkerboard tabletop with four colored cubes
+appears roughly at waist height ~1m in front of the headset's `LOCAL`
+origin, with correct stereo separation (looking left/right shows
+appropriate parallax) and correct occlusion (cubes closer to the eye
+occlude the table behind them, verifying the depth buffer is wired
+correctly).
 
 ## Testing
 
@@ -4639,19 +4661,106 @@ Every marker `acceptance-runner.sh` checks is the literal text of a real
 | `passthrough object + reconstruction layer created` | required | `bz_quest_passthrough.c` |
 | `passthrough started` | required | `bz_quest_passthrough.c` |
 | `bz_quest_renderer_init succeeded` | required | `bz_quest_host.c` |
-| `APP_CMD_START` / `APP_CMD_RESUME` | required | `bz_quest_host.c` |
-| `xrBeginSession succeeded` | required | `bz_quest_xr.c` |
+| `APP_CMD_START` | required (fires regardless of data staging - see "Mode-aware markers" below) | `bz_quest_host.c` |
 | `bz_quest_audio_start succeeded` | required | `bz_quest_audio.c` |
 | `tabletop frame: status=... generation=...` (>=1 line) | required | `bz_quest_host.c` |
-| `bz_quest_host: destroy requested` | required | `bz_quest_host.c` |
-| `bz_quest_host: exiting android_main` | required | `bz_quest_host.c` |
 | `bz_quest_bridge_start succeeded` | required **only if `--data` staged** | `bz_quest_host.c` |
 | `bz_quest_bridge_start failed: ...` | required **only if no `--data`** | `bz_quest_host.c` |
+| `APP_CMD_RESUME` | required **only if `--data` staged** (see "Mode-aware markers" below) | `bz_quest_host.c` |
+| `xrBeginSession succeeded` | required **only if `--data` staged** | `bz_quest_xr.c` |
+| `tabletop bridge reached a terminal state` | required **only if no `--data`** | `bz_quest_host.c` |
+| `bz_quest_host: destroy requested` | required **only if no `--data`**, informational if `--data` staged | `bz_quest_host.c` |
+| `bz_quest_host: exiting android_main` | required **only if no `--data`**, informational if `--data` staged | `bz_quest_host.c` |
 | `hand tracking enabled (...)` OR `XR_EXT_hand_tracking not supported...` | informational (optional capability) | `bz_quest_xr_hands.c` |
 | `resolved data dir ..., edition=roc\|tft` | informational, best-effort only (see below) | `bz_quest_bridge.c` |
 | `bz_quest_vk_wc3_particles:` error lines | informational (absence checked, never a positive marker) | `bz_quest_vk_wc3_particles.c` |
 | `bz_quest_vk_wc3:.*map-epoch` error lines (PR #28 cache-reset fix) | informational (absence checked, never a positive marker) | `bz_quest_vk_wc3.c` |
-| any `E`/`F`-priority logcat line (any tag), `FATAL EXCEPTION`, `backtrace:`, `SIGSEGV`, `SIGABRT`, `VUID-`, `validation layer` | **forbidden if present** (excluding the one documented `bz_quest_bridge_start failed` E-line above) | logcat structural + keyword scan |
+| any `E`/`F`-priority logcat line, `FATAL EXCEPTION`, `backtrace:`, `SIGSEGV`, `SIGABRT`, `VUID-`, `validation layer`, **attributable to this launch** (launched app PID, or the `OpenRealmQuest`/`OpenXR`/`VrApi` tags - see "PID/tag-scoped forbidden-error scan" below) | **forbidden if present** (excluding the one documented `bz_quest_bridge_start failed` E-line above) | logcat structural + keyword scan, PID/tag-scoped |
+
+### Mode-aware markers (data-staged vs no-data)
+
+Proven directly against `bz_quest_host.c`'s real control flow, not assumed
+(a rubber-duck/code-review finding against an earlier draft that required
+every marker unconditionally, making the documented no-data path
+impossible to ever pass): `android_main()`'s main loop checks
+`bz_quest_bridge_is_terminal(&state.bridge)` every iteration, immediately
+after processing whichever Android command `ALooper_pollOnce()` just
+delivered. A `--data`-less run's `bz_quest_bridge_start()` failure leaves
+`bridge->lc` `NULL`, which `bz_quest_bridge_state()` reports as the
+terminal `BZ_QUEST_BRIDGE_FAILED` state - so the loop breaks on the SAME
+iteration that processed `APP_CMD_START`, strictly BEFORE a later
+`ALooper_pollOnce()` call could ever deliver the separate, later
+`APP_CMD_RESUME` event. Requiring `APP_CMD_RESUME`/`xrBeginSession
+succeeded` unconditionally would therefore make the no-data path - a
+deliberate, correct, documented outcome this script must accept - always
+fail.
+
+Conversely, this script always ends a *healthy* (`--data` staged) session
+by calling `am force-stop` externally (see "Force-stop is an external
+kill, never a graceful exit" below) once `--duration` elapses or the
+guided checklist completes - a signal `bz_quest_host.c`'s own event loop
+never observes as `app->destroyRequested`, so its graceful in-process
+teardown (`bz_quest_host: destroy requested`/`exiting android_main`) never
+runs for a healthy run. Requiring those two lines unconditionally would
+therefore make every healthy run always fail instead.
+
+The no-data path's own graceful exit is, in exchange, exactly as
+deterministic as a healthy run's force-stop, proven by the same control
+flow above - so its own host-exit evidence (`tabletop bridge reached a
+terminal state`, then the same shared teardown sequence) IS required
+there, and is reported as informational (bonus corroboration, never
+required) on a healthy run.
+
+### Force-stop is an external kill, never a graceful exit
+
+**This script's own control flow never lets a healthy session reach
+`bz_quest_host.c`'s graceful in-process teardown.** `am force-stop`
+(`ActivityManager`'s force-stop, not a signal or intent this app's code
+ever observes) is how every healthy `--data`-staged run ends once
+`--duration` elapses or the guided checklist completes - this is an
+immediate process kill from outside the app, not something
+`android_main()`'s loop or `bz_quest_handle_cmd()`'s `APP_CMD_DESTROY`
+case ever gets a chance to run its own teardown in response to. No
+existing production mechanism triggers a graceful *remote* shutdown of
+this bare NativeActivity (`android:hasCode="false"`, zero custom
+Java/Kotlin code, no exported receivers or additional intent-filters
+beyond the standard launcher intent - see `AndroidManifest.xml`), so this
+script reclassifies `bz_quest_host: destroy requested`/`exiting
+android_main` as informational on a healthy run rather than inventing one
+(e.g. a custom broadcast receiver, or relying on an unverified
+back-button/`finish()` behavior that would require real hardware to
+confirm). If a real graceful-remote-shutdown mechanism is ever added to
+this app for an unrelated reason, revisit this classification then.
+
+### PID/tag-scoped forbidden-error scan
+
+**The full `logcat.log` artifact always preserves every `*:W`-or-above
+line from the *entire device*, unfiltered, for manual diagnosis** - this
+never changes. Only the automated PASS/FAIL *classification* is scoped:
+an earlier draft classified any `E`/`F`-priority line *anywhere on the
+device* as forbidden, which would false-fail on unrelated Quest HAL/
+vendor-service warnings having nothing to do with this launch. Cornered
+this by capturing the launched app's own PID
+(`adb shell pidof <package>`, bounded to 5 attempts at 1-second intervals
+- never unbounded polling) immediately after launch, and scoping
+classification to lines attributable to this launch: the app's own PID
+(`adb logcat -v threadtime`'s PID column - required explicitly rather
+than trusting the device's unspecified default format), UNION one of the
+tags independently already verified as this launch's own (this app's own
+`OpenRealmQuest` tag; the `OpenXR`/`VrApi` loader-broker tags, which run
+in a genuinely separate process but are directly attributable to this
+launch's own XR session - see "Also watch for OpenXR loader/runtime
+broker errors under its own tags" above).
+
+`pidof` can legitimately find nothing: the process may not have been
+scheduled yet (the bounded retry accounts for this), or - in the no-data
+path specifically - it may have already self-exited within a second or
+two of launch (see "Mode-aware markers" above) before this script's own
+poll catches up. This degrades gracefully to tag-only scoping rather than
+failing the run outright - reported honestly in both the console output
+and `metadata.json`'s `app_pid` field - and is proven to still correctly
+catch an app-attributable error by tag alone even with the PID
+unresolved (see "Tests and build wiring" below).
 
 Two design points that are easy to get wrong (both were, in earlier
 drafts, before being corrected against real evidence):
@@ -4901,22 +5010,30 @@ against a real device:
 ### Tests and build wiring
 
 - `make test-quest-acceptance-runner`
-  (`scripts/test-acceptance-runner.sh`) - 28 test cases against a fake
+  (`scripts/test-acceptance-runner.sh`) - 31 test cases against a fake
   device: missing `--serial`, no device, unknown/offline `--serial`,
   `--serial` routing across two devices, a missing custom `--apk` path,
   native-lib verification failure, `adb install -r` failure, missing
   package, non-debuggable package, launch failure, ROC-only staging +
   evidence, TFT-over-ROC staging + evidence, the no-`--data` clean-failure
   PASS case, the staged-but-still-failed FAIL case, a missing required
-  marker, a timed-out/hung session (no clean shutdown observed), a
-  forbidden fatal error under a different tag/process, a PR #28 map-epoch
-  cache-reset error under its own dedicated named check (and its
-  absence-is-informational counterpart), OVR Metrics unavailable (not
-  fatal), OVR Metrics available (CSV captured), spaces in
+  marker, a timed-out/hung no-data session (no graceful self-exit
+  observed), a forbidden fatal error under a different tag but the SAME
+  app PID, unrelated vendor/HAL E/F noise under a different PID and tag
+  (does NOT fail), a PR #28 map-epoch cache-reset error under its own
+  dedicated named check (and its absence-is-informational counterpart),
+  an unresolvable app PID degrading gracefully to tag-only scoping (stays
+  bounded, still PASSes a clean run), an app-tagged error still failing
+  via tag-only fallback when the PID could not be resolved, OVR Metrics
+  unavailable (not fatal), OVR Metrics available (CSV captured), spaces in
   `--data`/`--artifacts` paths, full artifact preservation, cleanup on a
   failed run, cleanup on a real `SIGTERM` mid-session, and 3 stable
-  consecutive runs producing distinct artifact directories. Runs as part of
-  `make test` and `make quest` (device-free).
+  consecutive runs producing distinct artifact directories. Uses two
+  separate, real (not stitched-together) lifecycle fixtures -
+  `write_no_data_logcat`/`write_staged_active_logcat` - matching exactly
+  what `bz_quest_host.c`'s control flow can actually produce for each mode
+  (see "Mode-aware markers" above). Runs as part of `make test` and `make
+  quest` (device-free).
 - `scripts/stage-wc3-data.sh`'s `resolve-device`/`check-runtime`
   subcommands are covered by 6 new cases in
   `scripts/test-stage-wc3-data.sh` (26 total, up from 20).
@@ -5266,8 +5383,15 @@ data — and this document distinguishes exactly which each of the following
 sub-procedures actually proves:
 
 **A. Hardware-only (no real WC3 data staged, override left unset).** Proves
-the bridge starts and fails *cleanly* — no crash, no hang, Android/OpenXR
-teardown stays fully responsive:
+the bridge starts and fails *cleanly* — no crash, no hang — and that
+`bz_quest_host.c`'s own event loop detects this and self-exits gracefully
+almost immediately. **This does NOT validate a visible passthrough/
+checkerboard scene, stereo rendering, or any FOCUSED/interactive OpenXR
+session** — proven directly against `bz_quest_host.c`'s control flow, not
+assumed: this gate only validates install, NativeActivity launch, OpenXR
+instance/passthrough-*object*-creation succeeding (Vulkan/OpenXR
+initialization runs regardless of data staging - see "Vulkan/OpenXR
+initialization" step below), and clean, graceful error-path teardown:
 
 1. Run steps 1-2 of "Exact on-device acceptance procedure" above (build,
    install, launch, tail `OpenRealmQuest:V`) with **no**
@@ -5277,11 +5401,30 @@ teardown stays fully responsive:
    `bz_quest_bridge_start failed: ...` (a `"Failed to add data directory:
    ..."` reason from the engine, surfaced through
    `bz_quest_bridge_last_error()`), **not** `succeeded`.
-3. Expect the app to keep running (passthrough camera + checkerboard test
-   scene) and to exit cleanly on `adb shell am force-stop
-   org.openrealm.quest` or the Oculus button — confirms "surface the exact
-   path/error and enter the lifecycle's real failed state while keeping
-   Android/OpenXR teardown responsive" without needing any real game data.
+3. **The app self-exits gracefully within a second or two — it does NOT
+   keep running, and no external `force-stop`/Oculus-button press is
+   needed to end it.** `bz_quest_ensure_bridge_start()`'s failure leaves
+   `bridge->lc` `NULL`, so `bz_quest_bridge_state()` reports
+   `BZ_QUEST_BRIDGE_FAILED` — a *terminal* state per
+   `bz_quest_bridge_is_terminal()` — which `android_main()`'s loop checks
+   immediately after processing whichever Android command
+   `ALooper_pollOnce()` just delivered. Since this all happens on the SAME
+   loop iteration that processed `APP_CMD_START`, the loop breaks into the
+   shared graceful teardown path strictly BEFORE a later
+   `ALooper_pollOnce()` call could ever deliver the separate,
+   later-in-time `APP_CMD_RESUME` event — so `APP_CMD_RESUME`,
+   `XrEventDataSessionStateChanged`, and `xrBeginSession succeeded` are
+   correctly ABSENT from this path, not merely unobserved. Expect instead:
+   `tabletop bridge reached a terminal state (...) - requesting host
+   exit`, then `bz_quest_host: destroy requested, tearing down audio,
+   bridge, and renderer`, then `bz_quest_host: exiting android_main` — the
+   SAME shared teardown sequence every other exit trigger uses (see
+   "android_main() is the sole owner of final shutdown" above). This
+   confirms "surface the exact path/error and enter the lifecycle's real
+   failed state, then tear down deterministically and gracefully" without
+   needing any real game data — a stronger, more precise claim than "the
+   app keeps running," since nothing is ever actually composited to the
+   display in this path (the XR session never begins).
 
 **B. Data-only (no headset — a bounded non-Quest host build).** Proves the
 *shared* lifecycle/transport core this bridge wraps genuinely starts,
@@ -6310,9 +6453,13 @@ map's stale GPU asset.
   merged state.
 - `make -f platform/android/quest/build.mk test-quest-acceptance-runner`
   (equivalently `make test-quest-acceptance-runner` from the repo root) -
-  **28/28** test cases pass (up from 26; +2 new cases added in this same
-  layer-10 body of work to cover the two later-incorporated PR #28 base
-  fixes' evidence - see below), run **3 consecutive times** with identical
+  **31/31** test cases pass (up from 26; +2 cases for the two
+  later-incorporated PR #28 base fixes' evidence, then +3 more fixing
+  three must-fix false-fail defects a final rubber-duck review found -
+  mode-aware markers, PID/tag-scoped forbidden-error scanning, and two
+  real (not stitched-together) lifecycle fixtures replacing the one
+  impossible combined fixture - see "Mode-aware markers"/"PID/tag-scoped
+  forbidden-error scan" above), run **3 consecutive times** with identical
   results (stability requirement) producing 3 distinct timestamped
   artifact directories.
 - `make test-quest-host-tests` - **5440/5440** (unaffected by this layer's
@@ -6343,7 +6490,7 @@ map's stale GPU asset.
   confirmed via a full log file grep for `assertions passed`/`OK`/`tests
   passed` markers across every suite, not a truncated scrollback),
   including every Quest structural guard above, the new
-  `test-acceptance-runner.sh: 28/28 tests passed` line, and every
+  `test-acceptance-runner.sh: 31/31 tests passed` line, and every
   pre-existing test suite in the rest of the repository unchanged.
   `git diff --check` reports zero whitespace errors. No test was disabled,
   skipped, or weakened anywhere in this session.
@@ -6351,6 +6498,106 @@ map's stale GPU asset.
   Meta Quest device and no retail Warcraft III data were available in this
   environment - see this layer's own "Acceptance gates" subsection above
   for the exact, itemized hardware-only gaps this leaves.
+
+### What *was* verified this session (acceptance-runner false-fail fixes, final rubber-duck review)
+
+A final rubber-duck review of layer 10 found **three must-fix false-fail
+defects** in `acceptance-runner.sh` itself - each proven directly against
+`bz_quest_host.c`'s real control flow before being fixed, never guessed,
+and none of them required (or received) any runtime/renderer code change:
+
+1. **Teardown markers unreachable on a healthy `--data` run.** This
+   script always ends a healthy session via an external `am force-stop`
+   (never a signal `bz_quest_host.c`'s own event loop observes as
+   `app->destroyRequested`), yet an earlier draft unconditionally
+   required `bz_quest_host: destroy requested`/`exiting android_main` -
+   lines only its OWN graceful in-process teardown ever logs. Confirmed
+   no existing production mechanism triggers a graceful *remote*
+   shutdown of this bare NativeActivity (`android:hasCode="false"`, zero
+   custom Java/receivers/exported intents beyond the launcher intent -
+   see `AndroidManifest.xml`) before reclassifying these two lines as
+   informational on a healthy run, rather than inventing one - see "Force
+   -stop is an external kill, never a graceful exit" above.
+2. **The no-data Gate A lifecycle fixture was impossible.** Traced
+   `bz_quest_host.c`'s main loop precisely: it checks
+   `bz_quest_bridge_is_terminal()` every iteration, immediately after
+   processing whichever command `ALooper_pollOnce()` just delivered - so
+   a `--data`-less bridge failure (`bridge->lc` stays `NULL` ->
+   `BZ_QUEST_BRIDGE_FAILED`, a terminal state) breaks the loop on the
+   SAME iteration that processed `APP_CMD_START`, strictly BEFORE a later
+   `ALooper_pollOnce()` call could ever deliver `APP_CMD_RESUME`. Markers
+   are now mode-aware (see "Mode-aware markers" above): `APP_CMD_RESUME`/
+   `xrBeginSession succeeded` are required only when `--data` is staged;
+   the no-data path instead requires its own deterministic evidence
+   (`tabletop bridge reached a terminal state`, then the shared teardown
+   sequence). Rewrote "Hardware-only acceptance gates" A and the "Exact
+   on-device acceptance procedure" numbered list to say this gate
+   validates install/NativeActivity-launch/error-teardown - **not** a
+   visible passthrough/checkerboard scene or any FOCUSED session - since
+   the XR session never begins in this path.
+3. **The forbidden E/F scan was system-wide over `*:W`.** Would false-fail
+   on unrelated Quest HAL/vendor-service warnings sharing the device with
+   this launch. Scoped classification (never the preserved raw
+   `logcat.log`, which stays unfiltered) to lines attributable to this
+   launch: the launched app's own PID (`adb shell pidof`, bounded to 5
+   attempts at 1s intervals - never unbounded polling; handles the app
+   having already self-exited before lookup, the no-data path's own
+   documented behavior, by degrading gracefully to tag-only scoping) UNION
+   the `OpenRealmQuest`/`OpenXR`/`VrApi` tags already independently
+   verified as this launch's own. `adb logcat -v threadtime` is now
+   required explicitly (not the device's unspecified default format) so
+   every line carries a parseable PID column - see "PID/tag-scoped
+   forbidden-error scan" above.
+
+Root test-fixture issue fixed alongside: the single `write_full_logcat()`
+fixture stitched markers no real run could ever jointly emit (resume/XR
+markers after a no-data failure that is actually terminal). Split into
+two real, distinct lifecycle fixtures - `write_no_data_logcat()` (the
+actual no-data early-exit sequence) and `write_staged_active_logcat()`
+(a real healthy session ended by force-stop, correctly with NO teardown
+lines) - and every existing test updated to use the one matching its own
+scenario (a clean, 1:1 mechanical mapping: every no-`--data` test to
+`write_no_data_logcat`, every `--data`-staged test to
+`write_staged_active_logcat`).
+
+Added 5 new test cases (`test-acceptance-runner.sh`, now 31 total):
+`test_unrelated_vendor_noise_does_not_fail` (a different PID AND
+different/unverified tag - must PASS), `test_pid_unresolved_falls_back_
+to_tag_scoping` (empty `pidof` result - must stay bounded and still PASS
+a clean run), `test_pid_unresolved_tag_based_error_still_fails` (empty
+`pidof` result, but an app-tagged error - must still FAIL), plus fixed
+`test_forbidden_validation_error_fails` (now injects its error under the
+SAME PID as the app, proving PID-based - not just tag-based - attribution
+independently) and `test_timeout_incomplete_shutdown_fails` (now also
+asserts the new `Bridge-terminal detection` marker is named missing).
+Added a fake `pidof` shim and an `APP_PID` state knob
+(`write_state`'s new optional 8th argument, defaulting to a stable "9001"
+so every pre-existing test keeps exercising the resolved-PID path
+unchanged) to the fake-adb harness.
+
+**Proven against real regressions, not merely written and trusted**: ran
+the entire updated test suite directly against the pre-fix
+`acceptance-runner.sh` (commit `3903f6c`, restored temporarily, reverted
+immediately after) - confirmed every scenario affected by these three
+defects failed in exactly the predicted way (no-data and staged-data
+runs both failed to PASS; the vendor-noise test failed since the old
+scan caught it as forbidden). Additionally injected a targeted regression
+into the fixed script itself (dropping the tag-based union from the PID/
+tag-scoped scan) and confirmed `test_pid_unresolved_tag_based_error_still
+_fails` caught it - then reverted. `test-acceptance-runner.sh` **31/31**,
+run **3 consecutive times** with identical results.
+
+`make -f platform/android/quest/build.mk test-quest-host-tests` -
+**5440/5440** (unaffected; no `.c`/`.h` file was touched by this round -
+these are shell-script and documentation fixes only). Every Quest
+structural guard, `test-quest-bridge` (**95/95**), and
+`test-quest-stage-wc3-data` (**26/26**) - unaffected, all still pass. The
+real arm64 Gradle/CMake `assembleDebug` build (Temurin JDK 17, NDK
+27.2.12479018) - `BUILD SUCCESSFUL`, and `make quest-verify-native-lib`
+passed against the real APK. `make run-sc2 +com_frame_limit 100` still
+fails only on the pre-existing missing `data/StarCraft2` gate (unchanged,
+not a regression). The full repo-root `make test` passes end-to-end
+(`EXIT_CODE=0`). `git diff --check` reports zero whitespace errors.
 
 ## Related documents
 
