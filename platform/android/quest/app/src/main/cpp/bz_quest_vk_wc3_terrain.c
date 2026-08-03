@@ -593,12 +593,11 @@ static bool create_pipeline(bzQuestVkWc3Terrain_t *vkTerrain, bool blended, VkPi
     blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     if (blended) {
-        blendAttachment.blendEnable = VK_TRUE;
-        blendAttachment.srcColorBlendFactor = blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        blendAttachment.dstColorBlendFactor = blendAttachment.dstAlphaBlendFactor =
-            VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-        blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        /* Water/splats: the one shared "straight-color, premultiplied-coverage over" blend state
+         * every non-blend-mode-keyed WC3 overlay pipeline uses - see
+         * bz_quest_vk_straight_over_blend_state()'s doc comment (bz_quest_vk.h) for the High-
+         * severity a-squared-coverage defect this fixes and the derivation. */
+        bz_quest_vk_straight_over_blend_state(&blendAttachment);
     }
 
     VkPipelineColorBlendStateCreateInfo colorBlend = {0};
@@ -701,6 +700,16 @@ static void draw_range(VkCommandBuffer cmd, bzQuestVkWc3Terrain_t *vkTerrain,
     vkCmdBindVertexBuffers(cmd, 0, 1, &chunkGpu->vertexBuffer, &offset);
     vkCmdBindIndexBuffer(cmd, chunkGpu->indexBuffer, 0, VK_INDEX_TYPE_UINT32);
     vkCmdPushConstants(cmd, vkTerrain->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 16, viewProj);
+    /* Force-coverage-alpha-to-1 flag (High-severity reviewer fix, PR #28) - true for the opaque
+     * ground/cliff pipeline (blendEnable=false: no blend equation runs, this range's own shader
+     * alpha is written verbatim to the framebuffer; ground/cliff vertex color is always opaque
+     * white - see bz_quest_wc3_terrain.c's opaque_white() - but the TEXTURE's own alpha channel
+     * is not guaranteed to be 1.0, which would otherwise leave passthrough-visible "pinholes"
+     * through solid ground). False for the blended (water/splat) pipeline, which needs its real
+     * per-corner water-opacity alpha for the blend equation - see terrain_frag.frag. */
+    float coverageParams[4] = {range_is_blended(range) ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f};
+    vkCmdPushConstants(cmd, vkTerrain->pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 16,
+                      sizeof(float) * 4, coverageParams);
     vkCmdDrawIndexed(cmd, range->indexCount, 1, range->indexOffset, 0, 0);
 }
 
@@ -827,13 +836,22 @@ bool bz_quest_vk_wc3_terrain_create(const bzQuestVk_t *vk, bzQuestVkWc3Terrain_t
                               &out->fragmentShader))
         goto fail;
 
-    VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 16};
+    VkPushConstantRange ranges[2];
+    ranges[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    ranges[0].offset = 0;
+    ranges[0].size = sizeof(float) * 16;
+    /* Fragment-stage-only coverage flag (High-severity reviewer fix, PR #28) - see
+     * terrain_frag.frag's own doc comment; mirrors bz_quest_vk_wc3.c's own model-layer push-
+     * constant split exactly (vertex mvp at offset 0, fragment params right after it). */
+    ranges[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    ranges[1].offset = sizeof(float) * 16;
+    ranges[1].size = sizeof(float) * 4;
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {0};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &out->descriptorSetLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pc;
+    pipelineLayoutInfo.pushConstantRangeCount = 2;
+    pipelineLayoutInfo.pPushConstantRanges = ranges;
     if (vkCreatePipelineLayout(vk->device, &pipelineLayoutInfo, NULL, &out->pipelineLayout) != VK_SUCCESS) {
         BZ_QUEST_LOGE("bz_quest_vk_wc3_terrain: vkCreatePipelineLayout failed");
         goto fail;

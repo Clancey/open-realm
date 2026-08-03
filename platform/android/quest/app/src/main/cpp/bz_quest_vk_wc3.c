@@ -9,8 +9,8 @@
  * games/warcraft-3/renderer/mdx/r_mdx_geoset.c's MDLX_SetBlendMode() is the
  * desktop engine's own OpenGL mapping for every bzTTBlendMode_t value; this
  * file's bz_quest_vk_wc3_blend_state_for_mode() below reproduces it 1:1 in Vulkan terms
- * (glBlendFunc(src,dst) with no glBlendFuncSeparate call maps to identical
- * color/alpha blend factors - see that function's per-case comments):
+ * for the COLOR channel (glBlendFunc(src,dst) with no glBlendFuncSeparate call maps to
+ * identical color/alpha blend factors on desktop - see that function's per-case comments):
  *
  *   BZ_TTA_BLEND_OPAQUE (glBlendFunc(ONE,ZERO), depthMask ON)       -> no blend, depth write on
  *   BZ_TTA_BLEND_TRANSPARENT (alpha-key: glBlendFunc(ONE,ZERO), depthMask ON,
@@ -20,6 +20,28 @@
  *   BZ_TTA_BLEND_ADD_ALPHA (glBlendFunc(SRC_ALPHA,ONE), depthMask OFF)
  *   BZ_TTA_BLEND_MODULATE (glBlendFunc(DST_COLOR,ZERO), depthMask OFF)
  *   BZ_TTA_BLEND_MODULATE_2X (glBlendFunc(DST_COLOR,SRC_COLOR), depthMask OFF)
+ *
+ * IMPORTANT, deliberate divergence for the ALPHA (coverage) channel only
+ * (High-severity reviewer finding, PR #28): desktop's single glBlendFunc call
+ * applies its one (src,dst) factor pair to BOTH color and alpha because
+ * desktop's framebuffer alpha is completely unused/discarded (an ordinary
+ * opaque window backbuffer with nothing downstream ever reading it) - so
+ * mirroring is a harmless no-op there. This Quest port's framebuffer alpha is
+ * NOT unused: it is the exact channel XR_COMPOSITION_LAYER_BLEND_TEXTURE_
+ * SOURCE_ALPHA_BIT hands to the OpenXR compositor to blend this layer over
+ * the real-world XR_FB_passthrough feed, so mirroring the color factors onto
+ * alpha computes `srcAlpha*srcAlpha + dstAlpha*(1-srcAlpha)` - alpha SQUARED
+ * - instead of correct linear coverage accumulation, corrupting exactly the
+ * channel desktop never had to get right. Every case below therefore uses
+ * its own, separately-derived alpha-coverage factor pair (see each case's own
+ * comment and bz_quest_vk_straight_over_blend_state()'s doc comment in
+ * bz_quest_vk.h for the shared "over" derivation) while the COLOR factors
+ * remain an EXACT, unchanged 1:1 reproduction of desktop's glBlendFunc -
+ * this port's visible on-screen color output is byte-for-byte the same
+ * decision desktop makes; only the alpha channel, which has no desktop
+ * equivalent to preserve, is computed correctly for its own distinct
+ * purpose. See docs/quest-tabletop.md's premultiplied-contract section for
+ * the full derivation and numeric reproduction that found this.
  *
  * MDLX_IsBlendedLayer() (r_mdx_geoset.c:220-222) treats every blend mode
  * >= BZ_TTA_BLEND_ALPHA (2) as needing a back-to-front-sorted "blended
@@ -687,38 +709,87 @@ void bz_quest_vk_wc3_blend_state_for_mode(uint32_t blendMode, VkPipelineColorBle
     switch (blendMode) {
         case BZ_QUEST_TTA_BLEND_ALPHA:
             outBlend->blendEnable = VK_TRUE;
-            outBlend->srcColorBlendFactor = outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            outBlend->dstColorBlendFactor = outBlend->dstAlphaBlendFactor =
-                VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            outBlend->srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            outBlend->dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            /* Coverage: standard premultiplied "over" (srcAlpha + dstAlpha*(1-srcAlpha)) - see
+             * this file's header comment and bz_quest_vk_straight_over_blend_state()'s doc
+             * comment (bz_quest_vk.h) for the shared derivation; NOT mirroring the color
+             * factors avoids squaring srcAlpha. */
+            outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            outBlend->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             *outDepthWriteDefault = false;
             break;
         case BZ_QUEST_TTA_BLEND_ADDITIVE:
             outBlend->blendEnable = VK_TRUE;
             outBlend->srcColorBlendFactor = outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             outBlend->dstColorBlendFactor = outBlend->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            /* Coverage: saturating additive accumulation (srcAlpha+dstAlpha, clamped to 1 by the
+             * normalized attachment format) - already ONE/ONE here, so unaffected by the a-
+             * squared defect this file otherwise fixes (that only affects modes whose src alpha
+             * factor was SRC_ALPHA). This is a deliberate, DOCUMENTED approximation, not a
+             * precise physical model: additive/glow effects do not truly "occlude" anything -
+             * they add light on top of whatever is behind them, including real-world passthrough
+             * - so their contribution to the render target's coverage channel is inherently a
+             * heuristic (more/brighter additive content saturates toward full coverage) rather
+             * than a geometrically exact area computation. This is an intrinsic limitation of
+             * additive blending composited over a real-world camera feed, not something any
+             * blend-factor choice can fully resolve - see docs/quest-tabletop.md's premultiplied-
+             * contract section. */
             *outDepthWriteDefault = false;
             break;
         case BZ_QUEST_TTA_BLEND_ADD_ALPHA:
             outBlend->blendEnable = VK_TRUE;
-            outBlend->srcColorBlendFactor = outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            outBlend->dstColorBlendFactor = outBlend->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            outBlend->srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            outBlend->dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            /* Coverage: same additive-family treatment as BZ_QUEST_TTA_BLEND_ADDITIVE above (ONE/
+             * ONE, not mirroring the color factors) - ADD_ALPHA's own color dst factor is ONE
+             * (dst is added-to, never occluded), the same "never occlude, only add" contract
+             * ADDITIVE's coverage treatment already documents, so it shares the identical
+             * saturating-accumulation coverage semantics and the identical additive-over-real-
+             * world documented limitation - not the "over" family's coverage formula. */
+            outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            outBlend->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             *outDepthWriteDefault = false;
             break;
         case BZ_QUEST_TTA_BLEND_MODULATE:
             outBlend->blendEnable = VK_TRUE;
-            outBlend->srcColorBlendFactor = outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
-            outBlend->dstColorBlendFactor = outBlend->dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            outBlend->srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+            outBlend->dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            /* Coverage: preserve dst's existing alpha EXACTLY unchanged (srcAlphaBlendFactor=
+             * ZERO discards the modulate texture's own alpha channel entirely, dstAlphaBlendFactor
+             * =ONE passes dst.a through) - a modulate pass only tints/darkens color already
+             * covering the framebuffer; it must never invent NEW room occlusion (drawing a
+             * modulate quad over untouched (0,0,0,0) passthroughspace is then a true no-op: dst is
+             * 0 so the DST_COLOR-scaled color output is 0 too), and it must never ERODE existing
+             * coverage either (the previous mirrored-factors behavior multiplied dst.a by the
+             * modulate texture's OWN alpha channel, which could partially punch through
+             * previously-opaque content if that texture had embedded alpha<1 - reproduced
+             * numerically before this fix, see docs/quest-tabletop.md). */
+            outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            outBlend->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             *outDepthWriteDefault = false;
             break;
         case BZ_QUEST_TTA_BLEND_MODULATE_2X:
             outBlend->blendEnable = VK_TRUE;
-            outBlend->srcColorBlendFactor = outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
-            outBlend->dstColorBlendFactor = outBlend->dstAlphaBlendFactor = VK_BLEND_FACTOR_SRC_COLOR;
+            outBlend->srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+            outBlend->dstColorBlendFactor = VK_BLEND_FACTOR_SRC_COLOR;
+            /* Coverage: same "preserve dst alpha exactly, never invent or erode occlusion"
+             * contract as BZ_QUEST_TTA_BLEND_MODULATE above - see that case's comment. */
+            outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            outBlend->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             *outDepthWriteDefault = false;
             break;
         case BZ_QUEST_TTA_BLEND_OPAQUE:
         case BZ_QUEST_TTA_BLEND_TRANSPARENT:
         default:
+            /* No blend equation runs at all for these two modes (blendEnable=false: the
+             * fragment shader's own output is written verbatim) - the shader itself is
+             * responsible for forcing its output alpha to exactly 1.0 for every surviving
+             * fragment here (never the source texture's own alpha channel, which is not
+             * guaranteed to be 1.0 even for materials with no real transparency - a distinct,
+             * fixed High-severity defect: "pinholes in solid units" letting passthrough leak
+             * through opaque geometry). See warcraft_frag.frag/warcraft_particle_frag.frag's
+             * own materialParams.z/particle coverage-flag doc comments. */
             outBlend->blendEnable = VK_FALSE;
             *outDepthWriteDefault = true;
             break;
@@ -1610,9 +1681,9 @@ static void draw_layer(VkCommandBuffer cmd, bzQuestVkWc3_t *vk3, const bzQuestVk
     bool twoSided = (layer->flags & (uint32_t)BZ_QUEST_MDX_GEO_TWOSIDED) != 0;
     bool noDepthTest = (layer->flags & (uint32_t)BZ_QUEST_MDX_GEO_NO_DEPTH_TEST) != 0;
     bool noDepthSet = (layer->flags & (uint32_t)BZ_QUEST_MDX_GEO_NO_DEPTH_SET) != 0;
-    VkPipelineColorBlendAttachmentState blendUnused;
+    VkPipelineColorBlendAttachmentState blendState;
     bool depthWriteDefault = true;
-    bz_quest_vk_wc3_blend_state_for_mode(layer->blendMode, &blendUnused, &depthWriteDefault);
+    bz_quest_vk_wc3_blend_state_for_mode(layer->blendMode, &blendState, &depthWriteDefault);
     bool depthWriteEnable = depthWriteDefault && !noDepthSet;
     VkPipeline pipeline = get_or_create_pipeline_variant(vk3, layer->blendMode, twoSided,
                                                         !noDepthTest, depthWriteEnable);
@@ -1640,9 +1711,18 @@ static void draw_layer(VkCommandBuffer cmd, bzQuestVkWc3_t *vk3, const bzQuestVk
      * (GEOA/KGAO) is folded into layer alpha here, CPU-side, matching
      * MDLX_EvaluateGeosetColor()/MDLX_EvaluateLayerAlpha()'s own
      * multiplicative combination (r_mdx_geoset.c) - no fragment shader
-     * change needed. */
+     * change needed. z = force-coverage-alpha-to-1 flag (High-severity
+     * reviewer fix, PR #28): true (1.0) for BZ_TTA_BLEND_OPAQUE/TRANSPARENT
+     * (blendState.blendEnable == false - no blend equation runs at all for
+     * these two modes, so the shader's own alpha is written VERBATIM to the
+     * framebuffer; the source texture's alpha channel is not guaranteed to
+     * be 1.0 even for materials with no real transparency, which would
+     * otherwise leave passthrough-visible "pinholes" through solid
+     * geometry - see warcraft_frag.frag). False (0.0) for every blended mode,
+     * which needs its own real computed alpha for the blend equation. */
     float materialParams[4] = {layer->alpha * geosetAlpha,
-                              layer->blendMode == BZ_QUEST_TTA_BLEND_TRANSPARENT ? 0.5f : 0.0f, 0.0f, 0.0f};
+                              layer->blendMode == BZ_QUEST_TTA_BLEND_TRANSPARENT ? 0.5f : 0.0f,
+                              blendState.blendEnable ? 0.0f : 1.0f, 0.0f};
     vkCmdPushConstants(cmd, vk3->pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(float) * 16,
                       sizeof(float) * 4, materialParams);
     vkCmdDrawIndexed(cmd, geoset->indexCount, 1, geoset->indexOffset, 0, 0);

@@ -883,33 +883,176 @@ fails — see the OpenXR spec's environment blend mode section,
 since `XrFrameEndInfo.layers` is composited back-to-front.
 
 **The projection layer's `layerFlags` must request source-alpha
-compositing, or it fully occludes the passthrough layer beneath it.**
-`tabletop_frag.frag` writes `vec4(fragColor, 1.0)` (opaque geometry) while
+compositing, or it fully occludes the passthrough layer beneath it, and
+must correctly declare whether the render target is premultiplied or
+straight alpha, or the compositor double-darkens/erodes coverage.**
 `bz_quest_vk_create_render_resources()`'s render-pass clear value clears
-untouched background pixels to alpha `0.0` (see "Vulkan render
-pass/pipeline/targets" above) — this only lets passthrough show through
-those untouched pixels if the compositor is told to honor the layer's
-alpha channel at all, and to interpret it as straight (non-premultiplied)
-alpha, since that's the form the shader writes (color channels are never
-scaled by alpha). `bz_quest_renderer.c` sets
-`projectionLayer.layerFlags = bz_quest_projection_layer_flags(/*unpremultipliedAlpha=*/true)`
-(`bz_quest_pure.h`/`.c`), which ORs in both
+untouched background pixels to `(0,0,0,0)` — this only lets passthrough
+show through those untouched pixels if the compositor is told to honor the
+layer's alpha channel at all. `bz_quest_renderer.c` sets
+`projectionLayer.layerFlags = bz_quest_projection_layer_flags(/*unpremultipliedAlpha=*/false)`
+(`bz_quest_pure.h`/`.c`), which ORs in
 `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` (without it, the
 runtime ignores the layer's alpha channel entirely and treats every texel
-as fully opaque, regardless of what the shader wrote) and
-`XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT` (without it, the runtime
-assumes the source is already premultiplied and double-darkens any
-partially-transparent texel — invisible for this scene's fully-opaque
-geometry texels, but wrong for the alpha=0 background, which is exactly
-where this bug hid). `bz_quest_renderer.c` also `_Static_assert`s the pure
-module's mirrored flag-bit literals (needed there because
-`bz_quest_pure.c` must stay host-buildable without `openxr.h`) against the
-real `XR_COMPOSITION_LAYER_*_BIT` constants at compile time, and
-`test_bz_quest_pure.c` has host-buildable regression tests asserting both
-bits are set for the arguments the renderer actually passes. See the OpenXR
-spec citation in "Documented quirks" below.
+as fully opaque, regardless of what the shader wrote) but **omits**
+`XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT`, because this render
+target's final RGBA is premultiplied by construction — see "Premultiplied-
+alpha blend/coverage contract" immediately below for the full derivation,
+the High-severity defect this fixes (PR #28), and why an earlier revision
+of this call site passed `true` instead. `bz_quest_renderer.c` also
+`_Static_assert`s the pure module's mirrored flag-bit literals (needed
+there because `bz_quest_pure.c` must stay host-buildable without
+`openxr.h`) against the real `XR_COMPOSITION_LAYER_*_BIT` constants at
+compile time, and `test_bz_quest_pure.c` has host-buildable regression
+tests asserting both bits are set/omitted correctly for the arguments the
+renderer actually passes. See the OpenXR spec citation in "Documented
+quirks" below.
 
-## Tabletop engine lifecycle bridge (`bz_quest_bridge.c`)
+### Premultiplied-alpha blend/coverage contract (all WC3 render pipelines)
+
+**High-severity reviewer finding, PR #28.** Vulkan's fixed-function blend
+equation applies its `src*Factor`/`dst*Factor` pair identically per
+channel: `result = srcFactor * src OP dstFactor * dst`. An earlier revision
+of `bz_quest_vk_wc3_blend_state_for_mode()` (the 7-mode blend table shared
+by `bz_quest_vk_wc3.c` models and `bz_quest_vk_wc3_particles.c` particles)
+and every one of `bz_quest_vk_wc3_terrain.c`/`_fog.c`/`_hud.c`/`_pointer.c`'s
+independently-written blend-state literals set
+`srcAlphaBlendFactor = srcColorBlendFactor` unconditionally, mirroring
+desktop's single `glBlendFunc(src, dst)` call (which applies one factor
+pair to *both* channels, since desktop's OpenGL window-backbuffer alpha is
+never read by anything downstream). For any `SRC_ALPHA`-based color blend
+(the `ALPHA` mode, and by extension every pipeline that copy-pasted its
+blend state), this makes the accumulated framebuffer alpha compute as
+`srcAlpha² + dstAlpha*(1-srcAlpha)` instead of the correct linear Porter-Duff
+coverage `srcAlpha + dstAlpha*(1-srcAlpha)` — harmless on desktop (that
+alpha channel is discarded at present), **but on Quest that same alpha
+channel is exactly what `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`
+feeds to the passthrough compositor**, so squaring/eroding it produces real,
+visible defects: double-darkened semi-transparent geometry, passthrough
+room leakage through fog/water/HUD panels/selection markers, and even
+pinholes in nominally-opaque units whose texture's own alpha channel is
+below 1 (written verbatim once `blendEnable=false`, with no blend equation
+running at all to normalize it).
+
+Reproduced (before any code change) with a bounded pure-math probe
+replicating Vulkan's fixed-function blend equation numerically (never
+executed against a device — this environment has none): 50% white over a
+cleared `(0,0,0,0)` background gave the buggy stored alpha `0.25` instead of
+the analytically-correct `0.5`; combined with the (then-also-wrong)
+`unpremultipliedAlpha=true` compositor flag, the final composited result
+came out `0.875` opacity instead of the analytically-correct `1.0` for two
+stacked 50%-white layers — a real, human-visible double-darkening. A
+MODULATE pass's own unrelated texture alpha (0.7) additionally eroded an
+existing 50% coverage down to `0.35` instead of preserving it, and a fog
+overlay darkening already-opaque terrain eroded its alpha from `1.0` down to
+`0.75` — a fourth distinct room-leakage path. All four were confirmed fixed
+by the change below before it was committed; the disposable probe was
+deleted immediately after (never part of the repo).
+
+**The fix adopts one coherent premultiplied-alpha convention for the entire
+render target**, with three parts:
+
+1. **Flip the XR layer flag**: `unpremultipliedAlpha=false` (previous
+   section) — the compositor now correctly treats this render target's
+   alpha as premultiplied.
+2. **Correct, non-mirrored alpha-coverage factors per blend mode.** Color
+   factors are byte-for-byte unchanged from before (color output is
+   visually identical — `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA` naturally
+   accumulates a *valid premultiplied* RGB as a side effect of the "over"
+   operator, starting from a `(0,0,0,0)`-cleared background, with zero
+   shader changes required anywhere):
+
+   | Mode | Color factors (unchanged) | Alpha factors (fixed) | Rationale |
+   |------|---------------------------|------------------------|-----------|
+   | `ALPHA` | `SRC_ALPHA` / `ONE_MINUS_SRC_ALPHA` | `ONE` / `ONE_MINUS_SRC_ALPHA` | Standard premultiplied "over": linear coverage, not squared |
+   | `ADDITIVE` | `ONE` / `ONE` | `ONE` / `ONE` (already correct — `ONE` isn't self-referential) | Deliberate, imperfect approximation: additive light doesn't truly occlude anything behind it; see limitation below |
+   | `ADD_ALPHA` | `SRC_ALPHA` / `ONE` | `ONE` / `ONE` | Same "additive family" as `ADDITIVE` (dst factor `ONE` means "never occlude, only add") |
+   | `MODULATE` | `DST_COLOR` / `ZERO` | `ZERO` / `ONE` | Preserves dst's existing coverage **exactly** — a modulate pass must never invent or erode room occlusion, per the reviewer |
+   | `MODULATE_2X` | `DST_COLOR` / `SRC_COLOR` | `ZERO` / `ONE` | Same coverage rationale as `MODULATE` |
+   | `OPAQUE` / `TRANSPARENT` (cutout) | n/a (`blendEnable=false`) | n/a — see coverage-forcing mechanism below | Fixed-function blending never runs; the shader's own output alpha would otherwise be written verbatim |
+
+   The six previously-duplicated non-model blend-state literals
+   (`bz_quest_vk_wc3_terrain.c`'s water pipeline, `_fog.c`'s fog-overlay and
+   selection-marker pipelines, `_hud.c`'s panel and text pipelines,
+   `_pointer.c`'s ray/reticle pipeline — all a plain `SRC_ALPHA`/
+   `ONE_MINUS_SRC_ALPHA` "standard alpha over" case) are now expressed via
+   one shared `bz_quest_vk_straight_over_blend_state()` helper
+   (`bz_quest_vk.h`/`.c`) instead of six independently-maintained copies —
+   a future correctness fix to this exact case need only change one place.
+3. **Force coverage alpha to exactly 1.0 for every `blendEnable=false`
+   (opaque/cutout) draw**, since Vulkan's fixed-function blending cannot
+   constrain output alpha when disabled — the shader's own alpha (which may
+   legitimately be < 1 from an unrelated source texture) would otherwise be
+   written straight to the framebuffer, producing a pinhole. A small
+   CPU-computed boolean flag (re-checking the same `blendEnable` already
+   resolved by `bz_quest_vk_wc3_blend_state_for_mode()`) is passed to the
+   fragment shader via a push constant and forces its output alpha to `1.0`
+   when set: model layers reuse the existing `materialParams.z` component
+   (no push-constant size change), while particles and terrain ground/cliff
+   each gained a new `coverageParams` fragment-stage push-constant range
+   (mirroring the model renderer's own established two-range vertex+
+   fragment split — see `warcraft_frag.frag`/`warcraft_particle_frag.frag`/
+   `terrain_frag.frag`'s coverage-forcing branch and their `.vert`
+   counterparts' matching struct layout). Only `BZ_QUEST_TTA_BLEND_TRANSPARENT`
+   is actually reachable from real PRE2 `FilterMode` data for particles (see
+   "Layer 9"'s traced `FilterMode` mapping table — no raw value maps to
+   `OPAQUE`), but every site checks the real resolved `blendEnable` rather
+   than assuming, matching the model renderer's own equivalent check.
+
+**Additive-over-real-world limitation (documented, not fixed — a physical
+constraint, not a bug):** `ADDITIVE`/`ADD_ALPHA` alpha factors are `ONE`/
+`ONE` by design, meaning an additive spell effect never occludes the
+passthrough camera feed or geometry behind it, no matter how bright it
+renders — this matches how additive/glow effects behave against a black
+background on desktop, but a real Quest passthrough scene has no "black
+background": a bright additive effect will always let some real-world light
+through where a fully opaque effect would not. This is an inherent property
+of the additive blend equation (there is no `dst` occlusion term to
+correct), not something the alpha-coverage fix changes or could change
+without abandoning the additive look entirely.
+
+Audited/fixed pipelines (every WC3 blend/composite pipeline in this
+renderer): `bz_quest_vk_wc3.c` (model material layers, all 7 modes),
+`bz_quest_vk_wc3_particles.c` (particle billboards, all 7 modes),
+`bz_quest_vk_wc3_terrain.c` (ground/cliff opaque + water blended),
+`bz_quest_vk_wc3_fog.c` (fog-of-war overlay + selection markers),
+`bz_quest_vk_wc3_hud.c` (status/command-card panel + text), and
+`bz_quest_vk_wc3_pointer.c` (ray/reticle). `bz_quest_vk.c`'s
+`tabletop_frag.frag` diagnostic-scene pipeline needed no blend-state change
+(it was never blended, always `vec4(fragColor, 1.0)`), but its render
+target now correctly matches the same premultiplied contract as every WC3
+pass sharing the same swapchain image.
+
+Guarded structurally by
+`platform/android/quest/scripts/test-wc3-premultiplied-blend-layout.sh`
+(wired into `make test`/`make quest` as
+`test-quest-wc3-premultiplied-blend-layout`), which checks: the XR flag is
+`false`; every mode's alpha factors in
+`bz_quest_vk_wc3_blend_state_for_mode()` match the table above (not
+mirrored); exactly 6 `bz_quest_vk_straight_over_blend_state()` call sites
+exist across terrain/fog/hud/pointer; the mirrored-defect pattern
+(`srcColorBlendFactor = srcAlphaBlendFactor` or equivalent) does not exist
+anywhere in the file; and all 3 CPU push-constant sites plus all 3 shader
+coverage-forcing branches (model/particle/terrain) are present. Proven to
+catch real regressions before being trusted: reverting the XR flag to
+`true` fails the guard with an explicit message; reintroducing the mirrored
+alpha-factor bug in the `ALPHA` case fails the guard on both the blend-mode
+check and the repo-wide defect-pattern grep; removing a shared-helper call
+site (e.g. `_pointer.c`) fails the guard's call-site count; and removing a
+shader's coverage-forcing branch (e.g. `terrain_frag.frag`) fails the
+guard's per-shader check — each was verified to fail with the expected
+message, then reverted and re-confirmed clean.
+
+Host-tested with 7 new pure blend-math assertions in `test_bz_quest_pure.c`
+(`blend_equation()`/`blend_factor_value()` implement the *fixed, external,
+spec-mandated* Vulkan blend formula itself — not a reimplemented oracle of
+this codebase's own business logic, since the formula being verified is
+Khronos's, not ours) covering: opaque forces coverage alpha to 1, alpha=0.5
+over transparent, alpha=0.5 over already-opaque, fog darkening over opaque
+preserves alpha=1, additive saturates without erosion, modulate over empty
+background is a no-op, and modulate never erodes existing coverage.
+
+
 
 ### Engine/renderer threading boundary
 
@@ -4258,6 +4401,12 @@ above for why runtime OpenXR negotiation replaces a compile-time gate here:
 - No Vulkan multiview, MSAA, or fixed foveation (`XR_FB_foveation`) — see
   "Vulkan render pass/pipeline/targets" above for why this is an explicit,
   documented seam rather than an oversight.
+- **Additive/add-alpha blend modes never occlude the passthrough camera feed
+  or geometry behind them** (alpha factors are `ONE`/`ONE` by design — see
+  "Premultiplied-alpha blend/coverage contract" above) — a physical property
+  of the additive blend equation against a real-world background with no
+  "black" to add onto, not a bug this project's alpha-coverage fix (PR #28)
+  changes or could change without abandoning the additive look entirely.
 - The tabletop asset ABI **was** widened once, in layer 5C: `bzTTAsset_t`
   went from v2 (layers 5A/5B's static geometry/materials + terrain) to v3
   (node hierarchy/keyframe tracks/sequences/global sequences/geoset alpha),
@@ -5145,6 +5294,119 @@ longer the Quest app has run continuously.
 - **Not verified this session**: unchanged from layer 9's own hardware/
   retail-data-only gates above - this is a pure host-logic fix with no new
   hardware-only surface of its own.
+
+### What *was* verified this session (premultiplied-alpha blend/coverage contract fix, PR #28)
+
+Cumulative rubber-duck + independent code review flagged a **Critical**
+cross-layer passthrough-compositing defect at PR #28 tip `218ce0d` (see
+"Premultiplied-alpha blend/coverage contract" above for the full mechanism
+and per-mode factor table):
+
+- **Reproduced (before any code change)** with a bounded, disposable
+  pure-math probe (never part of the repo, deleted immediately after use)
+  numerically replicating Vulkan's fixed-function blend equation against
+  the exact factor pairs the (then-buggy) production
+  `bz_quest_vk_wc3_blend_state_for_mode()`/inline pipeline literals used.
+  Confirmed: (a) the a-squared defect (50% white over cleared background:
+  buggy `a=0.25` vs. correct `a=0.5`); (b) the full double-darkening chain
+  combining the buggy stored alpha with the old `unpremultipliedAlpha=true`
+  compositor flag (`0.875` vs. analytically-correct `1.0` for two stacked
+  50%-white layers); (c) MODULATE coverage erosion (a 0.7-alpha modulate
+  texture eroding existing 50% coverage to `0.35` instead of preserving it);
+  and (d) fog-over-opaque erosion (fog darkening over already-opaque
+  terrain eroding alpha from `1.0` to `0.75`, a fourth distinct
+  room-leakage path). All four were confirmed fixed by the change below
+  before it was committed.
+- **Fixed** by adopting one coherent premultiplied-alpha convention
+  end-to-end: flipped `bz_quest_renderer.c`'s
+  `bz_quest_projection_layer_flags(/*unpremultipliedAlpha=*/false)` call;
+  corrected `bz_quest_vk_wc3_blend_state_for_mode()`'s per-mode alpha
+  factors to the table above (never mirroring the color factors); added a
+  small CPU+shader "force coverage alpha to 1" mechanism for every
+  `blendEnable=false` (opaque/cutout) draw path (model layers, particles,
+  terrain ground/cliff); and introduced
+  `bz_quest_vk_straight_over_blend_state()` (`bz_quest_vk.h`/`.c`) as a
+  single shared "standard alpha over" helper, replacing 6 independently-
+  duplicated inline blend-state literals across
+  `bz_quest_vk_wc3_terrain.c`/`_fog.c` (x2)/`_hud.c` (x2)/`_pointer.c`.
+  Color output is byte-for-byte visually unchanged everywhere; only the
+  alpha-coverage math and the XR compositor flag changed.
+- **Added 7 new committed pure blend-math tests**
+  (`test_bz_quest_pure.c`: `blend_equation()`/`blend_factor_value()`
+  implement the fixed, external, Khronos-spec-mandated Vulkan blend formula
+  itself, cross-checked against the real production factor choices via a
+  structural guard rather than a reimplemented business-logic oracle)
+  covering opaque-forces-coverage-alpha-1, alpha=0.5-over-transparent,
+  alpha=0.5-over-opaque, fog-over-opaque-preserves-alpha-1,
+  additive-saturates-without-erosion, modulate-over-empty-is-a-no-op, and
+  modulate-never-erodes-existing-coverage.
+- **Added a new structural guard**,
+  `platform/android/quest/scripts/test-wc3-premultiplied-blend-layout.sh`
+  (wired into `make test`/`make quest` as
+  `test-quest-wc3-premultiplied-blend-layout`), checking the XR flag, every
+  blend mode's alpha factors, the shared helper's exactly-6 call sites, the
+  absence of the mirrored-defect pattern anywhere in the file, and all 3
+  CPU+shader coverage-forcing sites. **Proven to catch real regressions**
+  before being trusted: reverting the XR flag to `true` failed the guard
+  with an explicit message; reintroducing the mirrored alpha-factor defect
+  in the `ALPHA` case failed on both the blend-mode-table check and the
+  repo-wide defect-pattern grep; removing the `_pointer.c` shared-helper
+  call site failed the guard's call-site count (5 found, 6 expected);
+  removing `terrain_frag.frag`'s coverage-forcing branch failed the
+  per-shader check — each was reverted and re-confirmed clean immediately
+  after capturing the failure evidence.
+- **Fixed a pre-existing guard regression this refactor caused**:
+  `test-wc3-pointer-layout.sh`'s "(4) straight-alpha blend" check grepped
+  for the OLD inline blend-state literal verbatim in
+  `bz_quest_vk_wc3_pointer.c`; DRY-ing that pipeline onto the new shared
+  helper made the literal (correctly) disappear from that file. Updated the
+  check to assert the shared-helper call site instead (the helper's own
+  factor correctness is covered by the new guard above), keeping the
+  original invariant ("the pointer blends correctly over passthrough")
+  intact rather than silencing or deleting the check.
+- Rewrote the stale `unpremultipliedAlpha=true` rationale in this doc's
+  "Composition layer assembly" section and in `bz_quest_pure.h`'s
+  `bz_quest_projection_layer_flags()` doc comment (including full
+  before/after history), added the "Premultiplied-alpha blend/coverage
+  contract" section above, and added the additive-over-real-world
+  limitation to "Current limitations".
+- `make -f platform/android/quest/build.mk test-quest-host-tests` -
+  **5388/5388** (up from 5366; +22 new assertions across the 7 new tests).
+  Every Quest structural guard passes, including the new
+  `test-quest-wc3-premultiplied-blend-layout` and the corrected
+  `test-quest-wc3-pointer-layout`. `make test-quest-bridge` - **95/95**
+  (unaffected; this fix never touches the bridge ABI). The full repo-root
+  `make test` passes end-to-end (`EXIT_CODE=0`), including every shader
+  compiling cleanly via the real NDK-equivalent `glslc` (Homebrew
+  `shaderc`, via the established fake-NDK-layout technique) and every
+  touched `.c` file syntax-checking cleanly against the **real** Vulkan
+  (Homebrew `vulkan-headers`) and OpenXR (official `KhronosGroup/OpenXR-SDK`
+  `main` branch headers, fetched fresh this session) headers — stronger
+  validation than a hand-rolled stub. **`make quest` with
+  `JAVA_HOME=temurin-17.jdk`** (real arm64-v8a Gradle/CMake
+  `assembleDebug`) - **`BUILD SUCCESSFUL`**, including
+  `buildCMakeDebug[arm64-v8a]` actually compiling every changed `.c`/shader
+  file through the real Android NDK toolchain, plus
+  `verify-native-lib.sh` confirming `lib/arm64-v8a/libbz_quest_native.so`.
+  `git diff --check` against `clancey-add-quest-hand-tracking` reports zero
+  whitespace errors. All scratch/stub directories used for host-side
+  verification were deleted before commit.
+- **Not verified this session (hardware/retail-data-only)**: real visual
+  confirmation that double-darkening/room-leakage/pinholes are gone (no
+  physical Quest device in this environment) and that real PRE2 particle/
+  material blend modes look correct against retail WC3 data (no map is
+  ever loaded in this environment - see "Current limitations"). See
+  "Hardware-only acceptance gates" below for the general caveat this adds
+  to; the acceptance procedure's visual checklist should specifically
+  confirm: (1) a translucent unit/spell effect over the passthrough camera
+  feed is not noticeably darker/more opaque than its authoring alpha
+  implies; (2) fog-of-war and the selection-marker ring do not let the real
+  room show through at their edges/overlaps; (3) HUD panels/text remain
+  fully opaque with no passthrough bleed-through; (4) solid (opaque-blend)
+  units show no pinhole/speckling from their own texture's alpha channel;
+  (5) additive spell effects (e.g. a glow) are expected to still let some
+  passthrough through even at full brightness - this is the documented,
+  inherent additive-over-real-world limitation, not a regression.
 
 ## Related documents
 

@@ -11,6 +11,11 @@
 
 typedef struct {
     float viewProj[16];
+    /* x = force-coverage-alpha-to-1 flag (High-severity reviewer fix, PR #28) - see
+     * warcraft_particle_frag.frag's own doc comment; y/z/w unused (matches
+     * warcraft_vert.vert's materialParams.z/w-unused convention). Fragment-stage-only, a
+     * separate push range from viewProj - see bz_quest_vk_wc3_particles_create()'s doc comment. */
+    float coverageParams[4];
 } ParticlePushConsts_t;
 
 static bool find_memory_type(VkPhysicalDevice physicalDevice, uint32_t typeBits,
@@ -176,15 +181,24 @@ bool bz_quest_vk_wc3_particles_create(const bzQuestVk_t *vk, const bzQuestVkWc3_
         goto fail;
 
     /* Set 0: reuses vk3's OWN descriptor set layout (one combined-image-sampler at binding 0) -
-     * see this file's header comment on why a second layout/pool/sampler is unnecessary. Push
-     * constant: viewProj only (vertex stage only - the fragment shader has no uniform state). */
-    VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ParticlePushConsts_t)};
+     * see this file's header comment on why a second layout/pool/sampler is unnecessary. Two
+     * push-constant ranges (mirrors bz_quest_vk_wc3.c's own model-layer split exactly): vertex-
+     * stage viewProj at offset 0, fragment-stage coverageParams at offset 64 (the force-alpha-1
+     * flag for BZ_QUEST_TTA_BLEND_OPAQUE/TRANSPARENT particle runs - see
+     * warcraft_particle_frag.frag's doc comment). */
+    VkPushConstantRange ranges[2];
+    ranges[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    ranges[0].offset = 0;
+    ranges[0].size = sizeof(float) * 16;
+    ranges[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    ranges[1].offset = sizeof(float) * 16;
+    ranges[1].size = sizeof(float) * 4;
     VkPipelineLayoutCreateInfo layoutInfo = {0};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layoutInfo.setLayoutCount = 1;
     layoutInfo.pSetLayouts = &vk3->descriptorSetLayout;
-    layoutInfo.pushConstantRangeCount = 1;
-    layoutInfo.pPushConstantRanges = &pc;
+    layoutInfo.pushConstantRangeCount = 2;
+    layoutInfo.pPushConstantRanges = ranges;
     if (vkCreatePipelineLayout(vk->device, &layoutInfo, NULL, &out->pipelineLayout) != VK_SUCCESS) {
         BZ_QUEST_LOGE("bz_quest_vk_wc3_particles: vkCreatePipelineLayout failed");
         goto fail;
@@ -254,6 +268,8 @@ void bz_quest_vk_wc3_particles_record(bzQuestVkWc3Particles_t *vkParticles, VkCo
     vkCmdBindVertexBuffers(cmd, 0, 1, &vkParticles->vertexBuffer, &offset);
     ParticlePushConsts_t pc;
     memcpy(pc.viewProj, viewProj, sizeof(pc.viewProj));
+    vkCmdPushConstants(cmd, vkParticles->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                      sizeof(pc.viewProj), pc.viewProj);
     for (uint32_t i = 0; i < vkParticles->runCount; i++) {
         const bzQuestWc3ParticleDrawRun_t *run = &vkParticles->runs[i];
         /* Miss = not yet resident this frame - transient, matches the model renderer's own "hit
@@ -266,7 +282,21 @@ void bz_quest_vk_wc3_particles_record(bzQuestVkWc3Particles_t *vkParticles, VkCo
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkParticles->pipelineLayout, 0, 1,
                                &tex->descriptorSet, 0, NULL);
-        vkCmdPushConstants(cmd, vkParticles->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+        /* Force-coverage-alpha-to-1 flag (High-severity reviewer fix, PR #28) - true for
+         * BZ_QUEST_TTA_BLEND_OPAQUE/TRANSPARENT runs (blendEnable=false: no blend equation runs at
+         * all, this run's own shader alpha is written verbatim to the framebuffer) - see
+         * warcraft_particle_frag.frag's doc comment. Only BZ_QUEST_TTA_BLEND_TRANSPARENT is reachable
+         * from real PRE2 FilterMode data (see games/warcraft-3/docs/file-formats/mdx.md's
+         * FilterMode mapping table - no raw value maps to OPAQUE), but this checks the actual
+         * resolved blendEnable rather than assuming, matching bz_quest_vk_wc3.c's draw_layer()
+         * own equivalent check exactly. */
+        VkPipelineColorBlendAttachmentState blendState;
+        bool depthWriteUnused = true;
+        bz_quest_vk_wc3_blend_state_for_mode(run->blendMode, &blendState, &depthWriteUnused);
+        pc.coverageParams[0] = blendState.blendEnable ? 0.0f : 1.0f;
+        pc.coverageParams[1] = pc.coverageParams[2] = pc.coverageParams[3] = 0.0f;
+        vkCmdPushConstants(cmd, vkParticles->pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                          sizeof(pc.viewProj), sizeof(pc.coverageParams), pc.coverageParams);
         vkCmdDraw(cmd, run->vertexCount, 1, run->firstVertex, 0);
     }
 }

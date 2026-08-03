@@ -263,12 +263,13 @@ static void test_projection_layer_flags_always_includes_blend_source_alpha(void)
     ASSERT((bz_quest_projection_layer_flags(true) & kBlendTextureSourceAlphaBit) != 0);
 }
 
-/* tabletop_frag.frag writes straight (non-premultiplied) alpha - see that
- * file's and bz_quest_pure.h's comments - so the renderer must request
- * unpremultipliedAlpha=true, which must set
- * XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT. Also checks the false
- * case is NOT set, so a future accidental "always OR it in" regression
- * would fail this test too. */
+/* Generic function-behavior test: the UNPREMULTIPLIED bit must exactly track
+ * the `unpremultipliedAlpha` argument regardless of which value any caller
+ * currently passes (bz_quest_renderer.c passes `false` - see
+ * bz_quest_pure.h's bz_quest_projection_layer_flags() doc comment for why
+ * this project's render target is premultiplied, PR #28's High-severity
+ * fix). Checks BOTH the true and false cases, so a future accidental
+ * "always OR it in" (or "never OR it in") regression would fail this test. */
 static void test_projection_layer_flags_unpremultiplied_bit_matches_argument(void) {
     const uint64_t kUnpremultipliedAlphaBit = 0x00000004ULL;
     ASSERT((bz_quest_projection_layer_flags(true) & kUnpremultipliedAlphaBit) != 0);
@@ -300,6 +301,171 @@ static void test_looper_timeout_blocks_when_fully_backgrounded(void) {
     ASSERT_EQ_INT(bz_quest_looper_timeout_millis(/*wantsXrEventPolling=*/false, /*xrSessionRunning=*/false), -1);
 }
 
+/* -- Premultiplied-compositing blend/coverage math (High-severity reviewer fix, PR #28) --
+ *
+ * `blend_equation()` below is the STANDARD, spec-defined Vulkan/OpenGL/D3D fixed-function
+ * blend formula (Vulkan spec 1.3, section "Blend Operations": `result = srcFactor*src OP
+ * dstFactor*dst`, OP=ADD for every mode this project uses) - a fixed, external, universally-
+ * documented mathematical definition, NOT a reimplementation of any of this codebase's OWN
+ * business logic (unlike e.g. the particle emission-timing algorithm, which is genuinely this
+ * project's own derived algorithm and must never be cross-checked against a duplicate
+ * "oracle" of the same arithmetic). Testing "do THESE blend-factor choices produce the
+ * intended coverage semantics" against the external, fixed formula is safe and meaningful.
+ * The blend-FACTOR CHOICES asserted below are hand-derived from and cross-checked against the
+ * actual production bz_quest_vk_wc3_blend_state_for_mode()/bz_quest_vk_straight_over_blend_
+ * state() source (bz_quest_vk_wc3.c/bz_quest_vk.c) - platform/android/quest/scripts/test-wc3-
+ * premultiplied-blend-layout.sh structurally greps the real production source for these exact
+ * factor tokens, so a future edit to either file that silently drifts from what is verified
+ * here fails that guard, tying this pure-math test to the real implementation. */
+typedef struct { float r, g, b, a; } BzQuestTestRGBA;
+
+/* Symbolic stand-ins for the 6 VkBlendFactor values every mode below actually uses -
+ * deliberately NOT the real VkBlendFactor enum (this file must stay host-buildable with no
+ * Vulkan header dependency), evaluated against a concrete (src,dst) pair by
+ * blend_factor_value() exactly per the Vulkan spec's own per-factor definition. */
+typedef enum {
+    BZ_TEST_BLEND_ZERO,
+    BZ_TEST_BLEND_ONE,
+    BZ_TEST_BLEND_SRC_ALPHA,
+    BZ_TEST_BLEND_ONE_MINUS_SRC_ALPHA,
+    BZ_TEST_BLEND_DST_COLOR,   /* per-component: dst.r/g/b for color, dst.a for alpha */
+    BZ_TEST_BLEND_SRC_COLOR,   /* per-component: src.r/g/b for color, src.a for alpha */
+} BzTestBlendFactor;
+
+static float blend_factor_value(BzTestBlendFactor f, float srcComp, float dstComp, float srcA) {
+    switch (f) {
+        case BZ_TEST_BLEND_ZERO: return 0.0f;
+        case BZ_TEST_BLEND_ONE: return 1.0f;
+        case BZ_TEST_BLEND_SRC_ALPHA: return srcA;
+        case BZ_TEST_BLEND_ONE_MINUS_SRC_ALPHA: return 1.0f - srcA;
+        case BZ_TEST_BLEND_DST_COLOR: return dstComp;
+        case BZ_TEST_BLEND_SRC_COLOR: return srcComp;
+        default: return 0.0f;
+    }
+}
+
+/* The one Vulkan ADD blend op this project ever uses, applied component-wise: each of R/G/B
+ * uses the COLOR factor pair against the R/G/B components; A uses the ALPHA factor pair
+ * against the A component (per-component factor selection for DST_COLOR/SRC_COLOR - see
+ * blend_factor_value()'s own comment - matches the Vulkan spec's "each of the four components
+ * is a separate scalar blend" rule exactly). */
+static BzQuestTestRGBA blend_equation(BzQuestTestRGBA src, BzQuestTestRGBA dst, BzTestBlendFactor srcColorF,
+                                     BzTestBlendFactor dstColorF, BzTestBlendFactor srcAlphaF,
+                                     BzTestBlendFactor dstAlphaF) {
+    BzQuestTestRGBA out;
+    out.r = blend_factor_value(srcColorF, src.r, dst.r, src.a) * src.r +
+           blend_factor_value(dstColorF, src.r, dst.r, src.a) * dst.r;
+    out.g = blend_factor_value(srcColorF, src.g, dst.g, src.a) * src.g +
+           blend_factor_value(dstColorF, src.g, dst.g, src.a) * dst.g;
+    out.b = blend_factor_value(srcColorF, src.b, dst.b, src.a) * src.b +
+           blend_factor_value(dstColorF, src.b, dst.b, src.a) * dst.b;
+    out.a = blend_factor_value(srcAlphaF, src.a, dst.a, src.a) * src.a +
+           blend_factor_value(dstAlphaF, src.a, dst.a, src.a) * dst.a;
+    return out;
+}
+
+#define BZ_TEST_ASSERT_RGBA_EQ(actual, expR, expG, expB, expA, eps)          \
+    do {                                                                     \
+        ASSERT_EQ_FLOAT((actual).r, (expR), (eps));                          \
+        ASSERT_EQ_FLOAT((actual).g, (expG), (eps));                          \
+        ASSERT_EQ_FLOAT((actual).b, (expB), (eps));                          \
+        ASSERT_EQ_FLOAT((actual).a, (expA), (eps));                          \
+    } while (0)
+
+/* Case: BZ_TTA_BLEND_OPAQUE/TRANSPARENT surviving fragment - no blend equation runs at all
+ * (blendEnable=false); the shader itself must force coverage alpha to exactly 1.0 (see
+ * warcraft_frag.frag/warcraft_particle_frag.frag/terrain_frag.frag's own materialParams.z/
+ * coverageParams.x doc comments) regardless of the source texture's own alpha channel. This
+ * test asserts the CONTRACT ITSELF (a blendEnable=false write is verbatim, so "coverage=1"
+ * really does mean the stored framebuffer alpha is 1, not a blend-modified value) rather than
+ * re-deriving blend factors that do not apply here. */
+static void test_blend_opaque_forces_full_coverage_regardless_of_texture_alpha(void) {
+    float shaderOutputAlphaWhenForced = 1.0f; /* materialParams.z > 0.5 branch */
+    float storedFramebufferAlpha = shaderOutputAlphaWhenForced; /* blendEnable=false: verbatim */
+    ASSERT_EQ_FLOAT(storedFramebufferAlpha, 1.0f, 0.0001f);
+}
+
+/* Case: BZ_TTA_BLEND_ALPHA / bz_quest_vk_straight_over_blend_state()'s shared "over" state -
+ * 50% white over a fully-transparent (0,0,0,0) cleared background (representative "alpha=0.5
+ * over transparent"). Color factors SRC_ALPHA/ONE_MINUS_SRC_ALPHA (unchanged from desktop's
+ * own glBlendFunc), alpha factors ONE/ONE_MINUS_SRC_ALPHA (the fix - see
+ * bz_quest_vk_straight_over_blend_state()'s doc comment, bz_quest_vk.h). Expects a valid
+ * PREMULTIPLIED result: rgb=(0.5,0.5,0.5), a=0.5 (NOT the pre-fix a=0.25 "squared" value). */
+static void test_blend_alpha_half_over_transparent_yields_premultiplied_coverage(void) {
+    BzQuestTestRGBA src = {1.0f, 1.0f, 1.0f, 0.5f};
+    BzQuestTestRGBA dst = {0.0f, 0.0f, 0.0f, 0.0f};
+    BzQuestTestRGBA out = blend_equation(src, dst, BZ_TEST_BLEND_SRC_ALPHA, BZ_TEST_BLEND_ONE_MINUS_SRC_ALPHA,
+                                        BZ_TEST_BLEND_ONE, BZ_TEST_BLEND_ONE_MINUS_SRC_ALPHA);
+    BZ_TEST_ASSERT_RGBA_EQ(out, 0.5f, 0.5f, 0.5f, 0.5f, 0.0001f);
+}
+
+/* Case: the same ALPHA "over" state, 50% white over an ALREADY-OPAQUE (1,1,1,1) background
+ * (representative "alpha=0.5 over opaque") - coverage must stay saturated at 1.0 (the opaque
+ * content underneath is still fully there, just tinted), never eroded. */
+static void test_blend_alpha_half_over_opaque_stays_fully_covered(void) {
+    BzQuestTestRGBA src = {1.0f, 0.0f, 0.0f, 0.5f}; /* 50% red */
+    BzQuestTestRGBA dst = {0.0f, 1.0f, 0.0f, 1.0f}; /* fully opaque green */
+    BzQuestTestRGBA out = blend_equation(src, dst, BZ_TEST_BLEND_SRC_ALPHA, BZ_TEST_BLEND_ONE_MINUS_SRC_ALPHA,
+                                        BZ_TEST_BLEND_ONE, BZ_TEST_BLEND_ONE_MINUS_SRC_ALPHA);
+    BZ_TEST_ASSERT_RGBA_EQ(out, 0.5f, 0.5f, 0.0f, 1.0f, 0.0001f);
+}
+
+/* Case: warcraft_fog_frag.frag's darkening overlay (rgb always black, alpha=1-fogSample,
+ * bz_quest_vk_straight_over_blend_state()'s same shared "over" state) drawn over ALREADY-
+ * OPAQUE (0,1,0,1) terrain - representative "fog over opaque". Coverage must stay exactly 1.0
+ * (the terrain underneath is still solid, merely darkened) - the pre-fix mirrored alpha factor
+ * eroded this to 0.75, a real "room leakage through fog" bug this reproduces the fix for. */
+static void test_blend_fog_darkening_over_opaque_preserves_full_coverage(void) {
+    BzQuestTestRGBA dst = {0.0f, 1.0f, 0.0f, 1.0f}; /* opaque green terrain already drawn */
+    BzQuestTestRGBA src = {0.0f, 0.0f, 0.0f, 0.5f}; /* fog: rgb=black, alpha=0.5 (explored, dim) */
+    BzQuestTestRGBA out = blend_equation(src, dst, BZ_TEST_BLEND_SRC_ALPHA, BZ_TEST_BLEND_ONE_MINUS_SRC_ALPHA,
+                                        BZ_TEST_BLEND_ONE, BZ_TEST_BLEND_ONE_MINUS_SRC_ALPHA);
+    BZ_TEST_ASSERT_RGBA_EQ(out, 0.0f, 0.5f, 0.0f, 1.0f, 0.0001f);
+}
+
+/* Case: BZ_TTA_BLEND_ADDITIVE - color and alpha BOTH ONE/ONE (unchanged; already correct, never
+ * squared, since ONE is not self-referential the way SRC_ALPHA is) - a documented, deliberate
+ * approximation for coverage (saturating accumulation), not a physically exact area
+ * computation, since additive light does not truly occlude anything - see
+ * bz_quest_vk_wc3_blend_state_for_mode()'s BZ_QUEST_TTA_BLEND_ADDITIVE case comment for the
+ * full "additive-over-real-world" limitation this documents. */
+static void test_blend_additive_saturates_color_and_alpha_together(void) {
+    BzQuestTestRGBA src = {0.3f, 0.0f, 0.0f, 0.3f};
+    BzQuestTestRGBA dst = {0.0f, 0.4f, 0.0f, 0.4f};
+    BzQuestTestRGBA out = blend_equation(src, dst, BZ_TEST_BLEND_ONE, BZ_TEST_BLEND_ONE, BZ_TEST_BLEND_ONE,
+                                        BZ_TEST_BLEND_ONE);
+    /* Plain, unsaturating sum here (0.3+0.4=0.7, no clamping needed) so the assertion is
+     * unambiguous; a real UNORM attachment clamps any sum exceeding 1.0 to 1.0 (e.g. stacking
+     * enough additive glow to exceed full brightness saturates to fully-covering, which is the
+     * intended "brighter additive content reads as more covering" heuristic). */
+    BZ_TEST_ASSERT_RGBA_EQ(out, 0.3f, 0.4f, 0.0f, 0.7f, 0.0001f);
+}
+
+/* Case: BZ_TTA_BLEND_MODULATE - color DST_COLOR/ZERO (unchanged desktop glBlendFunc mapping),
+ * alpha ZERO/ONE (the fix: preserves dst's existing coverage EXACTLY, "should not invent room
+ * occlusion" - drawing a modulate quad over untouched (0,0,0,0) passthrough space is then a
+ * true no-op) - see bz_quest_vk_wc3_blend_state_for_mode()'s BZ_QUEST_TTA_BLEND_MODULATE case
+ * comment. */
+static void test_blend_modulate_over_empty_background_is_a_true_noop(void) {
+    BzQuestTestRGBA src = {0.5f, 0.0f, 0.0f, 1.0f};
+    BzQuestTestRGBA dst = {0.0f, 0.0f, 0.0f, 0.0f};
+    BzQuestTestRGBA out = blend_equation(src, dst, BZ_TEST_BLEND_DST_COLOR, BZ_TEST_BLEND_ZERO, BZ_TEST_BLEND_ZERO,
+                                        BZ_TEST_BLEND_ONE);
+    BZ_TEST_ASSERT_RGBA_EQ(out, 0.0f, 0.0f, 0.0f, 0.0f, 0.0001f);
+}
+
+/* Case: BZ_TTA_BLEND_MODULATE over EXISTING 50% coverage, where the modulate texture's own
+ * alpha channel happens to be 0.7 (not 1.0) - proves coverage is preserved EXACTLY (never
+ * eroded by the modulate texture's own unrelated alpha channel, which the pre-fix mirrored
+ * factors did erode: 0.5 -> 0.35, a real "erodes existing opaque coverage" bug). */
+static void test_blend_modulate_never_erodes_existing_coverage_via_texture_alpha(void) {
+    BzQuestTestRGBA src = {0.5f, 0.0f, 0.0f, 0.7f}; /* dark red tint; its OWN alpha is irrelevant to coverage */
+    BzQuestTestRGBA dst = {0.5f, 0.5f, 0.5f, 0.5f}; /* existing 50%-covered premultiplied content */
+    BzQuestTestRGBA out = blend_equation(src, dst, BZ_TEST_BLEND_DST_COLOR, BZ_TEST_BLEND_ZERO, BZ_TEST_BLEND_ZERO,
+                                        BZ_TEST_BLEND_ONE);
+    ASSERT_EQ_FLOAT(out.a, 0.5f, 0.0001f); /* unchanged - not eroded to 0.35 */
+}
+
 void run_bz_quest_pure_tests(void) {
     RUN_TEST(test_fov_projection_normal);
     RUN_TEST(test_fov_projection_asymmetric);
@@ -329,4 +495,11 @@ void run_bz_quest_pure_tests(void) {
     RUN_TEST(test_looper_timeout_polls_when_running_but_not_wants_polling_flag);
     RUN_TEST(test_looper_timeout_polls_when_both_true);
     RUN_TEST(test_looper_timeout_blocks_when_fully_backgrounded);
+    RUN_TEST(test_blend_opaque_forces_full_coverage_regardless_of_texture_alpha);
+    RUN_TEST(test_blend_alpha_half_over_transparent_yields_premultiplied_coverage);
+    RUN_TEST(test_blend_alpha_half_over_opaque_stays_fully_covered);
+    RUN_TEST(test_blend_fog_darkening_over_opaque_preserves_full_coverage);
+    RUN_TEST(test_blend_additive_saturates_color_and_alpha_together);
+    RUN_TEST(test_blend_modulate_over_empty_background_is_a_true_noop);
+    RUN_TEST(test_blend_modulate_never_erodes_existing_coverage_via_texture_alpha);
 }

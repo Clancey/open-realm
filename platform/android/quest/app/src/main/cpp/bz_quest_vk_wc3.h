@@ -325,14 +325,20 @@ void bz_quest_vk_wc3_destroy(bzQuestVkWc3_t *vk3);
 /*
  * Maps a bzTTBlendMode_t value (mirrored as BZ_QUEST_TTA_BLEND_* in
  * bz_quest_vk_wc3.c - see that file's header comment) to a Vulkan color-
- * blend-attachment state and this blend mode's own depth-write default,
- * reproducing games/warcraft-3/renderer/mdx/r_mdx_geoset.c's
- * MDLX_SetBlendMode() exactly (see bz_quest_vk_wc3.c's header comment for
- * the full per-case citation table). Exposed (not `static`) so
- * bz_quest_vk_wc3_particles.c's own pipeline-variant cache can reuse the
- * identical, already-proven 7-way mapping for PRE2 particle emitters'
- * translated blend mode, rather than a second copy of this switch - DRY,
- * matching AGENTS.md's "no duplicated logic" rule.
+ * blend-attachment state and this blend mode's own depth-write default.
+ * Reproduces games/warcraft-3/renderer/mdx/r_mdx_geoset.c's
+ * MDLX_SetBlendMode() exactly for the COLOR channel (see bz_quest_vk_wc3.c's
+ * header comment for the full per-case citation table); the ALPHA (coverage)
+ * channel is DELIBERATELY NOT a 1:1 desktop reproduction (desktop's single
+ * glBlendFunc call harmlessly mirrors color factors onto an alpha channel it
+ * never reads - this Quest port's alpha channel is functionally critical,
+ * read by the OpenXR compositor to blend over real-world passthrough) - see
+ * that file's header comment and each switch case's own comment for the
+ * separately-derived, correct coverage-accumulation factor pair. Exposed
+ * (not `static`) so bz_quest_vk_wc3_particles.c's own pipeline-variant cache
+ * can reuse the identical, already-proven 7-way mapping for PRE2 particle
+ * emitters' translated blend mode, rather than a second copy of this switch
+ * - DRY, matching AGENTS.md's "no duplicated logic" rule.
  */
 void bz_quest_vk_wc3_blend_state_for_mode(uint32_t blendMode, VkPipelineColorBlendAttachmentState *outBlend,
                                           bool *outDepthWriteDefault);

@@ -18,8 +18,14 @@
 #      later draws - same rationale as layer 5D/5E), VK_CULL_MODE_NONE (a beam
 #      quad is viewed from any side) and VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 #   4. the pointer pipeline must use straight-alpha blending
-#      (SRC_ALPHA/ONE_MINUS_SRC_ALPHA) so rays read correctly over AR
-#      passthrough (matches the fog markers / HUD panels);
+#      (SRC_ALPHA/ONE_MINUS_SRC_ALPHA color, with the separately-correct
+#      ONE/ONE_MINUS_SRC_ALPHA premultiplied-coverage alpha factors added by
+#      PR #28 - see docs/quest-tabletop.md's "Premultiplied-alpha blend/
+#      coverage contract") so rays read correctly over AR passthrough
+#      (matches the fog markers / HUD panels) - via the shared
+#      bz_quest_vk_straight_over_blend_state() helper (bz_quest_vk.h/.c),
+#      not a duplicated inline literal (that helper's own factors are
+#      checked by test-wc3-premultiplied-blend-layout.sh, not here);
 #   5. the shared eye-pass must record the pointer LAST (after the HUD), in
 #      the PLAIN per-eye view*projection (physical controllers live in
 #      tracking space, not the board-folded composed space);
@@ -89,9 +95,11 @@ if ! grep -q 'inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;' "$V
     FAIL=1
 fi
 
-# (4) Straight-alpha blend over passthrough.
-if ! grep -q 'blendAttachment.srcColorBlendFactor = blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;' "$VK_POINTER_C"; then
-    echo "test-wc3-pointer-layout: $VK_POINTER_C no longer uses SRC_ALPHA source blend for the pointer" >&2
+# (4) Straight-alpha blend over passthrough - now the shared helper (PR #28
+# DRY refactor); that helper's own color+alpha factors are verified by
+# test-wc3-premultiplied-blend-layout.sh, this just confirms the call site.
+if ! grep -q 'bz_quest_vk_straight_over_blend_state(&blendAttachment);' "$VK_POINTER_C"; then
+    echo "test-wc3-pointer-layout: $VK_POINTER_C no longer uses the shared straight-alpha-over blend helper for the pointer" >&2
     FAIL=1
 fi
 

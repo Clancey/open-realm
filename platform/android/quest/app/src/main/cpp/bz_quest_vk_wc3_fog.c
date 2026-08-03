@@ -403,14 +403,8 @@ static bool create_fog_pipeline(bzQuestVkWc3Fog_t *vkFog) {
     depthStencil.depthTestEnable = VK_FALSE;
     depthStencil.depthWriteEnable = VK_FALSE;
     depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-    VkPipelineColorBlendAttachmentState blendAttachment = {0};
-    blendAttachment.blendEnable = VK_TRUE;
-    blendAttachment.srcColorBlendFactor = blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    blendAttachment.dstColorBlendFactor = blendAttachment.dstAlphaBlendFactor =
-        VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blendAttachment.colorBlendOp = blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendAttachmentState blendAttachment;
+    bz_quest_vk_straight_over_blend_state(&blendAttachment);
     VkPipelineColorBlendStateCreateInfo colorBlend = {0};
     colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     colorBlend.attachmentCount = 1;
@@ -484,14 +478,8 @@ static bool create_marker_pipeline(bzQuestVkWc3Fog_t *vkFog) {
     depthStencil.depthTestEnable = VK_TRUE;
     depthStencil.depthWriteEnable = VK_FALSE;
     depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-    VkPipelineColorBlendAttachmentState blendAttachment = {0};
-    blendAttachment.blendEnable = VK_TRUE;
-    blendAttachment.srcColorBlendFactor = blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    blendAttachment.dstColorBlendFactor = blendAttachment.dstAlphaBlendFactor =
-        VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blendAttachment.colorBlendOp = blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendAttachmentState blendAttachment;
+    bz_quest_vk_straight_over_blend_state(&blendAttachment);
     VkPipelineColorBlendStateCreateInfo colorBlend = {0};
     colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     colorBlend.attachmentCount = 1;

@@ -520,12 +520,22 @@ bool bz_quest_renderer_frame(bzQuestRenderer_t *renderer) {
         }
         projectionLayer.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
         projectionLayer.space = xr->appSpace;
-        /* Straight (non-premultiplied) alpha: see bz_quest_pure.h's
-         * bz_quest_projection_layer_flags() comment and
-         * tabletop_frag.frag - without BLEND_TEXTURE_SOURCE_ALPHA_BIT the
-         * compositor ignores alpha entirely and this layer fully occludes
-         * XR_FB_passthrough beneath it. */
-        projectionLayer.layerFlags = bz_quest_projection_layer_flags(/*unpremultipliedAlpha=*/true);
+        /* Premultiplied alpha (High-severity reviewer fix, PR #28 - see
+         * bz_quest_pure.h's bz_quest_projection_layer_flags() comment for the
+         * full derivation): BLEND_TEXTURE_SOURCE_ALPHA_BIT must stay set, or
+         * the compositor ignores alpha entirely and this layer fully
+         * occludes XR_FB_passthrough beneath it - but UNPREMULTIPLIED_ALPHA_
+         * BIT must NOT be set. Every WC3 render pass (bz_quest_vk_wc3.c's
+         * model/particle blend-mode table, bz_quest_vk_wc3_terrain.c/_fog.c/
+         * _hud.c/_pointer.c's shared bz_quest_vk_straight_over_blend_state())
+         * now accumulates a mathematically valid PREMULTIPLIED-alpha RGBA
+         * starting from this render pass's (0,0,0,0)-cleared background
+         * (bz_quest_vk_create_render_resources()'s clear value) - passing
+         * unpremultipliedAlpha=true here (as an earlier revision did) told
+         * the compositor to treat that premultiplied buffer as straight
+         * color, double-darkening every partially-transparent pixel and
+         * leaking passthrough through fog/water/HUD/selection markers. */
+        projectionLayer.layerFlags = bz_quest_projection_layer_flags(/*unpremultipliedAlpha=*/false);
         projectionLayer.viewCount = BZ_QUEST_VIEW_COUNT;
         projectionLayer.views = projectionViews;
         layers[layerCount++] = (const XrCompositionLayerBaseHeader *)&projectionLayer;

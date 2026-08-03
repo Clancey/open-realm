@@ -10,6 +10,9 @@
 
 layout(push_constant) uniform PushConsts {
     mat4 mvp;
+    /* Fragment-stage-only (not read here) - see terrain_frag.frag's own doc comment; matches
+     * warcraft_vert.vert's own "declare the whole struct on both stages" convention. */
+    vec4 coverageParams;
 } pc;
 
 layout(location = 0) in vec3 inPosition;

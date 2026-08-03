@@ -696,3 +696,19 @@ void bz_quest_vk_destroy(bzQuestVk_t *vk) {
     if (vk->instance != VK_NULL_HANDLE) vkDestroyInstance(vk->instance, NULL);
     memset(vk, 0, sizeof(*vk));
 }
+
+void bz_quest_vk_straight_over_blend_state(VkPipelineColorBlendAttachmentState *outBlend) {
+    memset(outBlend, 0, sizeof(*outBlend));
+    outBlend->colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    outBlend->blendEnable = VK_TRUE;
+    outBlend->srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    outBlend->dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    /* Coverage alpha deliberately does NOT mirror the color factors - see this
+     * function's header comment (bz_quest_vk.h) for the a-squared defect this
+     * fixes. */
+    outBlend->srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    outBlend->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    outBlend->colorBlendOp = VK_BLEND_OP_ADD;
+    outBlend->alphaBlendOp = VK_BLEND_OP_ADD;
+}

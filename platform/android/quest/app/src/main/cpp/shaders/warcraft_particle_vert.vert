@@ -15,6 +15,10 @@
 
 layout(push_constant) uniform PushConsts {
     mat4 viewProj;
+    /* Fragment-stage-only (not read here) - see warcraft_particle_frag.frag's own doc comment;
+     * matches warcraft_vert.vert's own "declare the whole struct on both stages, only the stage
+     * that needs a field actually reads it" convention. */
+    vec4 coverageParams;
 } pc;
 
 layout(location = 0) in vec3 inPosition;

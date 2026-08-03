@@ -118,6 +118,36 @@ bool bz_quest_vk_render_target(bzQuestVk_t *vk, uint32_t viewIndex, uint32_t ima
  * vk (every handle checked against VK_NULL_HANDLE). */
 void bz_quest_vk_destroy(bzQuestVk_t *vk);
 
+/*
+ * Fills `outBlend` with the ONE "standard alpha, straight-color, premultiplied-
+ * coverage over" blend state every non-blend-mode-keyed WC3 overlay pipeline
+ * needs (terrain water, fog-of-war overlay, selection markers, HUD panel/
+ * text, ray pointer/reticle) - centralized here (this is the one Vulkan
+ * header every one of those modules already includes) instead of each
+ * duplicating the same 4 blend-factor literals, per this project's DRY rule.
+ *
+ * Color: srcColorBlendFactor=SRC_ALPHA, dstColorBlendFactor=ONE_MINUS_SRC_ALPHA
+ * (the standard Porter-Duff "over" operator for a straight/non-premultiplied
+ * shader RGB output - every listed shader above writes straight color, never
+ * pre-scaling by its own alpha).
+ *
+ * Alpha (coverage): srcAlphaBlendFactor=ONE, dstAlphaBlendFactor=
+ * ONE_MINUS_SRC_ALPHA - deliberately NOT mirroring the color factors (a
+ * fixed High-severity defect: mirroring them, i.e. using SRC_ALPHA for the
+ * alpha channel's own src factor too, computes `srcAlpha*srcAlpha +
+ * dstAlpha*(1-srcAlpha)` - alpha SQUARED - instead of the correct linear
+ * coverage accumulation `srcAlpha + dstAlpha*(1-srcAlpha)`). This ONE/
+ * ONE_MINUS_SRC_ALPHA alpha pairing is what makes the render target's
+ * accumulated RGBA a mathematically valid PREMULTIPLIED-alpha buffer after
+ * any number of composited "over" layers starting from a (0,0,0,0)-cleared
+ * background (see bz_quest_projection_layer_flags()'s doc comment and
+ * docs/quest-tabletop.md's premultiplied-contract section for the full
+ * derivation/citation and the numeric reproduction that found this) -
+ * required for XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT to be
+ * correctly OMITTED from the projection layer's flags.
+ */
+void bz_quest_vk_straight_over_blend_state(VkPipelineColorBlendAttachmentState *outBlend);
+
 #ifdef __cplusplus
 }
 #endif

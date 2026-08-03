@@ -155,19 +155,42 @@ bool bz_quest_passthrough_capable(uint64_t capabilityFlags, uint64_t requiredBit
  *     the runtime ignores the layer's alpha channel entirely and treats
  *     every texel as fully opaque (alpha=1) no matter what the shader
  *     wrote - this is the bit that makes alpha matter at all.
- *   - XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT must additionally be
- *     set whenever the source color data is *not* premultiplied by its own
- *     alpha (i.e. "straight" alpha, where a half-transparent red texel is
- *     still written as full-intensity red with alpha=0.5, not half-
- *     intensity red) - tabletop_frag.frag writes exactly this straight-
- *     alpha form (`vec4(fragColor, 1.0)`, color never scaled by alpha), so
- *     the caller must pass unpremultipliedAlpha=true here. Omitting this
- *     bit for straight-alpha source data causes the runtime to composite
- *     as though the color were already premultiplied, double-darkening any
- *     partially-transparent texel (opaque texels at alpha=1.0 are
- *     unaffected either way, which is why this bug was invisible for the
- *     table/cubes themselves but fully hid passthrough at the alpha=0
- *     cleared background).
+ *   - XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT must be set ONLY when
+ *     the render target's final RGBA is *straight* (non-premultiplied - a
+ *     half-transparent red pixel stored as full-intensity red with
+ *     alpha=0.5, not half-intensity red); it must be OMITTED (as this
+ *     project's caller now always does - `unpremultipliedAlpha=false`, PR
+ *     #28) when the render target is *premultiplied* (that same pixel
+ *     stored as half-intensity red, alpha=0.5).
+ *
+ * This project's render target IS premultiplied, by construction: every WC3
+ * render pass (bz_quest_vk_wc3.c's model/particle 7-mode blend table,
+ * bz_quest_vk_wc3_terrain.c/_fog.c/_hud.c/_pointer.c's shared
+ * bz_quest_vk_straight_over_blend_state()) uses `srcColorBlendFactor=
+ * SRC_ALPHA, dstColorBlendFactor=ONE_MINUS_SRC_ALPHA` starting from this
+ * render pass's (0,0,0,0)-cleared background (bz_quest_vk_create_render_
+ * resources()'s clear value) - the standard Porter-Duff "over" operator for
+ * a straight-color shader input, which happens to accumulate a valid
+ * PREMULTIPLIED result in the render target with no extra shader work,
+ * PROVIDED the alpha channel accumulates via its own separately-correct
+ * coverage factor pair (srcAlphaBlendFactor=ONE, NOT mirroring the color
+ * factor - see that function's own doc comment for the a-squared defect
+ * this avoids). tabletop_frag.frag's simpler `vec4(fragColor, 1.0)` (always
+ * alpha 0 or 1) is trivially premultiplied too (multiplying by 0 or 1
+ * changes nothing), so this ONE shared `unpremultipliedAlpha=false` call
+ * correctly covers both the diagnostic scene and every WC3 pass.
+ *
+ * HISTORY (High-severity reviewer finding, PR #28): an earlier revision
+ * passed `unpremultipliedAlpha=true` here, reasoning (correctly, at the
+ * time) that tabletop_frag.frag's own straight, always-0-or-1 alpha needed
+ * it - but every blended WC3 pass added since then mirrors its color
+ * factors onto the alpha channel that decision assumed didn't exist, which
+ * both squares the accumulated coverage alpha AND then gets misinterpreted
+ * a second time by the compositor believing straight input, double-
+ * darkening semi-transparent content and leaking passthrough through fog/
+ * water/HUD/selection markers. Fixed by adopting ONE coherent premultiplied
+ * contract end to end instead - see docs/quest-tabletop.md's premultiplied-
+ * contract section for the full numeric reproduction and derivation.
  */
 uint64_t bz_quest_projection_layer_flags(bool unpremultipliedAlpha);
 

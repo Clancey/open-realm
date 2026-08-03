@@ -47,7 +47,12 @@ layout(push_constant) uniform PushConsts {
      * draw_layer() materialParams comment; folded in CPU-side, no separate
      * uniform needed here), y = alpha-test cutoff (0.0 = never discard; 0.5
      * for BZ_TTA_BLEND_TRANSPARENT - see renderer/r_shader.c:308's matching
-     * desktop-engine constant), z/w unused. */
+     * desktop-engine constant), z = force-coverage-alpha-to-1 flag (>0.5 for
+     * BZ_TTA_BLEND_OPAQUE/TRANSPARENT, whose blendEnable=false pipeline
+     * writes the shader's own alpha verbatim to the framebuffer - see
+     * warcraft_frag.frag and bz_quest_vk_wc3.c's draw_layer() materialParams
+     * comment for the High-severity "pinholes in solid units" fix this
+     * closes), w unused. */
     vec4 materialParams;
 } pc;
 

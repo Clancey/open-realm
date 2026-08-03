@@ -10,6 +10,18 @@
  * uniform needed here), discarding below the alpha-test cutoff for
  * BZ_TTA_BLEND_TRANSPARENT layers (cutoff 0.0 for every other blend mode, so
  * this branch is a no-op for them).
+ *
+ * Coverage alpha (materialParams.z, High-severity reviewer fix, PR #28):
+ * every surviving fragment of a BZ_TTA_BLEND_OPAQUE/TRANSPARENT layer
+ * (blendEnable=false - no blend equation runs, this shader's own alpha
+ * output is written VERBATIM to the framebuffer) writes coverage alpha =
+ * 1.0 exactly, NEVER the source texture's own alpha channel - many WC3
+ * textures carry an alpha channel unrelated to real transparency even on
+ * materials with no intended transparency, which would otherwise leave
+ * passthrough-visible "pinholes" through solid geometry once composited by
+ * the XR compositor. Every other (blended) mode still writes its real
+ * computed `alpha`, needed by bz_quest_vk_wc3_blend_state_for_mode()'s own
+ * per-mode blend equation.
  * Deliberately unlit - see that shader's header comment for why.
  */
 
@@ -29,5 +41,6 @@ void main() {
     if (alpha < pc.materialParams.y) {
         discard;
     }
-    outColor = vec4(texColor.rgb, alpha);
+    float coverageAlpha = pc.materialParams.z > 0.5 ? 1.0 : alpha;
+    outColor = vec4(texColor.rgb, coverageAlpha);
 }
