@@ -571,6 +571,29 @@ test_forbidden_validation_error_fails() {
     pass "a forbidden fatal error under a different tag/process (AndroidRuntime) fails the run loudly"
 }
 
+test_map_epoch_cache_reset_error_fails() {
+    write_state "DEV1:device" "$PKG" 1 0
+    write_full_logcat failed
+    printf '08-02 12:00:05.500 1000 1000 E OpenRealmQuest: bz_quest_vk_wc3: map-epoch model/texture cache reset failed - vkDeviceWaitIdle timed out\n' \
+        >> "$MOCK_LOGCAT"
+    if "$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" \
+        >"$scratch/out" 2>"$scratch/err"; then
+        fail "runner should fail when the PR #28 map-epoch cache-reset fix logs an error"
+    fi
+    grep -q "map-epoch GPU cache reset logged an error" "$scratch/out" || fail "expected the named map-epoch cache-reset detection: $(cat "$scratch/out")"
+    pass "a map-epoch GPU cache-reset error (bz_quest_vk_wc3.c, PR #28 fix) fails the run loudly with a named message"
+}
+
+test_map_epoch_cache_reset_absence_is_informational() {
+    write_state "DEV1:device" "$PKG" 1 0
+    write_full_logcat failed
+    out=$("$RUNNER_TOOL" --serial DEV1 --package "$PKG" --non-interactive --duration 1 --artifacts "$ARTIFACTS_ROOT" --apk "$MOCK_APK" 2>"$scratch/err") ||
+        fail "runner should still PASS when no map-epoch cache-reset error is present: $(cat "$scratch/err")"
+    printf '%s\n' "$out" | grep -q "map-epoch GPU cache reset: not independently observable" || fail "expected the informational not-observable note: $out"
+    printf '%s\n' "$out" | grep -q "PASS - acceptance evidence complete" || fail "expected overall PASS: $out"
+    pass "absence of any map-epoch cache-reset log line is reported as informational, never required"
+}
+
 test_metrics_unavailable_is_not_fatal() {
     write_state "DEV1:device" "$PKG" 1 0
     write_full_logcat failed
@@ -718,6 +741,8 @@ test_bridge_succeeded_required_when_data_staged
 test_missing_required_marker_fails
 test_timeout_incomplete_shutdown_fails
 test_forbidden_validation_error_fails
+test_map_epoch_cache_reset_error_fails
+test_map_epoch_cache_reset_absence_is_informational
 test_metrics_unavailable_is_not_fatal
 test_metrics_available_captures_csv
 test_spaces_in_data_dir_are_preserved

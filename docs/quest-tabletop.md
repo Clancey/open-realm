@@ -4630,6 +4630,7 @@ Every marker `acceptance-runner.sh` checks is the literal text of a real
 | `hand tracking enabled (...)` OR `XR_EXT_hand_tracking not supported...` | informational (optional capability) | `bz_quest_xr_hands.c` |
 | `resolved data dir ..., edition=roc\|tft` | informational, best-effort only (see below) | `bz_quest_bridge.c` |
 | `bz_quest_vk_wc3_particles:` error lines | informational (absence checked, never a positive marker) | `bz_quest_vk_wc3_particles.c` |
+| `bz_quest_vk_wc3:.*map-epoch` error lines (PR #28 cache-reset fix) | informational (absence checked, never a positive marker) | `bz_quest_vk_wc3.c` |
 | any `E`/`F`-priority logcat line (any tag), `FATAL EXCEPTION`, `backtrace:`, `SIGSEGV`, `SIGABRT`, `VUID-`, `validation layer` | **forbidden if present** (excluding the one documented `bz_quest_bridge_start failed` E-line above) | logcat structural + keyword scan |
 
 Two design points that are easy to get wrong (both were, in earlier
@@ -4772,6 +4773,32 @@ own "Exact on-device acceptance procedure" already documents in detail:
 8. Focus/suspend/resume (Oculus button / headset removal).
 9. Recenter.
 10. Haptics and visual feedback (accepted vs refused action).
+11. **Passthrough coverage/premultiplied blend correctness** (added for the
+    PR #28 premultiplied-alpha passthrough compositor contract fix - see
+    "Premultiplied-alpha blend/coverage contract" above): semi-transparent
+    layers darken/blend correctly with no double-darkening; additive
+    glows/particles never occlude the passthrough feed or geometry behind
+    them; a MODULATE team-color/glow tint never erodes or invents
+    coverage; opaque units show no pinholes even where their own texture
+    alpha is below 1. This fix adds no logging surface at all (a pure GPU
+    blend-state/shader-math change) - visual confirmation is the only
+    acceptance evidence that exists for it.
+12. **Cross-map GPU cache reload correctness** (added for the PR #28
+    map-reload GPU cache reset fix - see "Map-reload GPU cache reset"
+    above): loading a second, different map after a first shows the
+    second map's own textures/models (never the first map's stale GPU
+    resource), including for an identically-named custom-imported asset
+    path reused by both maps; only one brief `vkDeviceWaitIdle` stall
+    occurs at the moment of reload; reloading the SAME map repeatedly
+    causes no further stall/re-upload. The fix's 4 new failure-path
+    `BZ_QUEST_LOGE` lines (`bz_quest_vk_wc3.c`, all uniquely identified by
+    the substring `map-epoch`) have a dedicated named informational check
+    in the evidence table below; only the fix's *success* path (showing
+    the correct, non-stale content) has no log line at all and needs this
+    guided visual check. Requires two real, distinct staged maps with at
+    least one reused imported asset path (this environment never loads
+    any map at all - see "Current limitations" - so this was not
+    exercised even indirectly this session).
 
 Requires a real terminal (`[ -t 0 ]`): interactive mode with non-tty stdin
 fails loudly with an actionable message instead of ever fabricating a "y"

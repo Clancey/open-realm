@@ -428,6 +428,10 @@ if [ "$interactive" -eq 1 ]; then
         "The recenter button/gesture smoothly realigns the tabletop board without a visual jump or crash."
     prompt_scenario "Haptics and visual feedback" \
         "An accepted action (e.g. a successful select/order) produces a crisp haptic buzz; a refused one (disabled HUD slot, stale generation) produces a distinct, softer buzz; hovering a selectable unit highlights it."
+    prompt_scenario "Passthrough coverage/premultiplied blend correctness (PR #28 fix)" \
+        "Semi-transparent (fog/selection/HUD) layers darken/blend correctly with NO double-darkening; additive glows/particles never occlude the passthrough camera feed or geometry behind them; a team-color/glow MODULATE tint never erodes or invents coverage; opaque units show NO pinholes/see-through spots even where their own texture alpha is below 1."
+    prompt_scenario "Cross-map GPU cache reload correctness (PR #28 fix)" \
+        "Load a second, different map after a first: the second map's own textures/models display correctly (never the first map's stale GPU resource), including for any identically-named custom-imported asset path reused by both maps; only one brief hitch (a single vkDeviceWaitIdle stall) occurs at the moment of reload, and repeatedly reloading the SAME map causes no further stall/re-upload."
     printf '\n%s: guided checklist complete - see %s\n' "$tool_name" "$guided_checklist_file"
 else
     printf '%s: running non-interactively for %d seconds...\n' "$tool_name" "$duration"
@@ -612,6 +616,28 @@ else
     note_line INFO "PRE2 particle rendering: not independently observable via logcat (no success marker exists; no map is ever loaded in this layer) - no particle-renderer errors observed either"
 fi
 
+# Map-epoch GPU cache reset (PR #28 fix, bz_quest_vk_wc3.c) has no
+# positive/info-level success log either - only 4 new BZ_QUEST_LOGE
+# failure paths exist ("map-epoch model/texture cache reset failed",
+# "vkDeviceWaitIdle before map-epoch cache reset failed", "model/texture
+# cache re-init after map-epoch reset failed"), all uniquely identified by
+# the substring "map-epoch" (confirmed against bz_quest_vk_wc3.c - no
+# other log line in that file contains it). This environment never loads
+# even one map, let alone two in sequence, so the reset path never runs
+# and this is, like PRE2, a hardware+two-distinct-real-maps+human-visual-
+# confirmation-only gate (see "Cross-map GPU cache reload correctness"
+# above) - this script only checks for the ABSENCE of cache-reset errors
+# as weak, negative corroboration, never a positive/required marker. This
+# check is intentionally more specific than the generic forbidden-error
+# scan below (which would also catch it) so a failure here names the
+# exact subsystem instead of a bare "some E-line was found somewhere".
+if grep -qE 'bz_quest_vk_wc3:.*map-epoch' "$logcat_file"; then
+    note_line FAIL "map-epoch GPU cache reset logged an error - see logcat for the exact bz_quest_vk_wc3: map-epoch line"
+    overall_pass=0
+else
+    note_line INFO "map-epoch GPU cache reset: not independently observable via logcat (no success marker exists; no map is ever loaded in this layer) - no cache-reset errors observed either"
+fi
+
 # Forbidden fatal/validation errors: structural (any E/F-priority logcat
 # line, any tag/process - threadtime format's "<level> <tag>:" shape,
 # independent of preceding date/pid/tid field widths) PLUS a keyword net
@@ -623,6 +649,12 @@ fi
 # docs/quest-tabletop.md) - BZ_QUEST_LOGE is Error priority by definition,
 # so that single, correctly-classified-elsewhere line must not also trip
 # this generic forbidden-error net.
+#
+# The premultiplied-alpha/coverage fix (PR #28) adds no logging surface
+# whatsoever (a pure GPU blend-state/shader-math correctness change) and
+# is guided-checklist-only (see "Passthrough coverage/premultiplied blend
+# correctness" above) - there is nothing for this scan, or any other
+# automated check, to observe for that fix.
 forbidden_structural=$(grep -E ' (E|F) [A-Za-z_][A-Za-z0-9_.]*:' "$logcat_file" | grep -v 'bz_quest_bridge_start failed' || true)
 forbidden_keywords=$(grep -Ei 'FATAL EXCEPTION|backtrace:|SIGSEGV|SIGABRT|VUID-|validation layer' "$logcat_file" || true)
 if [ -n "$forbidden_structural" ] || [ -n "$forbidden_keywords" ]; then
