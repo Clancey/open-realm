@@ -4773,32 +4773,41 @@ own "Exact on-device acceptance procedure" already documents in detail:
 8. Focus/suspend/resume (Oculus button / headset removal).
 9. Recenter.
 10. Haptics and visual feedback (accepted vs refused action).
-11. **Passthrough coverage/premultiplied blend correctness** (added for the
-    PR #28 premultiplied-alpha passthrough compositor contract fix - see
-    "Premultiplied-alpha blend/coverage contract" above): semi-transparent
-    layers darken/blend correctly with no double-darkening; additive
-    glows/particles never occlude the passthrough feed or geometry behind
-    them; a MODULATE team-color/glow tint never erodes or invents
-    coverage; opaque units show no pinholes even where their own texture
-    alpha is below 1. This fix adds no logging surface at all (a pure GPU
-    blend-state/shader-math change) - visual confirmation is the only
+11. **Coverage-alpha correctness** (added for the PR #28 premultiplied-alpha
+    passthrough compositor contract fix - see "Premultiplied-alpha
+    blend/coverage contract" above and its own "Not verified this session"
+    disclosure for the identical, authoritative wording this mirrors):
+    (1) a translucent unit/spell effect over the passthrough camera feed is
+    not noticeably darker/more opaque than its authoring alpha implies;
+    (2) fog-of-war and the selection-marker ring do not let the real room
+    show through at their edges/overlaps; (3) HUD panels/text remain fully
+    opaque with no passthrough bleed-through; (4) solid (opaque-blend)
+    units show no pinhole/speckling from their own texture's alpha
+    channel; (5) additive spell effects (e.g. a glow) are EXPECTED to
+    still let some passthrough through even at full brightness - the
+    documented additive-over-real-world limitation, not a regression.
+    This fix adds no logging surface at all (a pure GPU blend-state/
+    shader-math change) - this exact 5-point visual check is the only
     acceptance evidence that exists for it.
-12. **Cross-map GPU cache reload correctness** (added for the PR #28
+12. **Cross-map same-path cache replacement** (added for the PR #28
     map-reload GPU cache reset fix - see "Map-reload GPU cache reset"
-    above): loading a second, different map after a first shows the
-    second map's own textures/models (never the first map's stale GPU
-    resource), including for an identically-named custom-imported asset
-    path reused by both maps; only one brief `vkDeviceWaitIdle` stall
-    occurs at the moment of reload; reloading the SAME map repeatedly
-    causes no further stall/re-upload. The fix's 4 new failure-path
-    `BZ_QUEST_LOGE` lines (`bz_quest_vk_wc3.c`, all uniquely identified by
-    the substring `map-epoch`) have a dedicated named informational check
-    in the evidence table below; only the fix's *success* path (showing
-    the correct, non-stale content) has no log line at all and needs this
-    guided visual check. Requires two real, distinct staged maps with at
-    least one reused imported asset path (this environment never loads
-    any map at all - see "Current limitations" - so this was not
-    exercised even indirectly this session).
+    above and its own "Not verified this session" disclosure for the
+    identical, authoritative wording this mirrors): with two real,
+    distinct staged maps sharing at least one reused imported asset path
+    (e.g. both importing the identical `Textures\Custom.blp`): (1) loading
+    map B after map A shows map A's units/terrain textures correctly
+    REPLACED by map B's own, never the first map's stale GPU resource,
+    even for identically-named custom imports; (2) no visible
+    hitch/frame-drop beyond the expected one-time `vkDeviceWaitIdle` stall
+    at the moment of reload; (3) repeatedly reloading the SAME map does
+    not re-upload already-resident assets (no unnecessary flush). The
+    fix's 4 new failure-path `BZ_QUEST_LOGE` lines (`bz_quest_vk_wc3.c`,
+    all uniquely identified by the substring `map-epoch`) have a dedicated
+    named informational check in the evidence table below; only the
+    fix's *success* path (showing the correct, non-stale content) has no
+    log line at all and needs this guided visual check. This environment
+    never loads any map at all - see "Current limitations" - so this was
+    not exercised even indirectly this session.
 
 Requires a real terminal (`[ -t 0 ]`): interactive mode with non-tty stdin
 fails loudly with an actionable message instead of ever fabricating a "y"

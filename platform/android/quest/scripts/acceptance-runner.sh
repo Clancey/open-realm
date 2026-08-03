@@ -428,10 +428,10 @@ if [ "$interactive" -eq 1 ]; then
         "The recenter button/gesture smoothly realigns the tabletop board without a visual jump or crash."
     prompt_scenario "Haptics and visual feedback" \
         "An accepted action (e.g. a successful select/order) produces a crisp haptic buzz; a refused one (disabled HUD slot, stale generation) produces a distinct, softer buzz; hovering a selectable unit highlights it."
-    prompt_scenario "Passthrough coverage/premultiplied blend correctness (PR #28 fix)" \
-        "Semi-transparent (fog/selection/HUD) layers darken/blend correctly with NO double-darkening; additive glows/particles never occlude the passthrough camera feed or geometry behind them; a team-color/glow MODULATE tint never erodes or invents coverage; opaque units show NO pinholes/see-through spots even where their own texture alpha is below 1."
-    prompt_scenario "Cross-map GPU cache reload correctness (PR #28 fix)" \
-        "Load a second, different map after a first: the second map's own textures/models display correctly (never the first map's stale GPU resource), including for any identically-named custom-imported asset path reused by both maps; only one brief hitch (a single vkDeviceWaitIdle stall) occurs at the moment of reload, and repeatedly reloading the SAME map causes no further stall/re-upload."
+    prompt_scenario "Coverage-alpha correctness (PR #28 premultiplied-alpha fix)" \
+        "(1) a translucent unit/spell effect over the passthrough camera feed is not noticeably darker/more opaque than its authoring alpha implies; (2) fog-of-war and the selection-marker ring do not let the real room show through at their edges/overlaps; (3) HUD panels/text remain fully opaque with no passthrough bleed-through; (4) solid (opaque-blend) units show no pinhole/speckling from their own texture's alpha channel; (5) additive spell effects (e.g. a glow) are EXPECTED to still let some passthrough through even at full brightness - documented additive-over-real-world limitation, not a regression."
+    prompt_scenario "Cross-map same-path cache replacement (PR #28 map-reload cache-reset fix)" \
+        "With two real, distinct staged maps sharing at least one reused imported asset path (e.g. both importing the identical 'Textures\\Custom.blp'): (1) loading map B after map A shows map A's units/terrain textures correctly REPLACED by map B's own, never the first map's stale GPU resource; (2) no visible hitch/frame-drop beyond the expected one-time vkDeviceWaitIdle stall at the moment of reload; (3) repeatedly reloading the SAME map does not re-upload already-resident assets (no unnecessary flush)."
     printf '\n%s: guided checklist complete - see %s\n' "$tool_name" "$guided_checklist_file"
 else
     printf '%s: running non-interactively for %d seconds...\n' "$tool_name" "$duration"
@@ -625,7 +625,7 @@ fi
 # other log line in that file contains it). This environment never loads
 # even one map, let alone two in sequence, so the reset path never runs
 # and this is, like PRE2, a hardware+two-distinct-real-maps+human-visual-
-# confirmation-only gate (see "Cross-map GPU cache reload correctness"
+# confirmation-only gate (see "Cross-map same-path cache replacement"
 # above) - this script only checks for the ABSENCE of cache-reset errors
 # as weak, negative corroboration, never a positive/required marker. This
 # check is intentionally more specific than the generic forbidden-error
@@ -650,11 +650,11 @@ fi
 # so that single, correctly-classified-elsewhere line must not also trip
 # this generic forbidden-error net.
 #
-# The premultiplied-alpha/coverage fix (PR #28) adds no logging surface
-# whatsoever (a pure GPU blend-state/shader-math correctness change) and
-# is guided-checklist-only (see "Passthrough coverage/premultiplied blend
-# correctness" above) - there is nothing for this scan, or any other
-# automated check, to observe for that fix.
+# The premultiplied-alpha/coverage-alpha fix (PR #28) adds no logging
+# surface whatsoever (a pure GPU blend-state/shader-math correctness
+# change) and is guided-checklist-only (see "Coverage-alpha correctness"
+# above) - there is nothing for this scan, or any other automated check,
+# to observe for that fix.
 forbidden_structural=$(grep -E ' (E|F) [A-Za-z_][A-Za-z0-9_.]*:' "$logcat_file" | grep -v 'bz_quest_bridge_start failed' || true)
 forbidden_keywords=$(grep -Ei 'FATAL EXCEPTION|backtrace:|SIGSEGV|SIGABRT|VUID-|validation layer' "$logcat_file" || true)
 if [ -n "$forbidden_structural" ] || [ -n "$forbidden_keywords" ]; then
